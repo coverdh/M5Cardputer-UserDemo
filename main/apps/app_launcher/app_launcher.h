@@ -19,19 +19,19 @@
 class Launcher : public mooncake::AppAbility {
 private:
     struct KeyboardBarState_t {
-        bool caps_lock = false;
-        bool fn        = false;
-        bool ctrl      = false;
-        bool opt       = false;
-        bool alt       = false;
+        bool shift = false;
+        bool fn    = false;
+        bool ctrl  = false;
+        bool opt   = false;
+        bool alt   = false;
 
         void reset()
         {
-            caps_lock = false;
-            fn        = false;
-            ctrl      = false;
-            opt       = false;
-            alt       = false;
+            shift = false;
+            fn    = false;
+            ctrl  = false;
+            opt   = false;
+            alt   = false;
         }
     };
 

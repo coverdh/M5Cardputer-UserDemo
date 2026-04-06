@@ -38,7 +38,7 @@ void Launcher::render_keyboard_bar()
     int height = 17;
     int gap_y  = 3;
 
-    if (_data.keyboard_state.caps_lock) {
+    if (_data.keyboard_state.shift) {
         GetHAL().canvasKeyboardBar.pushImage(x, y, width, height, image_data_Aa);
     } else {
         GetHAL().canvasKeyboardBar.pushImage(x, y, width, height, image_data_Aa0);
@@ -80,29 +80,31 @@ void Launcher::start_keyboard_bar()
 {
     GetHAL().keyboard.onKeyEvent.connect([this](const Keyboard::KeyEvent_t& keyEvent) {
         bool need_render = false;
-        switch (keyEvent.keyCode) {
-            case KEY_CAPSLOCK:
-                _data.keyboard_state.caps_lock = keyEvent.state;
-                need_render                    = true;
-                break;
-            case KEY_LEFTCTRL:
-                _data.keyboard_state.ctrl = keyEvent.state;
-                need_render               = true;
-                break;
-            case KEY_LEFTMETA:
-                _data.keyboard_state.opt = keyEvent.state;
-                need_render              = true;
-                break;
-            case KEY_LEFTALT:
-                _data.keyboard_state.alt = keyEvent.state;
-                need_render              = true;
-                break;
-            case KEY_LEFTSHIFT:
-                _data.keyboard_state.fn = keyEvent.state;
-                need_render             = true;
-                break;
-            default:
-                break;
+        // Fn key emits KEY_NONE with isModifier - handle before the switch
+        if (keyEvent.keyCode == KEY_NONE && keyEvent.isModifier) {
+            _data.keyboard_state.fn = keyEvent.state;
+            need_render             = true;
+        } else {
+            switch (keyEvent.keyCode) {
+                case KEY_LEFTSHIFT:
+                    _data.keyboard_state.shift = keyEvent.state;
+                    need_render                = true;
+                    break;
+                case KEY_LEFTCTRL:
+                    _data.keyboard_state.ctrl = keyEvent.state;
+                    need_render               = true;
+                    break;
+                case KEY_LEFTMETA:
+                    _data.keyboard_state.opt = keyEvent.state;
+                    need_render              = true;
+                    break;
+                case KEY_LEFTALT:
+                    _data.keyboard_state.alt = keyEvent.state;
+                    need_render              = true;
+                    break;
+                default:
+                    break;
+            }
         }
 
         if (need_render) {

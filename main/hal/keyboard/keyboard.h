@@ -32,14 +32,6 @@ public:
     {
         return _modifier_mask;
     }
-    inline bool isCapsLocked()
-    {
-        return _is_capslock_locked;
-    }
-    inline void setCapsLocked(bool locked)
-    {
-        _is_capslock_locked = locked;
-    }
     inline const KeyEvent_t& getLatestKeyEvent()
     {
         return _key_event_buffer;
@@ -54,8 +46,7 @@ public:
 private:
     Adafruit_TCA8418* _tca8418 = nullptr;
     uint8_t _modifier_mask     = 0;
-    bool _capslock_state       = false;
-    bool _is_capslock_locked   = false;
+    bool _fn_state             = false;
     KeyEventRaw_t _key_event_raw_buffer;
     KeyEvent_t _key_event_buffer;
 
