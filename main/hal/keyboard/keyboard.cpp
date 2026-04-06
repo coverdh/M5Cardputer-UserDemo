@@ -130,6 +130,24 @@ void Keyboard::update_modifier_mask(const KeyEventRaw_t& key)
     if (key.row == 2 && key.col == 0) {
         _fn_state = key.state;
     }
+
+    // Check alt key (3, 2)
+    if (key.row == 3 && key.col == 2) {
+        if (key.state) {
+            _modifier_mask |= KEY_MOD_LALT;
+        } else {
+            _modifier_mask &= ~KEY_MOD_LALT;
+        }
+    }
+
+    // Check opt/meta key (3, 1)
+    if (key.row == 3 && key.col == 1) {
+        if (key.state) {
+            _modifier_mask |= KEY_MOD_LMETA;
+        } else {
+            _modifier_mask &= ~KEY_MOD_LMETA;
+        }
+    }
 }
 
 struct KeyValue_t {
@@ -245,7 +263,8 @@ Keyboard::KeyEvent_t Keyboard::convertToKeyEvent(const KeyEventRaw_t& key)
         ret.keyName = _key_value_map[key.row][key.col].firstName;
     }
 
-    ret.isModifier = (ret.keyCode == KEY_LEFTSHIFT || ret.keyCode == KEY_LEFTCTRL);
+    ret.isModifier = (ret.keyCode == KEY_LEFTSHIFT || ret.keyCode == KEY_LEFTCTRL ||
+                      ret.keyCode == KEY_LEFTALT   || ret.keyCode == KEY_LEFTMETA);
 
     return ret;
 }

@@ -581,20 +581,14 @@ void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
 
         // Send key press
         ble_hid_device_helper_send(buffer);
-        mclog::tagDebug(_tag, "ble keyboard sent key: {} (code: {}, modifier: 0x{:02x})",
+        mclog::tagDebug(_tag, "ble keyboard sent key: {} (code: {}, modifier: {:08b})",
                         keyEvent.keyName ? keyEvent.keyName : "special", (int)keyEvent.keyCode, modifierMask);
     } else {
-        // Key released - for modifier keys, update modifier state and send
-        if (keyEvent.isModifier) {
-            uint8_t modifierMask = keyboard.getModifierMask();
-            buffer[0]            = modifierMask;
-            buffer[2]            = 0;
-        } else {
-            // For non-modifier keys, send empty buffer (all keys up)
-            memset(buffer, 0, sizeof(buffer));
-        }
+        // Key released - always preserve current modifier state so held modifiers (e.g. ALT) stay active
+        buffer[0] = keyboard.getModifierMask();
+        buffer[2] = 0;
         ble_hid_device_helper_send(buffer);
-        mclog::tagDebug(_tag, "ble keyboard key released");
+        mclog::tagDebug(_tag, "ble keyboard key released (modifier: {:08b})", buffer[0]);
     }
 }
 
@@ -642,12 +636,16 @@ void Hal::handle_usb_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
     // Handle key press/release
     if (keyEvent.state) {
         uint8_t mod = GetHAL().keyboard.getModifierMask() | keyEvent.extraModifiers;
-        uint8_t keycode[6] = {keyEvent.keyCode};
-        tusb_hid_device_helper_report(mod, keycode);
-        mclog::tagDebug(_tag, "usb keyboard sent key: {} (code: {})", keyEvent.keyName ? keyEvent.keyName : "special",
-                        (int)keyEvent.keyCode);
+        if (keyEvent.isModifier) {
+            tusb_hid_device_helper_report(mod, NULL);
+        } else {
+            uint8_t keycode[6] = {keyEvent.keyCode};
+            tusb_hid_device_helper_report(mod, keycode);
+        }
+        mclog::tagDebug(_tag, "usb keyboard sent key: {} (code: {}, modifier: {:08b})",
+                        keyEvent.keyName ? keyEvent.keyName : "special", (int)keyEvent.keyCode, mod);
     } else {
-        tusb_hid_device_helper_report(0, NULL);
+        tusb_hid_device_helper_report(GetHAL().keyboard.getModifierMask(), NULL);
         mclog::tagDebug(_tag, "usb keyboard key released");
     }
 }
