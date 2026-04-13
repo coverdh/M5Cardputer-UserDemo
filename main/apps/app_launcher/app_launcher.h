@@ -56,7 +56,7 @@ private:
         SystemState_t system_state;
 
         // Keyboard bar
-        KeyboardBarState_t keybaord_state;
+        KeyboardBarState_t keyboard_state;
 
         char string_buffer[100];
 
