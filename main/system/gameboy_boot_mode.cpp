@@ -6,7 +6,7 @@
 
 static constexpr uint32_t GAMEBOY_BOOT_MAGIC = 0x47424D44;  // GBMD
 static constexpr uint32_t GAMEBOY_BOOT_EXIT_MAGIC = 0x47425854;  // GBXT
-static constexpr bool GAMEBOY_FORCE_AUTO_BOOT = true;
+static constexpr bool GAMEBOY_FORCE_AUTO_BOOT = false;
 
 RTC_NOINIT_ATTR static uint32_t s_gameboy_boot_magic;
 RTC_NOINIT_ATTR static uint32_t s_gameboy_boot_magic_inv;

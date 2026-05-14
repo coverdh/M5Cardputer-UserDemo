@@ -50,6 +50,10 @@ extern "C" {
 #define PEANUT_GB_HIGH_LCD_ACCURACY 0
 #include "emu/peanut_gb.h"
 
+extern "C" {
+#include "emu/gnuboy/gnuboy.h"
+}
+
 using namespace mooncake;
 
 static constexpr size_t DEFAULT_SAVE_SIZE = 32 * 1024;
@@ -76,6 +80,11 @@ static constexpr uint32_t AUDIO_FRAME_PERIOD_US = 1000000 / 60;
 static constexpr UBaseType_t AUDIO_WRITE_QUEUE_DEPTH = 1024;
 static constexpr int AUDIO_OUTPUT_GAIN_NUM = 3;
 static constexpr int AUDIO_OUTPUT_GAIN_DEN = 4;
+static constexpr int GNUBOY_AUDIO_GAIN_NUM = 1;
+static constexpr int GNUBOY_AUDIO_GAIN_DEN = 2;
+static constexpr size_t GNUBOY_AUDIO_STEREO_SAMPLES = 1024;
+static constexpr size_t GNUBOY_AUDIO_MONO_FRAMES = GNUBOY_AUDIO_STEREO_SAMPLES / 2;
+static constexpr size_t GNUBOY_AUDIO_PLAY_BUFFERS = 3;
 static constexpr int64_t GB_EMULATION_FRAME_PERIOD_US = 16743;
 static constexpr uint32_t GB_VIDEO_FAST_INTERVAL_MS = 50;
 static constexpr uint32_t GB_VIDEO_NORMAL_INTERVAL_MS = 66;
@@ -106,11 +115,18 @@ static minigb_apu_ctx s_audio_context;
 static std::array<audio_sample_t, AUDIO_SAMPLES_TOTAL> s_audio_stereo_buffer = {};
 static std::array<int16_t, AUDIO_SAMPLES> s_audio_mono_buffer = {};
 static std::array<uint16_t, GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT> s_cgb_framebuffer_storage = {};
-static std::array<int16_t, AUDIO_BUFFER_SIZE> s_cgb_audio_stereo_buffer = {};
-static std::array<int16_t, AUDIO_BUFFER_SIZE / 2> s_cgb_audio_mono_buffer = {};
+static std::array<int16_t, GNUBOY_AUDIO_STEREO_SAMPLES> s_cgb_audio_stereo_buffer = {};
+static std::array<std::array<int16_t, GNUBOY_AUDIO_MONO_FRAMES>, GNUBOY_AUDIO_PLAY_BUFFERS> s_gnuboy_audio_mono_buffers = {};
+static std::array<int16_t, AUDIO_BUFFER_SIZE / 2> s_gearboy_cgb_audio_mono_buffer = {};
 static std::array<uint16_t, GB_ROM_BANK_MISS_HISTOGRAM> s_rom_bank_miss_counts = {};
 static AppPokemonYellow* s_cgb_active_app = nullptr;
+static AppPokemonYellow* s_gnuboy_active_app = nullptr;
 static volatile bool s_cgb_save_dirty_flag = false;
+static volatile bool s_gnuboy_sound_enabled = false;
+static size_t s_gnuboy_audio_buffer_index = 0;
+static int32_t s_gnuboy_audio_filter = 0;
+static uint32_t s_gnuboy_audio_frames = 0;
+static uint32_t s_gnuboy_audio_play_failures = 0;
 static volatile bool s_audio_output_enabled = false;
 static bool s_audio_context_ready = false;
 static portMUX_TYPE s_audio_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -169,6 +185,55 @@ static uint32_t fnv1a_update(uint32_t hash, const uint8_t* data, size_t size)
 static void cgb_ram_changed_callback()
 {
     s_cgb_save_dirty_flag = true;
+}
+
+static void gnuboyAudioCallback(void* buffer, size_t length)
+{
+    if (!s_gnuboy_sound_enabled || !buffer || length < 2) {
+        return;
+    }
+
+    const auto* stereo = static_cast<const int16_t*>(buffer);
+    auto& mono = s_gnuboy_audio_mono_buffers[s_gnuboy_audio_buffer_index++ % s_gnuboy_audio_mono_buffers.size()];
+    const size_t frames = std::min(length / 2, mono.size());
+    for (size_t i = 0; i < frames; ++i) {
+        const int32_t left = stereo[i * 2];
+        const int32_t right = stereo[i * 2 + 1];
+        int32_t mixed = ((left + right) / 2) * GNUBOY_AUDIO_GAIN_NUM / GNUBOY_AUDIO_GAIN_DEN;
+        s_gnuboy_audio_filter += (mixed - s_gnuboy_audio_filter) / 4;
+        mixed = s_gnuboy_audio_filter;
+        mixed = std::clamp<int32_t>(mixed, INT16_MIN, INT16_MAX);
+        mono[i] = static_cast<int16_t>(mixed);
+    }
+    const bool queued = GetHAL().speaker.playRaw(mono.data(), frames, AUDIO_SAMPLE_RATE, false, 1, 0, false);
+    ++s_gnuboy_audio_frames;
+    if (!queued) {
+        ++s_gnuboy_audio_play_failures;
+    }
+}
+
+static const char* gnuboyColorModeName(int mode)
+{
+    switch (mode & 7) {
+        case 0:
+            return "RGB raw";
+        case 1:
+            return "RGB LCD";
+        case 2:
+            return "BGR raw";
+        case 3:
+            return "BGR LCD";
+        case 4:
+            return "RGB raw swap";
+        case 5:
+            return "RGB LCD swap";
+        case 6:
+            return "BGR raw swap";
+        case 7:
+            return "BGR LCD swap";
+        default:
+            return "unknown";
+    }
 }
 
 static constexpr std::array<uint8_t, 94> s_cgb_boot_title_checksums = {
@@ -296,17 +361,6 @@ static bool shouldForcePokemonGoldRtcMapper(const uint8_t* rom, const std::strin
     const bool mbc5WithoutRtc = rom[0x0147] == 0x19 || rom[0x0147] == 0x1A || rom[0x0147] == 0x1B;
     const bool hasSaveRam = rom[0x0149] != 0;
     return looksLikeGoldOrSilver && cgbCapable && mbc5WithoutRtc && hasSaveRam;
-}
-
-static bool looksLikePokemonGoldRom(const std::string& value)
-{
-    auto lower = value;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return lower.find("gold") != std::string::npos ||
-           lower.find("pokemon-gold") != std::string::npos ||
-           lower.find("pockmon-gold") != std::string::npos;
 }
 
 static bool forcePokemonGoldRtcMapper(uint8_t* rom, const std::string& path)
@@ -671,7 +725,7 @@ void AppPokemonYellow::onOpen()
     mclog::tagInfo(getAppInfo().name, "on open");
     logGameBoyHeap("onOpen");
     if (!gameboy_boot_mode_is_active()) {
-        mclog::tagInfo(getAppInfo().name, "switching to dedicated GameBoy mode");
+        mclog::tagInfo(getAppInfo().name, "entering dedicated GameBoy mode");
         gameboy_boot_mode_enter();
         esp_restart();
         return;
@@ -680,6 +734,12 @@ void AppPokemonYellow::onOpen()
     _opened_at = GetHAL().millis();
     _mode = Mode::Browser;
     _sound_enabled = GetHAL().getSettings().GetInt("gb_sound", 0) != 0;
+    _gnuboy_color_mode = GetHAL().getSettings().GetInt("gb_color_mode", 4) & 7;
+    gnuboy_set_color_mode(_gnuboy_color_mode);
+    mclog::tagInfo(getAppInfo().name,
+                   "gnuboy color mode: {} ({})",
+                   _gnuboy_color_mode,
+                   gnuboyColorModeName(_gnuboy_color_mode));
     audio_set_output_enabled(false);
     _pending_launch = false;
     _pending_probe = false;
@@ -688,15 +748,6 @@ void AppPokemonYellow::onOpen()
     setStatus("Checking SD");
     probe();
     logGameBoyHeap("afterProbe");
-    if (gameboy_boot_mode_is_active() && _state.romFound) {
-        createSaveIfNeeded();
-        if (!_state.savePath.empty()) {
-            _state.saveFound = fileExists(_state.savePath.c_str(), &_state.saveSize);
-        }
-        setStatus("Auto launching Gold");
-        _pending_launch = true;
-        mclog::tagInfo(getAppInfo().name, "dedicated mode auto launch queued: '{}'", _state.romPath);
-    }
     render();
 }
 
@@ -787,21 +838,7 @@ void AppPokemonYellow::probe()
 
     if (!_roms.empty()) {
         _selected_rom = std::max(0, std::min(_selected_rom, static_cast<int>(_roms.size()) - 1));
-        if (gameboy_boot_mode_is_active()) {
-            int goldIndex = -1;
-            for (int i = 0; i < static_cast<int>(_roms.size()); ++i) {
-                if (looksLikePokemonGoldRom(_roms[i].name) || looksLikePokemonGoldRom(_roms[i].path)) {
-                    goldIndex = i;
-                    break;
-                }
-            }
-            if (goldIndex >= 0) {
-                _selected_rom = goldIndex;
-                mclog::tagInfo(getAppInfo().name, "dedicated mode locked ROM to Gold: index={}", _selected_rom);
-            } else {
-                mclog::tagWarn(getAppInfo().name, "dedicated mode could not find Gold ROM, using selected index={}", _selected_rom);
-            }
-        } else if (!previousPath.empty()) {
+        if (!previousPath.empty()) {
             for (int i = 0; i < static_cast<int>(_roms.size()); ++i) {
                 if (_roms[i].path == previousPath) {
                     _selected_rom = i;
@@ -1100,13 +1137,16 @@ void AppPokemonYellow::startEmulator()
                    forcedRtcMapper ? "forced" : "header");
     if (paletteSelection.cgb_capable) {
         if (flashBackend) {
+            if (startGnuboyCgbEmulator()) {
+                return;
+            }
             const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
             if (largestBlock >= 65536) {
                 startCgbEmulator();
                 return;
             }
             mclog::tagWarn(getAppInfo().name,
-                           "CGB core skipped: largest contiguous internal block={} bytes, Gearboy needs >=65536; using DMG fallback",
+                           "CGB cores skipped: largest contiguous internal block={} bytes, using DMG fallback",
                            static_cast<unsigned>(largestBlock));
             setStatus("CGB RAM low, DMG fallback");
             renderBrowser();
@@ -1190,6 +1230,111 @@ void AppPokemonYellow::startEmulator()
     startEmulatorTask();
     audio_reset();
     audio_set_output_enabled(_sound_enabled);
+}
+
+bool AppPokemonYellow::startGnuboyCgbEmulator()
+{
+    if (!_rom_flash_data || _rom_flash_size == 0) {
+        mclog::tagWarn(getAppInfo().name, "gnuboy CGB needs flash cache");
+        return false;
+    }
+
+    releaseFramebuffer();
+    if (!allocateCgbFramebuffer()) {
+        mclog::tagWarn(getAppInfo().name, "gnuboy CGB framebuffer allocation failed");
+        return false;
+    }
+
+    s_gnuboy_active_app = this;
+    s_gnuboy_sound_enabled = _sound_enabled;
+    s_gnuboy_audio_buffer_index = 0;
+    s_gnuboy_audio_filter = 0;
+    s_gnuboy_audio_frames = 0;
+    s_gnuboy_audio_play_failures = 0;
+    _gnuboy_active = false;
+    _gnuboy_pad = 0;
+
+    gnuboy_set_sram_buffer(s_save_ram.data(), s_save_ram.size());
+    gnuboy_set_color_mode(_gnuboy_color_mode);
+    if (gnuboy_init(AUDIO_SAMPLE_RATE, GB_AUDIO_STEREO_S16, GB_PIXEL_565_LE, nullptr, gnuboyAudioCallback) < 0) {
+        mclog::tagWarn(getAppInfo().name, "gnuboy init failed");
+        gnuboy_clear_sram_buffer();
+        s_gnuboy_active_app = nullptr;
+        releaseCgbFramebuffer();
+        return false;
+    }
+
+    gnuboy_set_framebuffer(_cgb_framebuffer);
+    gnuboy_set_soundbuffer(s_cgb_audio_stereo_buffer.data(), s_cgb_audio_stereo_buffer.size());
+
+    if (gnuboy_load_rom(_rom_flash_data, _rom_flash_size) < 0) {
+        mclog::tagWarn(getAppInfo().name, "gnuboy ROM load failed");
+        gnuboy_free_rom();
+        gnuboy_clear_sram_buffer();
+        s_gnuboy_active_app = nullptr;
+        releaseCgbFramebuffer();
+        return false;
+    }
+
+    gnuboy_set_palette(GB_PALETTE_CGB);
+    gnuboy_reset(true);
+    _save_ram_size = DEFAULT_SAVE_SIZE;
+    if (!_state.savePath.empty()) {
+        std::fill(s_save_ram.begin(), s_save_ram.end(), 0xFF);
+        FILE* fp = std::fopen(_state.savePath.c_str(), "rb");
+        size_t bytesRead = 0;
+        if (fp) {
+            bytesRead = std::fread(s_save_ram.data(), 1, DEFAULT_SAVE_SIZE, fp);
+            std::fclose(fp);
+        }
+        printf("gnuboy SRAM load: path=%s bytes=%u\n",
+               _state.savePath.c_str(),
+               static_cast<unsigned>(bytesRead));
+    }
+    std::time_t now = std::time(nullptr);
+    if (now > 24 * 60 * 60) {
+        std::tm localTime {};
+        localtime_r(&now, &localTime);
+        gnuboy_set_time(localTime.tm_yday, localTime.tm_hour, localTime.tm_min, localTime.tm_sec);
+    }
+
+    _gnuboy_active = true;
+    _save_dirty = false;
+    _last_save_flush = GetHAL().millis();
+    _last_save_write = 0;
+    _mode = Mode::Emulator;
+    _emulator_frame_ready = false;
+    _render_geometry_valid = false;
+    _perf_window_start = GetHAL().millis();
+    _perf_emulated_frames = 0;
+    _perf_drawn_frames = 0;
+    _perf_skipped_video_frames = 0;
+    _perf_frame_ms_total = 0;
+    _perf_frame_ms_max = 0;
+    _perf_draw_ms_total = 0;
+    _perf_rom_loads = 0;
+    _perf_rom_load_ms = 0;
+    _video_frame_interval_ms = _sound_enabled ? GB_VIDEO_NORMAL_INTERVAL_MS : GB_VIDEO_FAST_INTERVAL_MS;
+    _next_video_frame_due = 0;
+    _next_emulation_frame_due_us = 0;
+    audio_set_output_enabled(false);
+    audio::set_keyboard_sfx_enable(false);
+    audio::set_global_shortcuts_enable(false);
+    GetHAL().setFullscreenMode(true);
+    GetHAL().display.fillScreen(TFT_BLACK);
+    GetHAL().display.startWrite();
+    _display_write_active = true;
+    logGameBoyHeap("beforeGnuboyTask");
+    mclog::tagInfo(getAppInfo().name,
+                   "gnuboy CGB core started: rom='{}' mapped={} save='{}' sound={} color={} ({})",
+                   _state.romPath,
+                   static_cast<unsigned>(_rom_flash_size),
+                   _state.savePath,
+                   _sound_enabled ? "on" : "off",
+                   _gnuboy_color_mode,
+                   gnuboyColorModeName(_gnuboy_color_mode));
+    startEmulatorTask();
+    return true;
 }
 
 void AppPokemonYellow::startCgbEmulator()
@@ -1284,7 +1429,7 @@ void AppPokemonYellow::startCgbEmulator()
 
 void AppPokemonYellow::stopEmulator()
 {
-    if (!_gb && !_cgb_core && !_rom_file && !_rom_flash_data && !_emulator_task_handle && !_framebuffer && !_cgb_framebuffer) {
+    if (!_gb && !_cgb_core && !_gnuboy_active && !_rom_file && !_rom_flash_data && !_emulator_task_handle && !_framebuffer && !_cgb_framebuffer) {
         return;
     }
 
@@ -1298,7 +1443,14 @@ void AppPokemonYellow::stopEmulator()
         delete _cgb_core;
         _cgb_core = nullptr;
     }
+    if (_gnuboy_active) {
+        gnuboy_free_rom();
+        gnuboy_clear_sram_buffer();
+        _gnuboy_active = false;
+    }
     s_cgb_active_app = nullptr;
+    s_gnuboy_active_app = nullptr;
+    s_gnuboy_sound_enabled = false;
     s_cgb_save_dirty_flag = false;
     if (_rom_file) {
         std::fclose(_rom_file);
@@ -1336,6 +1488,19 @@ void AppPokemonYellow::stopEmulator()
 
 void AppPokemonYellow::runEmulatorFrame()
 {
+    if (_gnuboy_active) {
+        if (_emulator_task_handle) {
+            if (_emulator_frame_ready) {
+                _emulator_frame_ready = false;
+                flushSaveRam(false);
+            }
+            GetHAL().feedTheDog();
+            return;
+        }
+        runGnuboyEmulatorFrame();
+        return;
+    }
+
     if (_cgb_core) {
         if (_emulator_task_handle) {
             if (_emulator_frame_ready) {
@@ -1463,6 +1628,87 @@ void AppPokemonYellow::renderEmulatorFrame()
 {
 }
 
+void AppPokemonYellow::runGnuboyEmulatorFrame()
+{
+    if (!_gnuboy_active || !_cgb_framebuffer) {
+        return;
+    }
+
+    int64_t nowUs = esp_timer_get_time();
+    if (_next_emulation_frame_due_us == 0) {
+        _next_emulation_frame_due_us = nowUs;
+    } else if (nowUs < _next_emulation_frame_due_us) {
+        const int64_t waitUs = _next_emulation_frame_due_us - nowUs;
+        if (waitUs >= 1000) {
+            vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(waitUs / 1000)));
+        }
+    }
+
+    const uint32_t frameStart = GetHAL().millis();
+    bool drawThisFrame = false;
+    if (_next_video_frame_due == 0 || frameStart >= _next_video_frame_due) {
+        drawThisFrame = true;
+        _next_video_frame_due = frameStart + _video_frame_interval_ms;
+    }
+
+    s_gnuboy_sound_enabled = _sound_enabled;
+    gnuboy_run(drawThisFrame);
+
+    ++_perf_emulated_frames;
+    const uint32_t frameElapsed = GetHAL().millis() - frameStart;
+    _perf_frame_ms_total += frameElapsed;
+    if (frameElapsed > _perf_frame_ms_max) {
+        _perf_frame_ms_max = frameElapsed;
+    }
+    if (drawThisFrame) {
+        renderCgbEmulatorFrame();
+    } else {
+        ++_perf_skipped_video_frames;
+    }
+
+    _next_emulation_frame_due_us += GB_EMULATION_FRAME_PERIOD_US;
+    nowUs = esp_timer_get_time();
+    if (nowUs - _next_emulation_frame_due_us > GB_EMULATION_FRAME_PERIOD_US * 2) {
+        _next_emulation_frame_due_us = nowUs;
+    }
+
+    const uint32_t now = GetHAL().millis();
+    if (_perf_window_start == 0) {
+        _perf_window_start = now;
+    } else if (now - _perf_window_start >= 3000) {
+        const uint32_t elapsed = now - _perf_window_start;
+        const uint32_t emuFps = _perf_emulated_frames * 1000 / elapsed;
+        _video_frame_interval_ms = emuFps < 45 ? GB_VIDEO_STRESS_INTERVAL_MS :
+                                   (_sound_enabled ? GB_VIDEO_NORMAL_INTERVAL_MS : GB_VIDEO_FAST_INTERVAL_MS);
+        mclog::tagInfo(getAppInfo().name,
+                       "perf: emu_fps={} draw_fps={} skip={} video_ms={} frame_avg={} frame_max={} draw_ms={} sound={} audio_frames={} audio_fail={} mode=gnuboy-cgb heap={}",
+                       static_cast<unsigned>(emuFps),
+                       static_cast<unsigned>(_perf_drawn_frames * 1000 / elapsed),
+                       static_cast<unsigned>(_perf_skipped_video_frames),
+                       static_cast<unsigned>(_video_frame_interval_ms),
+                       static_cast<unsigned>(_perf_emulated_frames ? _perf_frame_ms_total / _perf_emulated_frames : 0),
+                       static_cast<unsigned>(_perf_frame_ms_max),
+                       static_cast<unsigned>(_perf_draw_ms_total),
+                       _sound_enabled ? "on" : "off",
+                       static_cast<unsigned>(s_gnuboy_audio_frames),
+                       static_cast<unsigned>(s_gnuboy_audio_play_failures),
+                       static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        s_gnuboy_audio_frames = 0;
+        s_gnuboy_audio_play_failures = 0;
+        _perf_window_start = now;
+        _perf_emulated_frames = 0;
+        _perf_drawn_frames = 0;
+        _perf_skipped_video_frames = 0;
+        _perf_frame_ms_total = 0;
+        _perf_frame_ms_max = 0;
+        _perf_draw_ms_total = 0;
+    }
+
+    _emulator_frame_ready = true;
+    flushSaveRam(false);
+    GetHAL().feedTheDog();
+}
+
 void AppPokemonYellow::renderCgbEmulatorFrame()
 {
     if (!_cgb_framebuffer) {
@@ -1533,15 +1779,15 @@ void AppPokemonYellow::runCgbEmulatorFrame()
     _cgb_core->SetSoundMute(!_sound_enabled);
     _cgb_core->RunToVBlank(_cgb_framebuffer, s_cgb_audio_stereo_buffer.data(), &sampleCount, false, nullptr);
     if (_sound_enabled && sampleCount > 1) {
-        const size_t frames = std::min(static_cast<size_t>(sampleCount / 2), s_cgb_audio_mono_buffer.size());
+        const size_t frames = std::min(static_cast<size_t>(sampleCount / 2), s_gearboy_cgb_audio_mono_buffer.size());
         for (size_t i = 0; i < frames; ++i) {
             const int32_t left = s_cgb_audio_stereo_buffer[i * 2];
             const int32_t right = s_cgb_audio_stereo_buffer[i * 2 + 1];
             int32_t mixed = ((left + right) / 2) * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
             mixed = std::clamp<int32_t>(mixed, INT16_MIN, INT16_MAX);
-            s_cgb_audio_mono_buffer[i] = static_cast<int16_t>(mixed);
+            s_gearboy_cgb_audio_mono_buffer[i] = static_cast<int16_t>(mixed);
         }
-        GetHAL().speaker.playRaw(s_cgb_audio_mono_buffer.data(), frames, AUDIO_SAMPLE_RATE, false, 1, 0, false);
+        GetHAL().speaker.playRaw(s_gearboy_cgb_audio_mono_buffer.data(), frames, AUDIO_SAMPLE_RATE, false, 1, 0, false);
     }
 
     ++_perf_emulated_frames;
@@ -1872,15 +2118,33 @@ void AppPokemonYellow::toggleSound()
 {
     _sound_enabled = !_sound_enabled;
     if (_mode == Mode::Emulator) {
-        audio_set_output_enabled(_sound_enabled);
+        if (_gnuboy_active) {
+            s_gnuboy_sound_enabled = _sound_enabled;
+            GetHAL().speaker.stop(0);
+        } else {
+            audio_set_output_enabled(_sound_enabled);
+        }
         _video_frame_interval_ms = _sound_enabled ? GB_VIDEO_NORMAL_INTERVAL_MS : GB_VIDEO_FAST_INTERVAL_MS;
         _next_video_frame_due = 0;
     }
     GetHAL().getSettings().SetInt("gb_sound", _sound_enabled ? 1 : 0);
     setStatus(_sound_enabled ? "Sound on" : "Sound off");
     mclog::tagInfo(getAppInfo().name,
-                   "sound toggled: {} (MiniGB APU)",
-                   _sound_enabled ? "on" : "off");
+                   "sound toggled: {} ({})",
+                   _sound_enabled ? "on" : "off",
+                   _gnuboy_active ? "gnuboy" : "MiniGB APU");
+}
+
+void AppPokemonYellow::cycleGnuboyColorMode()
+{
+    _gnuboy_color_mode = (_gnuboy_color_mode + 1) & 7;
+    gnuboy_set_color_mode(_gnuboy_color_mode);
+    GetHAL().getSettings().SetInt("gb_color_mode", _gnuboy_color_mode);
+    setStatus(fmt::format("Color {}", gnuboyColorModeName(_gnuboy_color_mode)));
+    mclog::tagInfo(getAppInfo().name,
+                   "gnuboy color mode changed: {} ({})",
+                   _gnuboy_color_mode,
+                   gnuboyColorModeName(_gnuboy_color_mode));
 }
 
 bool AppPokemonYellow::handleSystemShortcut(const Keyboard::KeyEvent_t& keyEvent)
@@ -1907,6 +2171,11 @@ bool AppPokemonYellow::handleSystemShortcut(const Keyboard::KeyEvent_t& keyEvent
         return true;
     }
 
+    if (keyEvent.keyCode == KEY_C) {
+        cycleGnuboyColorMode();
+        return true;
+    }
+
     return false;
 }
 
@@ -1918,7 +2187,13 @@ void AppPokemonYellow::emulatorTaskEntry(void* arg)
 void AppPokemonYellow::emulatorTaskLoop()
 {
     _emulator_task_running = true;
-    while (!_emulator_task_stop && (_gb || _cgb_core)) {
+    while (!_emulator_task_stop && (_gb || _cgb_core || _gnuboy_active)) {
+        if (_gnuboy_active) {
+            runGnuboyEmulatorFrame();
+            taskYIELD();
+            continue;
+        }
+
         if (_cgb_core) {
             runCgbEmulatorFrame();
             taskYIELD();
@@ -2260,6 +2535,26 @@ void AppPokemonYellow::loadSaveRam(size_t saveSize)
 
 void AppPokemonYellow::flushSaveRam(bool force)
 {
+    if (_gnuboy_active) {
+        if (_state.savePath.empty()) {
+            return;
+        }
+        if (!force && !gnuboy_sram_dirty()) {
+            return;
+        }
+        if (!force && GetHAL().millis() - _last_save_flush < SAVE_FLUSH_INTERVAL_MS) {
+            return;
+        }
+        const int result = gnuboy_save_sram(_state.savePath.c_str(), !force);
+        _last_save_flush = GetHAL().millis();
+        _save_dirty = result != 0;
+        mclog::tagInfo(getAppInfo().name,
+                       "gnuboy save flushed: {} result={}",
+                       _state.savePath,
+                       result);
+        return;
+    }
+
     if (_cgb_core) {
         if (_state.savePath.empty()) {
             return;
@@ -2305,6 +2600,45 @@ void AppPokemonYellow::flushSaveRam(bool force)
 
 void AppPokemonYellow::setJoypadButton(uint8_t button, bool pressed)
 {
+    if (_gnuboy_active) {
+        int mapped = 0;
+        switch (button) {
+            case JOYPAD_A:
+                mapped = GB_PAD_A;
+                break;
+            case JOYPAD_B:
+                mapped = GB_PAD_B;
+                break;
+            case JOYPAD_SELECT:
+                mapped = GB_PAD_SELECT;
+                break;
+            case JOYPAD_START:
+                mapped = GB_PAD_START;
+                break;
+            case JOYPAD_RIGHT:
+                mapped = GB_PAD_RIGHT;
+                break;
+            case JOYPAD_LEFT:
+                mapped = GB_PAD_LEFT;
+                break;
+            case JOYPAD_UP:
+                mapped = GB_PAD_UP;
+                break;
+            case JOYPAD_DOWN:
+                mapped = GB_PAD_DOWN;
+                break;
+            default:
+                return;
+        }
+        if (pressed) {
+            _gnuboy_pad |= mapped;
+        } else {
+            _gnuboy_pad &= ~mapped;
+        }
+        gnuboy_set_pad(_gnuboy_pad);
+        return;
+    }
+
     if (_cgb_core) {
         Gameboy_Keys key = A_Key;
         switch (button) {

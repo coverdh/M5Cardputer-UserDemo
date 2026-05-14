@@ -97,6 +97,9 @@ private:
     bool _display_write_active = false;
     uint8_t* _framebuffer = nullptr;
     uint16_t* _cgb_framebuffer = nullptr;
+    bool _gnuboy_active = false;
+    int _gnuboy_pad = 0;
+    int _gnuboy_color_mode = 4;
     bool _cgb_save_dirty = false;
     uint32_t _perf_window_start = 0;
     uint32_t _perf_emulated_frames = 0;
@@ -124,9 +127,11 @@ private:
     void handleEmulatorKey(const Keyboard::KeyEvent_t& keyEvent, const Keyboard::KeyEventRaw_t& raw);
     bool isEnterKey(const Keyboard::KeyEvent_t& keyEvent, const Keyboard::KeyEventRaw_t& raw) const;
     void startEmulator();
+    bool startGnuboyCgbEmulator();
     void startCgbEmulator();
     void stopEmulator();
     void runEmulatorFrame();
+    void runGnuboyEmulatorFrame();
     void runCgbEmulatorFrame();
     void renderCgbEmulatorFrame();
     bool allocateFramebuffer();
@@ -140,6 +145,7 @@ private:
     bool mapFlashRomCache(const esp_partition_t* partition, size_t romSize);
     void releaseFlashRomCache();
     void toggleSound();
+    void cycleGnuboyColorMode();
     bool handleSystemShortcut(const Keyboard::KeyEvent_t& keyEvent);
     static void emulatorTaskEntry(void* arg);
     void emulatorTaskLoop();
