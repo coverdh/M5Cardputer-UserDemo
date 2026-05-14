@@ -74,6 +74,8 @@ static constexpr UBaseType_t AUDIO_TASK_PRIORITY = 7;
 static constexpr BaseType_t AUDIO_TASK_CORE = 0;
 static constexpr uint32_t AUDIO_FRAME_PERIOD_US = 1000000 / 60;
 static constexpr UBaseType_t AUDIO_WRITE_QUEUE_DEPTH = 1024;
+static constexpr int AUDIO_OUTPUT_GAIN_NUM = 3;
+static constexpr int AUDIO_OUTPUT_GAIN_DEN = 4;
 static constexpr int64_t GB_EMULATION_FRAME_PERIOD_US = 16743;
 static constexpr uint32_t GB_VIDEO_FAST_INTERVAL_MS = 50;
 static constexpr uint32_t GB_VIDEO_NORMAL_INTERVAL_MS = 66;
@@ -414,7 +416,9 @@ static void audioTaskEntry(void*)
         for (size_t i = 0; i < s_audio_mono_buffer.size(); ++i) {
             const int32_t left = s_audio_stereo_buffer[i * 2];
             const int32_t right = s_audio_stereo_buffer[i * 2 + 1];
-            s_audio_mono_buffer[i] = static_cast<int16_t>((left + right) / 2);
+            int32_t mixed = ((left + right) / 2) * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
+            mixed = std::clamp<int32_t>(mixed, INT16_MIN, INT16_MAX);
+            s_audio_mono_buffer[i] = static_cast<int16_t>(mixed);
         }
 
         const bool queued = GetHAL().speaker.playRaw(s_audio_mono_buffer.data(),
@@ -1533,7 +1537,9 @@ void AppPokemonYellow::runCgbEmulatorFrame()
         for (size_t i = 0; i < frames; ++i) {
             const int32_t left = s_cgb_audio_stereo_buffer[i * 2];
             const int32_t right = s_cgb_audio_stereo_buffer[i * 2 + 1];
-            s_cgb_audio_mono_buffer[i] = static_cast<int16_t>((left + right) / 2);
+            int32_t mixed = ((left + right) / 2) * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
+            mixed = std::clamp<int32_t>(mixed, INT16_MIN, INT16_MAX);
+            s_cgb_audio_mono_buffer[i] = static_cast<int16_t>(mixed);
         }
         GetHAL().speaker.playRaw(s_cgb_audio_mono_buffer.data(), frames, AUDIO_SAMPLE_RATE, false, 1, 0, false);
     }
