@@ -16,6 +16,18 @@ namespace audio {
 
 static std::vector<int> c_major_scale = {60, 62, 64, 65, 67, 69, 71};  // C大调音阶（C D E F G A B）
 
+static bool is_volume_shortcut(const Keyboard::KeyEvent_t& event)
+{
+    return GetHAL().keyboard.isFnPressed() &&
+           (event.keyCode == KEY_LEFTBRACE || event.keyCode == KEY_RIGHTBRACE);
+}
+
+static bool is_brightness_shortcut(const Keyboard::KeyEvent_t& event)
+{
+    return GetHAL().keyboard.isFnPressed() &&
+           (event.keyCode == KEY_MINUS || event.keyCode == KEY_EQUAL);
+}
+
 void play_tone(int frequency, double durationSec)
 {
     if (GetHAL().speaker.getVolume() <= 0) {
@@ -118,8 +130,12 @@ static void _keyboard_sfx_on_key_event(const Keyboard::KeyEvent_t& event)
     if (!event.state) {
         return;
     }
-
-    GetHAL().speaker.setVolume(90);
+    if (is_volume_shortcut(event)) {
+        return;
+    }
+    if (is_brightness_shortcut(event)) {
+        return;
+    }
 
     int semitoneShift = 48;
     switch (event.keyCode) {
@@ -161,6 +177,60 @@ void set_keyboard_sfx_enable(bool enable)
         }
         is_enabled = true;
         slot_id    = GetHAL().keyboard.onKeyEvent.connect(_keyboard_sfx_on_key_event);
+    } else {
+        if (!is_enabled) {
+            return;
+        }
+        is_enabled = false;
+        GetHAL().keyboard.onKeyEvent.disconnect(slot_id);
+    }
+}
+
+static void _global_shortcuts_on_key_event(const Keyboard::KeyEvent_t& event)
+{
+    if (!event.state || event.isModifier || !GetHAL().keyboard.isFnPressed()) {
+        return;
+    }
+
+    if (event.keyCode == KEY_LEFTBRACE) {
+        int volume = GetHAL().getDeviceVolumePercent();
+        volume = std::max(0, volume - 5);
+        GetHAL().setDeviceVolumePercent(volume);
+        mclog::tagInfo("audio", "device volume shortcut: {}%", volume);
+        play_random_tone(60, 0.04);
+    } else if (event.keyCode == KEY_RIGHTBRACE) {
+        int volume = GetHAL().getDeviceVolumePercent();
+        volume = std::min(100, volume + 5);
+        GetHAL().setDeviceVolumePercent(volume);
+        mclog::tagInfo("audio", "device volume shortcut: {}%", volume);
+        play_random_tone(60, 0.04);
+    } else if (event.keyCode == KEY_MINUS) {
+        int brightness = GetHAL().getDeviceBrightnessPercent();
+        brightness = std::max(1, brightness - 10);
+        GetHAL().setDeviceBrightnessPercent(brightness);
+        mclog::tagInfo("audio", "display brightness shortcut: {}%", brightness);
+    } else if (event.keyCode == KEY_EQUAL) {
+        int brightness = GetHAL().getDeviceBrightnessPercent();
+        brightness = std::min(100, brightness + 10);
+        GetHAL().setDeviceBrightnessPercent(brightness);
+        mclog::tagInfo("audio", "display brightness shortcut: {}%", brightness);
+    } else {
+        return;
+    }
+}
+
+void set_global_shortcuts_enable(bool enable)
+{
+    static size_t slot_id  = 0;
+    static bool is_enabled = false;
+
+    mclog::tagInfo("audio", "set global shortcuts enable: {}", enable);
+    if (enable) {
+        if (is_enabled) {
+            return;
+        }
+        is_enabled = true;
+        slot_id    = GetHAL().keyboard.onKeyEvent.connect(_global_shortcuts_on_key_event);
     } else {
         if (!is_enabled) {
             return;

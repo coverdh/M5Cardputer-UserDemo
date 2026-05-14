@@ -11,6 +11,8 @@
 #include "app_wifi_scan/app_wifi_scan.h"
 #include "app_record/app_record.h"
 #include "app_remote/app_remote.h"
+#include "app_home_control/app_home_control.h"
+#include "app_pokemon_yellow/app_pokemon_yellow.h"
 #include "app_chat/app_chat.h"
 #include "app_repl/app_repl.h"
 #include "app_set_wifi/app_set_wifi.h"

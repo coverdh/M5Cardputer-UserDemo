@@ -27,7 +27,7 @@ static void fancy_logo_fade_in()
     brightness.easingOptions().duration = 600;
 
     GetHAL().display.setBrightness(0);
-    brightness      = 255;
+    brightness      = GetHAL().getDeviceBrightnessPercent() * 255 / 100;
     auto time_count = GetHAL().millis();
     while (GetHAL().millis() - time_count < 1200) {
         GetHAL().feedTheDog();
@@ -37,7 +37,7 @@ static void fancy_logo_fade_in()
         GetHAL().display.setBrightness(brightness);
     }
 
-    GetHAL().display.setBrightness(255);
+    GetHAL().setDeviceBrightnessPercent(GetHAL().getDeviceBrightnessPercent());
 }
 
 void Launcher::boot_anim()
@@ -49,7 +49,7 @@ void Launcher::boot_anim()
     // If software restart
     if (esp_reset_reason() != ESP_RST_POWERON) {
         mclog::tagInfo(getAppInfo().name, "not power on reset, skip boot anim");
-        GetHAL().display.setBrightness(255);
+        GetHAL().setDeviceBrightnessPercent(GetHAL().getDeviceBrightnessPercent());
         return;
     }
 

@@ -50,6 +50,14 @@ static const char *TAG = "ble_hid";
 
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 
+#define BLE_HID_MAP_INDEX_KEYBOARD 0
+#define BLE_HID_MAP_INDEX_MOUSE    1
+#define BLE_HID_MAP_INDEX_MEDIA    2
+
+#define BLE_HID_RPT_ID_KEYBOARD 1
+#define BLE_HID_RPT_ID_MOUSE    2
+#define BLE_HID_RPT_ID_MEDIA    3
+
 typedef struct {
     TaskHandle_t task_hdl;
     esp_hidd_dev_t *hid_dev;
@@ -119,11 +127,11 @@ const unsigned char mediaReportMap[] = {
     0x81, 0x03,  //   Input (Const,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
     0xC0,        // End Collection
 };
-#if CONFIG_EXAMPLE_HID_DEVICE_ROLE && CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
-const unsigned char mouseReportMap[] = {
+const unsigned char bleMouseReportMap[] = {
     0x05, 0x01,  // USAGE_PAGE (Generic Desktop)
     0x09, 0x02,  // USAGE (Mouse)
     0xa1, 0x01,  // COLLECTION (Application)
+    0x85, BLE_HID_RPT_ID_MOUSE,  //   REPORT_ID (2)
 
     0x09, 0x01,  //   USAGE (Pointer)
     0xa1, 0x00,  //   COLLECTION (Physical)
@@ -153,6 +161,8 @@ const unsigned char mouseReportMap[] = {
     0xc0,  //   END_COLLECTION
     0xc0   // END_COLLECTION
 };
+
+#if CONFIG_EXAMPLE_HID_DEVICE_ROLE && CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
 // send the buttons, change in x, and change in y
 void send_mouse(uint8_t buttons, char dx, char dy, char wheel)
 {
@@ -161,7 +171,7 @@ void send_mouse(uint8_t buttons, char dx, char dy, char wheel)
     buffer[1]                = dx;
     buffer[2]                = dy;
     buffer[3]                = wheel;
-    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, 0, 0, buffer, 4);
+    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_MOUSE, BLE_HID_RPT_ID_MOUSE, buffer, 4);
 }
 
 void ble_hid_demo_task_mouse(void *pvParameters)
@@ -367,13 +377,15 @@ void ble_hid_demo_task_kbd(void *pvParameters)
 }
 #endif
 static esp_hid_raw_report_map_t ble_report_maps[] = {
-#if !CONFIG_BT_NIMBLE_ENABLED || CONFIG_EXAMPLE_HID_DEVICE_ROLE == 1
+#if CONFIG_BT_NIMBLE_ENABLED && CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
+    {.data = keyboardReportMap, .len = sizeof(keyboardReportMap)},
+    {.data = bleMouseReportMap, .len = sizeof(bleMouseReportMap)},
+    {.data = mediaReportMap, .len = sizeof(mediaReportMap)},
+#elif !CONFIG_BT_NIMBLE_ENABLED || CONFIG_EXAMPLE_HID_DEVICE_ROLE == 1
     /* This block is compiled for bluedroid as well */
     {.data = mediaReportMap, .len = sizeof(mediaReportMap)}
-#elif CONFIG_EXAMPLE_HID_DEVICE_ROLE && CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
-    {.data = keyboardReportMap, .len = sizeof(keyboardReportMap)},
 #elif CONFIG_EXAMPLE_HID_DEVICE_ROLE && CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
-    {.data = mouseReportMap, .len = sizeof(mouseReportMap)},
+    {.data = bleMouseReportMap, .len = sizeof(bleMouseReportMap)},
 #endif
 };
 
@@ -381,7 +393,7 @@ static esp_hid_device_config_t ble_hid_config = {.vendor_id  = 0x16C0,
                                                  .product_id = 0x05DF,
                                                  .version    = 0x0100,
 #if CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
-                                                 .device_name = "CardputerADV",
+                                                 .device_name = "MacCtl",
 #elif CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
                                                  .device_name = "ESP Mouse",
 #else
@@ -390,7 +402,7 @@ static esp_hid_device_config_t ble_hid_config = {.vendor_id  = 0x16C0,
                                                  .manufacturer_name = "M5Stack",
                                                  .serial_number     = "1234567890",
                                                  .report_maps       = ble_report_maps,
-                                                 .report_maps_len   = 1};
+                                                 .report_maps_len   = sizeof(ble_report_maps) / sizeof(ble_report_maps[0])};
 
 #define HID_CC_RPT_MUTE          1
 #define HID_CC_RPT_POWER         2
@@ -551,7 +563,8 @@ void esp_hidd_send_consumer_value(uint8_t key_cmd, bool key_pressed)
                 break;
         }
     }
-    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, 0, HID_RPT_ID_CC_IN, buffer, HID_CC_IN_RPT_LEN);
+    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_MEDIA, HID_RPT_ID_CC_IN, buffer,
+                           HID_CC_IN_RPT_LEN);
     return;
 }
 
@@ -994,7 +1007,21 @@ void ble_hid_device_helper_init(void)
 
 void ble_hid_device_helper_send(uint8_t *buffer)
 {
-    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, 0, 1, buffer, 8);
+    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_KEYBOARD, BLE_HID_RPT_ID_KEYBOARD, buffer, 8);
+}
+
+void ble_hid_device_helper_send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
+{
+    uint8_t buffer[4] = {buttons, (uint8_t)dx, (uint8_t)dy, (uint8_t)wheel};
+    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_MOUSE, BLE_HID_RPT_ID_MOUSE, buffer,
+                           sizeof(buffer));
+}
+
+void ble_hid_device_helper_send_consumer(uint16_t usage_id)
+{
+    esp_hidd_send_consumer_value((uint8_t)usage_id, true);
+    vTaskDelay(40 / portTICK_PERIOD_MS);
+    esp_hidd_send_consumer_value((uint8_t)usage_id, false);
 }
 
 BleHidDeviceState_t ble_hid_device_helper_get_state(void)

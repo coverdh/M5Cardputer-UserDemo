@@ -9,6 +9,7 @@
 #include <mooncake_log.h>
 #include <M5Unified.hpp>
 #include <esp_mac.h>
+#include <algorithm>
 #include <memory>
 
 static std::unique_ptr<Hal> _hal_instance;
@@ -23,15 +24,15 @@ Hal& GetHAL()
     return *_hal_instance.get();
 }
 
-void Hal::init()
+void Hal::init(bool gameboy_only_mode)
 {
-    mclog::tagInfo(_tag, "init");
+    mclog::tagInfo(_tag, "init{}", gameboy_only_mode ? " (gameboy only)" : "");
 
     M5.begin();
     M5.Display.setBrightness(0);
     M5.Speaker.begin();  // Codec takes some time to initialize
 
-    display_init();
+    display_init(!gameboy_only_mode);
     i2c_scan();
     keyboard_init();
     setting_init();
@@ -66,13 +67,38 @@ std::string Hal::getDeviceMacString()
 /* -------------------------------------------------------------------------- */
 /*                                  Dispplay                                  */
 /* -------------------------------------------------------------------------- */
-void Hal::display_init()
+void Hal::display_init(bool create_ui_sprites)
 {
     mclog::tagInfo(_tag, "display init");
+
+    _ui_sprites_enabled = create_ui_sprites;
+    if (!create_ui_sprites) {
+        mclog::tagInfo(_tag, "skip ui sprites for dedicated GameBoy mode");
+        return;
+    }
 
     canvas.createSprite(204, 109);
     canvasKeyboardBar.createSprite(display.width() - canvas.width(), display.height());
     canvasSystemBar.createSprite(canvas.width(), display.height() - canvas.height());
+}
+
+void Hal::setFullscreenMode(bool fullscreen)
+{
+    if (_fullscreen_mode == fullscreen) {
+        return;
+    }
+    _fullscreen_mode = fullscreen;
+    mclog::tagInfo(_tag, "set fullscreen mode: {}", fullscreen ? "on" : "off");
+}
+
+void Hal::setDeviceBrightnessPercent(int percent)
+{
+    percent = std::max(1, std::min(100, percent));
+    _display_brightness_percent = percent;
+    display.setBrightness(static_cast<uint8_t>(percent * 255 / 100));
+    if (_settings) {
+        _settings->SetInt("bright", percent);
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -120,6 +146,25 @@ void Hal::setting_init()
     ESP_ERROR_CHECK(ret);
 
     _settings = new Settings("cardputer", true);
+    setDeviceBrightnessPercent(_settings->GetInt("bright", 100));
+    setDeviceVolumePercent(_settings->GetInt("device_volume", 35));
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                    Audio                                   */
+/* -------------------------------------------------------------------------- */
+void Hal::setDeviceVolumePercent(int percent)
+{
+    percent = std::max(0, std::min(100, percent));
+    speaker.setVolume(static_cast<uint8_t>(percent * 255 / 100));
+    if (_settings) {
+        _settings->SetInt("device_volume", percent);
+    }
+}
+
+int Hal::getDeviceVolumePercent() const
+{
+    return static_cast<int>(speaker.getVolume()) * 100 / 255;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -524,23 +569,33 @@ void Hal::irSend(uint8_t addr, uint8_t cmd)
 /* -------------------------------------------------------------------------- */
 #include "utils/ble_hid_device/ble_hid_device_helper.h"
 
-void Hal::bleKeyboardInit()
+void Hal::bleControlInit()
 {
     if (_is_ble_keyboard_inited) {
-        mclog::tagWarn(_tag, "ble keyboard already initialized");
+        mclog::tagWarn(_tag, "ble hid already initialized");
         return;
     }
 
+    mclog::tagInfo(_tag, "ble control hid init");
+    ble_hid_device_helper_init();
+    _is_ble_keyboard_inited = true;
+}
+
+void Hal::bleKeyboardInit()
+{
     mclog::tagInfo(_tag, "ble keyboard init");
 
-    // Initialize BLE HID device
-    ble_hid_device_helper_init();
+    bleControlInit();
+
+    if (_ble_keyboard_event_slot_id >= 0) {
+        mclog::tagWarn(_tag, "ble keyboard forwarding already initialized");
+        return;
+    }
 
     // Register keyboard event callback to automatically forward keys
     _ble_keyboard_event_slot_id = keyboard.onKeyEvent.connect(
         [this](const Keyboard::KeyEvent_t& keyEvent) { handle_ble_keyboard_event(keyEvent); });
 
-    _is_ble_keyboard_inited = true;
     mclog::tagInfo(_tag, "ble keyboard init done, auto-forwarding enabled");
 }
 
@@ -554,8 +609,61 @@ bool Hal::bleKeyboardIsConnected() const
     return (state == BLE_HID_DEVICE_STATE_CONNECTED);
 }
 
+void Hal::bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode)
+{
+    if (!bleKeyboardIsConnected()) {
+        return;
+    }
+
+    uint8_t buffer[8] = {0};
+    buffer[0]         = modifier;
+    buffer[2]         = keyCode;
+    ble_hid_device_helper_send(buffer);
+}
+
+void Hal::bleKeyboardTap(uint8_t modifier, KeScanCode_t keyCode)
+{
+    bleKeyboardSendReport(modifier, keyCode);
+    delay(30);
+    bleKeyboardSendReport(0, KEY_NONE);
+}
+
+void Hal::bleMouseMove(int8_t dx, int8_t dy, int8_t wheel)
+{
+    if (!bleKeyboardIsConnected()) {
+        return;
+    }
+
+    ble_hid_device_helper_send_mouse(0, dx, dy, wheel);
+}
+
+void Hal::bleMouseClick(uint8_t buttons)
+{
+    if (!bleKeyboardIsConnected()) {
+        return;
+    }
+
+    ble_hid_device_helper_send_mouse(buttons, 0, 0, 0);
+    delay(30);
+    ble_hid_device_helper_send_mouse(0, 0, 0, 0);
+}
+
+void Hal::bleConsumerSend(uint16_t usageId)
+{
+    if (!bleKeyboardIsConnected()) {
+        return;
+    }
+
+    ble_hid_device_helper_send_consumer(usageId);
+}
+
 void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
 {
+    if (keyboard.isFnPressed() && keyEvent.state &&
+        (keyEvent.keyCode == KEY_LEFTBRACE || keyEvent.keyCode == KEY_RIGHTBRACE)) {
+        return;
+    }
+
     // Only forward if BLE keyboard is connected
     if (!bleKeyboardIsConnected()) {
         return;
@@ -628,6 +736,11 @@ bool Hal::usbKeyboardIsConnected() const
 
 void Hal::handle_usb_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
 {
+    if (keyboard.isFnPressed() && keyEvent.state &&
+        (keyEvent.keyCode == KEY_LEFTBRACE || keyEvent.keyCode == KEY_RIGHTBRACE)) {
+        return;
+    }
+
     // Only forward if USB keyboard is connected
     if (!usbKeyboardIsConnected()) {
         return;
@@ -723,6 +836,7 @@ void Hal::sd_card_init()
     esp_err_t ret;
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.max_freq_khz = 40000;
 
     // Options for mounting the filesystem
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -758,12 +872,30 @@ void Hal::sd_card_init()
     _is_sd_card_mounted = true;
 }
 
+void Hal::sdCardUnmount()
+{
+    if (!_is_sd_card_mounted || !_sd_card) {
+        return;
+    }
+
+    mclog::tagInfo(_tag, "sd card unmount");
+    esp_vfs_fat_sdcard_unmount(MOUNT_POINT, _sd_card);
+    _sd_card = nullptr;
+    _is_sd_card_mounted = false;
+}
+
 Hal::SdCardProbeResult_t Hal::sdCardProbe()
 {
     SdCardProbeResult_t result;
 
     if (!_is_sd_card_mounted) {
-        sd_card_init();
+        for (int attempt = 0; attempt < 2 && !_is_sd_card_mounted; ++attempt) {
+            sd_card_init();
+            if (!_is_sd_card_mounted) {
+                mclog::tagWarn(_tag, "sd card probe retry {}", attempt + 1);
+                delay(80);
+            }
+        }
         if (!_is_sd_card_mounted) {
             result.is_mounted = false;
             result.size       = "Not Found";

@@ -34,6 +34,10 @@ public:
     {
         return _modifier_mask;
     }
+    inline bool isFnPressed() const
+    {
+        return _fn_state;
+    }
     inline const KeyEvent_t& getLatestKeyEvent()
     {
         return _key_event_buffer;

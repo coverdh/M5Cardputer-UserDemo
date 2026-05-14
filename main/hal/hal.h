@@ -16,7 +16,7 @@
 
 class Hal {
 public:
-    void init();
+    void init(bool gameboy_only_mode = false);
     void update();
 
     /* --------------------------------- System --------------------------------- */
@@ -40,20 +40,41 @@ public:
 
     inline void pushCanvasSystemBar()
     {
+        if (_fullscreen_mode || !_ui_sprites_enabled) {
+            return;
+        }
         canvasSystemBar.pushSprite(canvasKeyboardBar.width(), 0);
     }
     inline void pushCanvasKeyboardBar()
     {
+        if (_fullscreen_mode || !_ui_sprites_enabled) {
+            return;
+        }
         canvasKeyboardBar.pushSprite(0, 0);
     }
     inline void pushCanvas()
     {
+        if (!_ui_sprites_enabled) {
+            return;
+        }
         canvas.pushSprite(canvasKeyboardBar.width(), canvasSystemBar.height());
+    }
+    void setFullscreenMode(bool fullscreen);
+    bool isFullscreenMode() const
+    {
+        return _fullscreen_mode;
+    }
+    void setDeviceBrightnessPercent(int percent);
+    int getDeviceBrightnessPercent() const
+    {
+        return _display_brightness_percent;
     }
 
     /* ---------------------------------- Audio --------------------------------- */
     m5::Speaker_Class& speaker = M5.Speaker;
     m5::Mic_Class& mic         = M5.Mic;
+    void setDeviceVolumePercent(int percent);
+    int getDeviceVolumePercent() const;
 
     /* ---------------------------------- Input --------------------------------- */
     m5::Button_Class& homeButton = M5.BtnA;
@@ -90,8 +111,14 @@ public:
     void irSend(uint8_t addr, uint8_t cmd);
 
     /* ----------------------------------- BLE ---------------------------------- */
+    void bleControlInit();
     void bleKeyboardInit();
     bool bleKeyboardIsConnected() const;
+    void bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode);
+    void bleKeyboardTap(uint8_t modifier, KeScanCode_t keyCode);
+    void bleMouseMove(int8_t dx, int8_t dy, int8_t wheel = 0);
+    void bleMouseClick(uint8_t buttons);
+    void bleConsumerSend(uint16_t usageId);
 
     /* ----------------------------------- USB ---------------------------------- */
     void usbKeyboardInit();
@@ -120,6 +147,7 @@ public:
     };
 
     SdCardProbeResult_t sdCardProbe();
+    void sdCardUnmount();
 
     /* ----------------------------------- Cap ---------------------------------- */
     CapLoRa868 capLora868;
@@ -133,11 +161,14 @@ private:
     bool _is_ble_keyboard_inited    = false;
     bool _is_usb_keyboard_inited    = false;
     bool _is_sd_card_mounted        = false;
+    bool _fullscreen_mode           = false;
+    bool _ui_sprites_enabled        = true;
+    int _display_brightness_percent = 100;
     int _ble_keyboard_event_slot_id = -1;
     int _usb_keyboard_event_slot_id = -1;
     std::unique_ptr<CapLoRa868> _cap_lora868;
 
-    void display_init();
+    void display_init(bool create_ui_sprites);
     void i2c_scan();
     void keyboard_init();
     void start_sntp();
