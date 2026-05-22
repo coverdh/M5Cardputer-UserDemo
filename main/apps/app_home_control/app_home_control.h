@@ -71,12 +71,15 @@ private:
     std::string _wifi_password;
     std::string _input_buffer;
     std::string _status_line;
+    std::string _knob_status       = "idle";
+    std::string _pointer_status    = "idle";
     std::vector<int16_t> _audio_test_buffer;
 
     static constexpr int POINTER_STEP            = 12;
     static constexpr uint32_t POINTER_REPEAT_MS  = 55;
     static constexpr uint32_t EXTERNAL_RENDER_MS = 250;
     static constexpr uint32_t SETUP_RENDER_MS    = 1000;
+    static constexpr uint32_t DASHBOARD_RENDER_MS = 1000;
     static constexpr uint32_t POWER_SAVE_MS      = 180000;
     static constexpr int ACTION_COUNT            = 8;
     static constexpr size_t AUDIO_TEST_LENGTH    = 200;

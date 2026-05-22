@@ -84,11 +84,14 @@ void AppHomeControl::onRunning()
     if (_mode == Mode::Dashboard) {
         handleExternalInput();
         repeatPointerMove();
+        if (GetHAL().millis() - _last_status_refresh > DASHBOARD_RENDER_MS) {
+            _last_status_refresh = GetHAL().millis();
+            render();
+        }
     } else if (_mode == Mode::Pointer || _mode == Mode::Keyboard || _mode == Mode::Volume) {
         handleExternalInput();
     }
 
-    (void)_last_status_refresh;
 }
 
 void AppHomeControl::onClose()
@@ -258,6 +261,7 @@ void AppHomeControl::repeatPointerMove()
     _last_pointer_repeat = GetHAL().millis();
     markUserActivity();
     GetHAL().bleMouseMove(dx, dy);
+    _pointer_status = "keyboard move";
 }
 
 void AppHomeControl::handleExternalInput()
@@ -309,8 +313,12 @@ void AppHomeControl::handleExternalPointer(uint8_t buttons, uint8_t pressed, uin
 
     if (pressed & ExternalInput::PAD_A) {
         GetHAL().bleMouseClick(1);
+        _pointer_status = "left click";
     } else if (pressed & ExternalInput::PAD_B) {
         GetHAL().bleMouseClick(2);
+        _pointer_status = "right click";
+    } else if (moved) {
+        _pointer_status = "joystick move";
     }
 
     if (pressed & ExternalInput::PAD_A) {
@@ -349,12 +357,16 @@ void AppHomeControl::handleExternalEncoder()
             }
         }
         if (_knob_scroll_mode) {
+            _knob_status = delta > 0 ? "wheel up" : "wheel down";
             setStatus(delta > 0 ? "Knob scroll up" : "Knob scroll down");
         } else if (_knob_mode == 1) {
+            _knob_status = delta > 0 ? "HomePod up" : "HomePod down";
             setStatus(delta > 0 ? "Knob HomePod up" : "Knob HomePod down");
         } else if (_knob_mode == 0) {
+            _knob_status = delta > 0 ? "volume up" : "volume down";
             setStatus(delta > 0 ? "Knob volume up" : "Knob volume down");
         } else {
+            _knob_status = "disabled";
             setStatus("Knob disabled");
         }
     }
@@ -362,6 +374,7 @@ void AppHomeControl::handleExternalEncoder()
         markUserActivity();
         _knob_scroll_mode = !_knob_scroll_mode;
         mclog::tagInfo(getAppInfo().name, "knob layer: {}", _knob_scroll_mode ? "mouse-wheel" : "control");
+        _knob_status = _knob_scroll_mode ? "mouse wheel" : "control mode";
         setStatus(_knob_scroll_mode ? "Knob mouse wheel" : "Knob control mode");
         render();
         return;
@@ -684,43 +697,40 @@ void AppHomeControl::renderDashboard()
     canvas.fillScreen(THEME_COLOR_BG);
     canvas.setTextSize(1);
     canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-    canvas.setCursor(0, 0);
-    canvas.println("HomePod");
+    canvas.setCursor(0, 2);
+    canvas.println("ADVCtl");
+
+    const auto& input = GetHAL().externalInput;
+    const char* knobMode = "SysVol";
+    if (_knob_scroll_mode) {
+        knobMode = "Wheel";
+    } else if (_knob_mode == 1) {
+        knobMode = "HomePod";
+    } else if (_knob_mode == 2) {
+        knobMode = "Off";
+    }
+
+    canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
+    canvas.printf("BLE: %s\n", GetHAL().bleKeyboardIsConnected() ? "paired" : "advertising");
+    canvas.printf("Mac App: %s\n", GetHAL().bleMacCtlIsConnected() ? "connected" : "waiting");
+    canvas.printf("Time: %s\n", GetHAL().bleMacCtlTimeSynced() ? "synced" : "waiting");
+    canvas.printf("Knob: %s %s\n", input.isEncoderConnected() ? "ready" : "missing", knobMode);
 
     canvas.setTextColor(TFT_CYAN, THEME_COLOR_BG);
-    if (_homepod_state.ok) {
-        canvas.print("State: ");
-        printClipped(_homepod_state.state.empty() ? "unknown" : _homepod_state.state, 18);
-        if (_homepod_state.volumePercent >= 0) {
-            canvas.printf(" %d%%", _homepod_state.volumePercent);
-        }
-        canvas.println();
-        if (!_homepod_state.name.empty()) {
-            canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
-            printClipped(_homepod_state.name, 28);
-            canvas.println();
-        }
-        if (!_homepod_state.title.empty()) {
-            canvas.setTextColor(TFT_GREEN, THEME_COLOR_BG);
-            printClipped(_homepod_state.title, 30);
-            canvas.println();
-        }
-        if (!_homepod_state.artist.empty()) {
-            canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
-            printClipped(_homepod_state.artist, 30);
-            canvas.println();
-        }
-    } else {
-        canvas.println(_ha.isConfigured() ? "No HomePod state" : "HA not configured");
-    }
+    canvas.print("Last: ");
+    printClipped(_knob_status, 25);
+    canvas.println();
+
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
-    canvas.printf("Ptr %s XY %s X %s Y %s\n",
-                  pointerSensitivityLabel().c_str(),
-                  GetHAL().externalInput.getSwapAxes() ? "swap" : "normal",
-                  GetHAL().externalInput.getFlipX() ? "inv" : "normal",
-                  GetHAL().externalInput.getFlipY() ? "inv" : "normal");
-    canvas.println("Fn+S: screen off");
-    canvas.println("Fn+Enter: TV power");
+    canvas.printf("Mouse: %s %s\n", input.isConnected() ? "ready" : "missing", pointerSensitivityLabel().c_str());
+    canvas.print("Move: ");
+    printClipped(_pointer_status, 24);
+    canvas.println();
+    canvas.printf("Map: XY %s X %s Y %s\n",
+                  input.getSwapAxes() ? "swap" : "norm",
+                  input.getFlipX() ? "inv" : "norm",
+                  input.getFlipY() ? "inv" : "norm");
+    canvas.printf("Mic: %s  Fn+S sleep\n", _audio_test_active ? "on" : "off");
 
     renderStatusBar();
     GetHAL().pushCanvas();

@@ -652,6 +652,8 @@ void Hal::irSend(uint8_t addr, uint8_t cmd)
 static bool s_advctl_control_ready = false;
 static bool s_advctl_audio_test_pending = false;
 static bool s_advctl_audio_test_active = false;
+static bool s_advctl_time_synced = false;
+static constexpr time_t ADVCTL_TIME_SYNC_EPOCH = 1704067200;  // 2024-01-01 00:00:00 UTC
 
 static uint8_t advctl_config_flags()
 {
@@ -695,6 +697,23 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
         GetHAL().getSettings().SetInt("ptr_sens2", 2);
         GetHAL().getSettings().SetInt("adv_knob_mode", 0);
         send_advctl_config_report();
+        return;
+    }
+
+    if (data[0] == 0x84 && len >= 4) {
+        const uint32_t minutes_since_epoch = static_cast<uint32_t>(data[1]) |
+                                            (static_cast<uint32_t>(data[2]) << 8) |
+                                            (static_cast<uint32_t>(data[3]) << 16);
+        const time_t now = ADVCTL_TIME_SYNC_EPOCH + static_cast<time_t>(minutes_since_epoch) * 60;
+        timeval tv {};
+        tv.tv_sec  = now;
+        tv.tv_usec = 0;
+        if (settimeofday(&tv, nullptr) == 0) {
+            s_advctl_time_synced = true;
+            mclog::tagInfo("hal", "advctl time synced: {}", static_cast<long long>(now));
+        } else {
+            mclog::tagWarn("hal", "advctl time sync failed");
+        }
         return;
     }
 
@@ -841,6 +860,16 @@ bool Hal::bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)
     }
 
     return ble_hid_device_helper_send_macctl_config(flags, sensitivity, knobMode);
+}
+
+bool Hal::bleMacCtlIsConnected() const
+{
+    return bleKeyboardIsConnected() && s_advctl_control_ready;
+}
+
+bool Hal::bleMacCtlTimeSynced() const
+{
+    return s_advctl_time_synced;
 }
 
 bool Hal::bleConsumeAudioTestRequest(bool& active)

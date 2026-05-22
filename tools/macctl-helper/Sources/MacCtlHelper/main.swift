@@ -16,6 +16,7 @@ private let advCtlRequestConfigCommand: UInt8 = 0x80
 private let advCtlSetInputCommand: UInt8 = 0x81
 private let advCtlAudioTestCommand: UInt8 = 0x82
 private let advCtlResetConfigCommand: UInt8 = 0x83
+private let advCtlTimeSyncCommand: UInt8 = 0x84
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlKeyboardReportID: UInt32 = 1
 private let hidKeyF13: UInt8 = 0x68
@@ -28,6 +29,7 @@ private let systemDefinedKeyDownSubtype: Int16 = 8
 private let systemDefinedKeyStateDown = 0x0A
 private let nxKeyTypeBrightnessDown = 3
 private let nxKeyTypeBrightnessUp = 2
+private let advCtlTimeSyncEpoch: TimeInterval = 1_704_067_200
 private let advCtlLogURL = URL(fileURLWithPath: NSHomeDirectory())
     .appendingPathComponent(".config/karabiner/advctl.log")
 
@@ -279,6 +281,16 @@ private final class ADVCtlBridge {
         sendControlPayload([advCtlRequestConfigCommand, 0, 0, 0], successMessage: "Requested hardware settings")
     }
 
+    func sendTimeSync() {
+        let elapsed = max(0, Date().timeIntervalSince1970 - advCtlTimeSyncEpoch)
+        let minutes = UInt32(elapsed / 60) & 0x00FF_FFFF
+        sendControlPayload([advCtlTimeSyncCommand,
+                            UInt8(minutes & 0xFF),
+                            UInt8((minutes >> 8) & 0xFF),
+                            UInt8((minutes >> 16) & 0xFF)],
+                           successMessage: "Synced ADV time")
+    }
+
     func resetHardwareSettings() {
         sendControlPayload([advCtlResetConfigCommand, 0, 0, 0], successMessage: "Reset hardware settings")
     }
@@ -356,6 +368,7 @@ private final class ADVCtlBridge {
         updateConnection()
         updateMessage("Attached \(kind) usagePage=\(usagePage) usage=\(usage) maxInput=\(maxInput) openStatus=\(openStatus)")
         if kind == .control {
+            sendTimeSync()
             requestSettings()
         }
     }
@@ -605,6 +618,8 @@ private final class SettingsWindowController: NSWindowController {
     private let refreshButton = NSButton(title: "Refresh from ADV", target: nil, action: nil)
     private let waveformView = WaveformView(frame: .zero)
     private let recordButton = NSButton(title: "Activate Recording Test", target: nil, action: nil)
+    private let tabView = NSTabView()
+    private var sidebarButtons: [NSButton] = []
     private var audioTestActive = false
 
     init(settings: JoystickSettings) {
@@ -654,19 +669,21 @@ private final class SettingsWindowController: NSWindowController {
         let sidebar = NSStackView()
         sidebar.orientation = .vertical
         sidebar.alignment = .leading
-        sidebar.spacing = 8
-        sidebar.edgeInsets = NSEdgeInsets(top: 58, left: 18, bottom: 18, right: 14)
+        sidebar.spacing = 4
+        sidebar.edgeInsets = NSEdgeInsets(top: 58, left: 12, bottom: 18, right: 12)
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebarEffect.addSubview(sidebar)
 
         let brand = NSTextField(labelWithString: "ADVCtl")
         brand.font = .systemFont(ofSize: 20, weight: .semibold)
+        brand.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addArrangedSubview(brand)
-        sidebar.addArrangedSubview(sidebarRow("General", selected: true))
-        sidebar.addArrangedSubview(sidebarRow("Pointer", selected: false))
-        sidebar.addArrangedSubview(sidebarRow("Knob", selected: false))
-        sidebar.addArrangedSubview(sidebarRow("Audio", selected: false))
-        sidebar.addArrangedSubview(sidebarRow("Diagnostics", selected: false))
+        sidebar.setCustomSpacing(14, after: brand)
+        for (index, title) in ["Status", "Pointer", "Knob", "Audio"].enumerated() {
+            let button = sidebarButton(title, selected: index == 0)
+            sidebarButtons.append(button)
+            sidebar.addArrangedSubview(button)
+        }
 
         let contentEffect = NSVisualEffectView()
         contentEffect.material = .contentBackground
@@ -674,46 +691,39 @@ private final class SettingsWindowController: NSWindowController {
         contentEffect.state = .active
         contentEffect.translatesAutoresizingMaskIntoConstraints = false
 
-        let scrollView = NSScrollView()
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-
-        let contentStack = NSStackView()
-        contentStack.orientation = .vertical
-        contentStack.alignment = .leading
-        contentStack.spacing = 16
-        contentStack.edgeInsets = NSEdgeInsets(top: 54, left: 34, bottom: 28, right: 34)
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
-
-        let title = NSTextField(labelWithString: "ADVCtl")
-        title.font = .systemFont(ofSize: 28, weight: .bold)
-        contentStack.addArrangedSubview(title)
-        contentStack.addArrangedSubview(group("Status", rows: [
-            valueRow("Connection", connectionValueLabel),
-            valueRow("Knob", knobValueLabel),
-            valueRow("Last message", messageValueLabel),
-            controlRow("Hardware config", refreshButton),
+        tabView.tabViewType = .noTabsNoBorder
+        tabView.translatesAutoresizingMaskIntoConstraints = false
+        tabView.addTabViewItem(tabItem("Status", groups: [
+            group("Connection", rows: [
+                valueRow("ADV", connectionValueLabel),
+                valueRow("Knob", knobValueLabel),
+                valueRow("Last message", messageValueLabel),
+                controlRow("Hardware config", refreshButton),
+            ]),
         ]))
-        contentStack.addArrangedSubview(group("Pointer", rows: [
-            controlRow("Swap X/Y axes", swapAxesButton),
-            controlRow("Invert horizontal", invertXButton),
-            controlRow("Invert vertical", invertYButton),
-            sensitivityRow(),
+        tabView.addTabViewItem(tabItem("Pointer", groups: [
+            group("Pointer", rows: [
+                controlRow("Swap X/Y axes", swapAxesButton),
+                controlRow("Invert horizontal", invertXButton),
+                controlRow("Invert vertical", invertYButton),
+                sensitivityRow(),
+            ]),
         ]))
-        contentStack.addArrangedSubview(group("Knob", rows: [
-            controlRow("Rotation", knobModePopup),
-            valueRow("Press", NSTextField(labelWithString: "Mute in system mode, F15 in HomePod mode")),
-            controlRow("Defaults", resetButton),
+        tabView.addTabViewItem(tabItem("Knob", groups: [
+            group("Knob", rows: [
+                controlRow("Rotation", knobModePopup),
+                valueRow("Press", NSTextField(labelWithString: "Mute in system mode, F15 in HomePod mode")),
+                controlRow("Defaults", resetButton),
+            ]),
         ]))
-        contentStack.addArrangedSubview(group("Audio", rows: [
-            valueRow("Recording test", audioStateLabel),
-            valueRow("System microphone", microphoneStatusLabel),
-            waveformRow(),
+        tabView.addTabViewItem(tabItem("Audio", groups: [
+            group("Audio", rows: [
+                valueRow("Recording test", audioStateLabel),
+                valueRow("System microphone", microphoneStatusLabel),
+                waveformRow(),
+            ]),
         ]))
-
-        scrollView.documentView = contentStack
-        contentEffect.addSubview(scrollView)
+        contentEffect.addSubview(tabView)
         root.addArrangedSubview(sidebarEffect)
         root.addArrangedSubview(contentEffect)
         contentView.addSubview(root)
@@ -750,36 +760,71 @@ private final class SettingsWindowController: NSWindowController {
             sidebar.trailingAnchor.constraint(equalTo: sidebarEffect.trailingAnchor),
             sidebar.topAnchor.constraint(equalTo: sidebarEffect.topAnchor),
             sidebar.bottomAnchor.constraint(lessThanOrEqualTo: sidebarEffect.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: contentEffect.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: contentEffect.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: contentEffect.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: contentEffect.bottomAnchor),
-            contentStack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            contentStack.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            contentStack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            contentStack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            tabView.leadingAnchor.constraint(equalTo: contentEffect.leadingAnchor),
+            tabView.trailingAnchor.constraint(equalTo: contentEffect.trailingAnchor),
+            tabView.topAnchor.constraint(equalTo: contentEffect.topAnchor),
+            tabView.bottomAnchor.constraint(equalTo: contentEffect.bottomAnchor),
         ])
     }
 
-    private func sidebarRow(_ title: String, selected: Bool) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-        label.textColor = selected ? .labelColor : .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        let container = NSView()
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 7
-        container.layer?.backgroundColor = selected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.16).cgColor : NSColor.clear.cgColor
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
+    private func sidebarButton(_ title: String, selected: Bool) -> NSButton {
+        let button = NSButton(title: title, target: self, action: #selector(selectSettingsTab(_:)))
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.alignment = .left
+        button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
+        button.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+        button.setButtonType(.momentaryPushIn)
+        button.identifier = NSUserInterfaceItemIdentifier(title)
+        button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 156),
-            container.heightAnchor.constraint(equalToConstant: 30),
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 11),
-            label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            button.widthAnchor.constraint(equalToConstant: 166),
+            button.heightAnchor.constraint(equalToConstant: 28),
         ])
-        return container
+        return button
+    }
+
+    private func tabItem(_ title: String, groups: [NSView]) -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: title)
+        item.label = title
+        item.view = tabPage(title: title, groups: groups)
+        return item
+    }
+
+    private func tabPage(title: String, groups: [NSView]) -> NSView {
+        let page = NSView()
+        page.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 16
+        stack.edgeInsets = NSEdgeInsets(top: 54, left: 34, bottom: 28, right: 34)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 28, weight: .bold)
+        stack.addArrangedSubview(titleLabel)
+        groups.forEach { stack.addArrangedSubview($0) }
+
+        page.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: page.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: page.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: page.topAnchor),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: page.bottomAnchor),
+        ])
+        return page
+    }
+
+    @objc private func selectSettingsTab(_ sender: NSButton) {
+        guard let title = sender.identifier?.rawValue else { return }
+        tabView.selectTabViewItem(withIdentifier: title)
+        for button in sidebarButtons {
+            let selected = button === sender
+            button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
+            button.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+        }
     }
 
     private func group(_ title: String, rows: [NSView]) -> NSView {
@@ -1014,8 +1059,10 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
 
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = Self.makeStatusImage()
-        item.button?.imagePosition = .imageOnly
+        item.button?.image = nil
+        item.button?.title = "✦"
+        item.button?.imagePosition = .noImage
+        item.button?.font = .systemFont(ofSize: 15, weight: .semibold)
 
         let menu = NSMenu()
         menu.addItem(connectionMenuItem)
@@ -1084,36 +1131,6 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         default:
             break
         }
-    }
-
-    private static func makeStatusImage() -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        image.lockFocus()
-        NSColor.white.setStroke()
-        NSColor.white.setFill()
-
-        let diamond = NSBezierPath()
-        diamond.move(to: NSPoint(x: 9, y: 15))
-        diamond.line(to: NSPoint(x: 15, y: 9))
-        diamond.line(to: NSPoint(x: 9, y: 3))
-        diamond.line(to: NSPoint(x: 3, y: 9))
-        diamond.close()
-        diamond.lineWidth = 1.7
-        diamond.stroke()
-
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: 9, y: 5.5))
-        path.line(to: NSPoint(x: 9, y: 12.5))
-        path.move(to: NSPoint(x: 5.5, y: 9))
-        path.line(to: NSPoint(x: 12.5, y: 9))
-        path.lineWidth = 1.4
-        path.stroke()
-
-        NSBezierPath(ovalIn: NSRect(x: 7.4, y: 7.4, width: 3.2, height: 3.2)).fill()
-        image.unlockFocus()
-        image.isTemplate = true
-        return image
     }
 
     @objc private func openSettings() {
