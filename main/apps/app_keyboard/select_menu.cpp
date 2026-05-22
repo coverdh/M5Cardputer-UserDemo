@@ -46,6 +46,20 @@ void KeyboardSelectorMenu::onClick()
 
 void KeyboardSelectorMenu::onReadInput()
 {
+    const uint8_t padPressed = GetHAL().externalInput.getPressed();
+    const uint8_t padReleased = GetHAL().externalInput.getReleased();
+    if (padPressed & (ExternalInput::PAD_LEFT | ExternalInput::PAD_UP)) {
+        goLast();
+    } else if (padPressed & (ExternalInput::PAD_RIGHT | ExternalInput::PAD_DOWN)) {
+        goNext();
+    } else if (padPressed & (ExternalInput::PAD_A | ExternalInput::PAD_START)) {
+        auto pressed_keyframe = shape::scale<float>(getSelectorCurrentFrame(), anchor_center, {1.3, 0.6});
+        press(pressed_keyframe);
+    }
+    if (padReleased & (ExternalInput::PAD_A | ExternalInput::PAD_START)) {
+        release();
+    }
+
     auto event = GetHAL().keyboard.getLatestKeyEventRaw();
     // mclog::info("({},{}) {}", event.row, event.col, event.state);
 

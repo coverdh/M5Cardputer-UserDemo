@@ -9,6 +9,8 @@ file(GLOB_RECURSE MY_SRCS
     "./apps/*.cc"
     "./apps/*.cpp"
 )
+list(REMOVE_ITEM MY_SRCS "${CMAKE_CURRENT_LIST_DIR}/hal/external_input.cpp")
+list(REMOVE_ITEM MY_SRCS "${CMAKE_CURRENT_LIST_DIR}/apps/app_external_input_test/app_external_input_test.cpp")
 
 set(MY_INCLUDE_DIRS 
     "."
@@ -24,7 +26,7 @@ set(PIKA_PYTHON_INCS
 
 file(GLOB EXTERN_FILES assets/*)
 
-idf_component_register(SRCS "main.cpp" ${MY_SRCS}
+idf_component_register(SRCS "main.cpp" "hal/external_input.cpp" "apps/app_external_input_test/app_external_input_test.cpp" ${MY_SRCS}
                     INCLUDE_DIRS ${MY_INCLUDE_DIRS} ${PIKA_PYTHON_INCS}
                     EMBED_FILES ${EXTERN_FILES}
 )

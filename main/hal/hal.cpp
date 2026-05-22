@@ -36,6 +36,7 @@ void Hal::init(bool gameboy_only_mode)
     i2c_scan();
     keyboard_init();
     setting_init();
+    externalInput.init();
     spi_init();
 }
 
@@ -43,6 +44,7 @@ void Hal::update()
 {
     M5.update();
     keyboard.update();
+    externalInput.update(millis());
     capLora868.update();
 }
 
@@ -148,6 +150,7 @@ void Hal::setting_init()
     _settings = new Settings("cardputer", true);
     setDeviceBrightnessPercent(_settings->GetInt("bright", 100));
     setDeviceVolumePercent(_settings->GetInt("device_volume", 35));
+    externalInput.loadSettings(*_settings);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -208,6 +211,13 @@ void Hal::wifiScan(std::vector<ScanResult_t>& scanResult)
     mclog::tagInfo(_tag, "wifi scan");
 
     scanResult.clear();
+    if (!_is_wifi_inited) {
+        wifiInit();
+    }
+    if (!_is_wifi_inited) {
+        mclog::tagError(_tag, "wifi scan skipped: wifi init failed");
+        return;
+    }
 
     uint16_t number   = DEFAULT_SCAN_LIST_SIZE;
     uint16_t ap_count = 0;
@@ -260,6 +270,9 @@ static const int WIFI_CONNECTED_BIT          = BIT0;
 static const int WIFI_DISCONNECTED_BIT       = BIT1;
 static const int WIFI_FAIL_BIT               = BIT2;
 static const int WIFI_STARTED_BIT            = BIT3;
+static esp_netif_t* s_wifi_sta_netif         = nullptr;
+static bool s_wifi_event_loop_ready          = false;
+static bool s_wifi_handlers_registered       = false;
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
@@ -291,28 +304,83 @@ void Hal::wifiInit()
     if (_is_wifi_inited) {
         return;
     }
+    if (_wifi_init_failed) {
+        mclog::tagWarn(_tag, "wifi init skipped: previous init failed");
+        return;
+    }
 
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_t* sta_netif = esp_netif_create_default_wifi_sta();
-    assert(sta_netif);
+    esp_err_t ret = nvs_flash_init();
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NO_FREE_PAGES && ret != ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        mclog::tagError(_tag, "nvs init failed: {}", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_netif_init();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        mclog::tagError(_tag, "esp netif init failed: {}", esp_err_to_name(ret));
+        return;
+    }
+
+    if (!s_wifi_event_loop_ready) {
+        ret = esp_event_loop_create_default();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            mclog::tagError(_tag, "event loop init failed: {}", esp_err_to_name(ret));
+            return;
+        }
+        s_wifi_event_loop_ready = true;
+    }
+
+    if (!s_wifi_sta_netif) {
+        s_wifi_sta_netif = esp_netif_create_default_wifi_sta();
+        if (!s_wifi_sta_netif) {
+            mclog::tagError(_tag, "failed to create wifi sta netif");
+            return;
+        }
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    cfg.static_rx_buf_num = 3;
+    cfg.dynamic_rx_buf_num = 8;
+    cfg.dynamic_tx_buf_num = 8;
+    cfg.rx_mgmt_buf_num = 3;
+    cfg.cache_tx_buf_num = 4;
+    cfg.rx_ba_win = 2;
+    cfg.ampdu_rx_enable = 0;
+    cfg.ampdu_tx_enable = 0;
+    ret = esp_wifi_init(&cfg);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        mclog::tagError(_tag, "wifi driver init failed: {}", esp_err_to_name(ret));
+        _wifi_init_failed = true;
+        return;
+    }
+
+    ret = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (ret != ESP_OK) {
+        mclog::tagError(_tag, "wifi set mode failed: {}", esp_err_to_name(ret));
+        _wifi_init_failed = true;
+        return;
+    }
 
     if (!s_wifi_event_group) {
         s_wifi_event_group = xEventGroupCreate();
     }
 
-    ESP_ERROR_CHECK(
-        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr, nullptr));
-    ESP_ERROR_CHECK(
-        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr, nullptr));
+    if (!s_wifi_handlers_registered) {
+        ESP_ERROR_CHECK(
+            esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr, nullptr));
+        ESP_ERROR_CHECK(
+            esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr, nullptr));
+        s_wifi_handlers_registered = true;
+    }
 
-    ESP_ERROR_CHECK(esp_wifi_start());
+    ret = esp_wifi_start();
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN) {
+        mclog::tagError(_tag, "wifi start failed: {}", esp_err_to_name(ret));
+        _wifi_init_failed = true;
+        return;
+    }
     _is_wifi_inited = true;
+    _wifi_init_failed = false;
 }
 
 void Hal::wifiDeinit()
@@ -349,8 +417,16 @@ bool Hal::wifiConnect(const std::string& ssid, const std::string& password)
     strncpy((char*)wifi_config.sta.ssid, ssid.c_str(), sizeof(wifi_config.sta.ssid));
     strncpy((char*)wifi_config.sta.password, password.c_str(), sizeof(wifi_config.sta.password));
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_connect());
+    esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    if (ret != ESP_OK) {
+        mclog::tagError(_tag, "wifi set config failed: {}", esp_err_to_name(ret));
+        return false;
+    }
+    ret = esp_wifi_connect();
+    if (ret != ESP_OK) {
+        mclog::tagError(_tag, "wifi connect start failed: {}", esp_err_to_name(ret));
+        return false;
+    }
 
     // Wait for connection result
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdTRUE, pdFALSE,
@@ -386,7 +462,11 @@ void Hal::wifiDisconnect()
     xEventGroupWaitBits(s_wifi_event_group, WIFI_STARTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(3000));
 
     // Disconnect old connection
-    ESP_ERROR_CHECK(esp_wifi_disconnect());
+    esp_err_t ret = esp_wifi_disconnect();
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_CONNECT) {
+        mclog::tagError(_tag, "wifi disconnect failed: {}", esp_err_to_name(ret));
+        return;
+    }
 
     // Wait for disconnect result
     xEventGroupWaitBits(s_wifi_event_group, WIFI_DISCONNECTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(5000));

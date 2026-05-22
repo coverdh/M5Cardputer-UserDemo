@@ -95,6 +95,27 @@ static constexpr uint32_t ROM_FLASH_CACHE_MAGIC = 0x47425243;  // CRBG
 static constexpr uint32_t ROM_FLASH_CACHE_VERSION = 2;
 static constexpr size_t ROM_FLASH_CACHE_DATA_OFFSET = 4096;
 static constexpr const char* ROM_FLASH_CACHE_LABEL = "romcache";
+static constexpr uint32_t EXTERNAL_INPUT_I2C_FREQ = 400000;
+static constexpr uint32_t EXTERNAL_INPUT_PROBE_INTERVAL_MS = 1000;
+static constexpr uint32_t EXTERNAL_INPUT_POLL_INTERVAL_MS = 12;
+static constexpr uint32_t EXTERNAL_INPUT_SCAN_LOG_INTERVAL_MS = 5000;
+static constexpr uint8_t JOYSTICK_UNIT_ADDR = 0x52;
+static constexpr uint8_t JOYSTICK2_ADDR = 0x63;
+static constexpr uint8_t JOYSTICK2_OFFSET_ADC_VALUE_8BITS_REG = 0x60;
+static constexpr uint8_t JOYSTICK2_BUTTON_REG = 0x20;
+static constexpr uint8_t BYTE_BUTTON_ADDR = 0x47;
+static constexpr uint8_t BYTE_BUTTON_STATUS_8BYTE_REG = 0x60;
+static constexpr int JOYSTICK_UNIT_CENTER = 128;
+static constexpr int JOYSTICK_UNIT_DEAD_ZONE = 38;
+static constexpr int JOYSTICK2_DEAD_ZONE = 24;
+static constexpr uint8_t EXT_PAD_UP = 1 << 0;
+static constexpr uint8_t EXT_PAD_DOWN = 1 << 1;
+static constexpr uint8_t EXT_PAD_LEFT = 1 << 2;
+static constexpr uint8_t EXT_PAD_RIGHT = 1 << 3;
+static constexpr uint8_t EXT_PAD_A = 1 << 4;
+static constexpr uint8_t EXT_PAD_B = 1 << 5;
+static constexpr uint8_t EXT_PAD_SELECT = 1 << 6;
+static constexpr uint8_t EXT_PAD_START = 1 << 7;
 
 struct RomFlashCacheHeader {
     uint32_t magic = 0;
@@ -105,20 +126,24 @@ struct RomFlashCacheHeader {
     char rom_path[180] = {};
 };
 
-static gb_s s_gb_context;
-static std::array<uint8_t, GB_ROM_BANK_SIZE> s_rom_bank0 = {};
-static std::array<uint8_t, DEFAULT_SAVE_SIZE> s_save_ram = {};
-static std::array<uint8_t, 240> s_render_x_map = {};
-static std::array<uint16_t, GB_RENDER_MAX_WIDTH * GB_PUSH_CHUNK_HEIGHT> s_push_buffer = {};
-static std::array<char, 4096> s_rom_file_buffer = {};
 static minigb_apu_ctx s_audio_context;
-static std::array<audio_sample_t, AUDIO_SAMPLES_TOTAL> s_audio_stereo_buffer = {};
-static std::array<int16_t, AUDIO_SAMPLES> s_audio_mono_buffer = {};
-static std::array<uint16_t, GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT> s_cgb_framebuffer_storage = {};
-static std::array<int16_t, GNUBOY_AUDIO_STEREO_SAMPLES> s_cgb_audio_stereo_buffer = {};
-static std::array<std::array<int16_t, GNUBOY_AUDIO_MONO_FRAMES>, GNUBOY_AUDIO_PLAY_BUFFERS> s_gnuboy_audio_mono_buffers = {};
-static std::array<int16_t, AUDIO_BUFFER_SIZE / 2> s_gearboy_cgb_audio_mono_buffer = {};
 static std::array<uint16_t, GB_ROM_BANK_MISS_HISTOGRAM> s_rom_bank_miss_counts = {};
+struct GameBoyRuntimeBuffers {
+    gb_s gb_context {};
+    std::array<uint8_t, GB_ROM_BANK_SIZE> rom_bank0 {};
+    std::array<uint8_t, DEFAULT_SAVE_SIZE> save_ram {};
+    std::array<uint8_t, 240> render_x_map {};
+    std::array<uint16_t, GB_RENDER_MAX_WIDTH * GB_PUSH_CHUNK_HEIGHT> push_buffer {};
+    std::array<char, 4096> rom_file_buffer {};
+    std::array<audio_sample_t, AUDIO_SAMPLES_TOTAL> audio_stereo_buffer {};
+    std::array<int16_t, AUDIO_SAMPLES> audio_mono_buffer {};
+    std::array<uint16_t, GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT> cgb_framebuffer_storage {};
+    std::array<int16_t, GNUBOY_AUDIO_STEREO_SAMPLES> cgb_audio_stereo_buffer {};
+    std::array<std::array<int16_t, GNUBOY_AUDIO_MONO_FRAMES>, GNUBOY_AUDIO_PLAY_BUFFERS> gnuboy_audio_mono_buffers {};
+    std::array<int16_t, AUDIO_BUFFER_SIZE / 2> gearboy_cgb_audio_mono_buffer {};
+};
+
+static GameBoyRuntimeBuffers* s_gb_buffers = nullptr;
 static AppPokemonYellow* s_cgb_active_app = nullptr;
 static AppPokemonYellow* s_gnuboy_active_app = nullptr;
 static volatile bool s_cgb_save_dirty_flag = false;
@@ -173,6 +198,46 @@ static constexpr std::array<uint16_t, 12> s_dmg_gray_palette = {
 
 static std::array<uint16_t, 12> s_gameboy_palette = s_dmg_lcd_palette;
 
+static bool ensureGameBoyBuffers()
+{
+    if (s_gb_buffers) {
+        return true;
+    }
+
+    void* memory = heap_caps_malloc(sizeof(GameBoyRuntimeBuffers), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!memory) {
+        mclog::tagError("GameBoy",
+                        "runtime buffer allocation failed: need={} internal_free={} largest={}",
+                        static_cast<unsigned>(sizeof(GameBoyRuntimeBuffers)),
+                        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        return false;
+    }
+
+    s_gb_buffers = new (memory) GameBoyRuntimeBuffers();
+    mclog::tagInfo("GameBoy",
+                   "runtime buffers allocated: {} bytes internal_free={} largest={}",
+                   static_cast<unsigned>(sizeof(GameBoyRuntimeBuffers)),
+                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    return true;
+}
+
+static void releaseGameBoyBuffers()
+{
+    if (!s_gb_buffers) {
+        return;
+    }
+
+    s_gb_buffers->~GameBoyRuntimeBuffers();
+    heap_caps_free(s_gb_buffers);
+    s_gb_buffers = nullptr;
+    mclog::tagInfo("GameBoy",
+                   "runtime buffers released: internal_free={} largest={}",
+                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+}
+
 static uint32_t fnv1a_update(uint32_t hash, const uint8_t* data, size_t size)
 {
     for (size_t i = 0; i < size; ++i) {
@@ -189,12 +254,12 @@ static void cgb_ram_changed_callback()
 
 static void gnuboyAudioCallback(void* buffer, size_t length)
 {
-    if (!s_gnuboy_sound_enabled || !buffer || length < 2) {
+    if (!s_gnuboy_sound_enabled || !s_gb_buffers || !buffer || length < 2) {
         return;
     }
 
     const auto* stereo = static_cast<const int16_t*>(buffer);
-    auto& mono = s_gnuboy_audio_mono_buffers[s_gnuboy_audio_buffer_index++ % s_gnuboy_audio_mono_buffers.size()];
+    auto& mono = s_gb_buffers->gnuboy_audio_mono_buffers[s_gnuboy_audio_buffer_index++ % s_gb_buffers->gnuboy_audio_mono_buffers.size()];
     const size_t frames = std::min(length / 2, mono.size());
     for (size_t i = 0; i < frames; ++i) {
         const int32_t left = stereo[i * 2];
@@ -444,7 +509,7 @@ static void audioTaskEntry(void*)
     s_audio_task_running = true;
     TickType_t lastWake = xTaskGetTickCount();
     while (!s_audio_task_stop) {
-        if (!s_audio_output_enabled || !s_audio_context_ready) {
+        if (!s_audio_output_enabled || !s_audio_context_ready || !s_gb_buffers) {
             vTaskDelay(pdMS_TO_TICKS(8));
             lastWake = xTaskGetTickCount();
             continue;
@@ -464,19 +529,19 @@ static void audioTaskEntry(void*)
             portEXIT_CRITICAL(&s_audio_lock);
         }
         portENTER_CRITICAL(&s_audio_lock);
-        minigb_apu_audio_callback(&s_audio_context, s_audio_stereo_buffer.data());
+        minigb_apu_audio_callback(&s_audio_context, s_gb_buffers->audio_stereo_buffer.data());
         portEXIT_CRITICAL(&s_audio_lock);
 
-        for (size_t i = 0; i < s_audio_mono_buffer.size(); ++i) {
-            const int32_t left = s_audio_stereo_buffer[i * 2];
-            const int32_t right = s_audio_stereo_buffer[i * 2 + 1];
+        for (size_t i = 0; i < s_gb_buffers->audio_mono_buffer.size(); ++i) {
+            const int32_t left = s_gb_buffers->audio_stereo_buffer[i * 2];
+            const int32_t right = s_gb_buffers->audio_stereo_buffer[i * 2 + 1];
             int32_t mixed = ((left + right) / 2) * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
             mixed = std::clamp<int32_t>(mixed, INT16_MIN, INT16_MAX);
-            s_audio_mono_buffer[i] = static_cast<int16_t>(mixed);
+            s_gb_buffers->audio_mono_buffer[i] = static_cast<int16_t>(mixed);
         }
 
-        const bool queued = GetHAL().speaker.playRaw(s_audio_mono_buffer.data(),
-                                                     s_audio_mono_buffer.size(),
+        const bool queued = GetHAL().speaker.playRaw(s_gb_buffers->audio_mono_buffer.data(),
+                                                     s_gb_buffers->audio_mono_buffer.size(),
                                                      AUDIO_SAMPLE_RATE,
                                                      false,
                                                      1,
@@ -717,6 +782,7 @@ AppPokemonYellow::AppPokemonYellow()
 AppPokemonYellow::~AppPokemonYellow()
 {
     stopEmulator();
+    releaseGameBoyBuffers();
     delete static_cast<AppIcon_t*>(getAppInfo().userData);
 }
 
@@ -728,6 +794,12 @@ void AppPokemonYellow::onOpen()
         mclog::tagInfo(getAppInfo().name, "entering dedicated GameBoy mode");
         gameboy_boot_mode_enter();
         esp_restart();
+        return;
+    }
+    if (!ensureGameBoyBuffers()) {
+        setStatus("No GameBoy RAM");
+        render();
+        close();
         return;
     }
 
@@ -747,6 +819,7 @@ void AppPokemonYellow::onOpen()
         [this](const Keyboard::KeyEvent_t& keyEvent) { handleKeyEvent(keyEvent); });
     setStatus("Checking SD");
     probe();
+    GetHAL().externalInput.probe(GetHAL().millis());
     logGameBoyHeap("afterProbe");
     render();
 }
@@ -777,6 +850,8 @@ void AppPokemonYellow::onRunning()
         startEmulator();
     }
 
+    updateExternalInput();
+
     if (_mode == Mode::Emulator) {
         runEmulatorFrame();
         return;
@@ -795,6 +870,7 @@ void AppPokemonYellow::onClose()
     logGameBoyHeap("onCloseBeforeStop");
     stopEmulator();
     logGameBoyHeap("onCloseAfterStop");
+    releaseGameBoyBuffers();
     if (_key_event_slot_id >= 0) {
         GetHAL().keyboard.onKeyEvent.disconnect(_key_event_slot_id);
         _key_event_slot_id = -1;
@@ -1065,6 +1141,11 @@ bool AppPokemonYellow::isEnterKey(const Keyboard::KeyEvent_t& keyEvent, const Ke
 
 void AppPokemonYellow::startEmulator()
 {
+    if (!ensureGameBoyBuffers()) {
+        setStatus("No GameBoy RAM");
+        renderBrowser();
+        return;
+    }
     if (!_state.romFound || _state.romPath.empty()) {
         setStatus("Select ROM first");
         render();
@@ -1095,14 +1176,14 @@ void AppPokemonYellow::startEmulator()
             renderBrowser();
             return;
         }
-        std::setvbuf(_rom_file, s_rom_file_buffer.data(), _IOFBF, s_rom_file_buffer.size());
+        std::setvbuf(_rom_file, s_gb_buffers->rom_file_buffer.data(), _IOFBF, s_gb_buffers->rom_file_buffer.size());
         mclog::tagInfo(getAppInfo().name, "using SD ROM bank cache backend");
     }
 
     setStatus("Loading emulator");
     renderBrowser();
 
-    std::fill(s_rom_bank0.begin(), s_rom_bank0.end(), 0xFF);
+    std::fill(s_gb_buffers->rom_bank0.begin(), s_gb_buffers->rom_bank0.end(), 0xFF);
     for (size_t i = 0; i < _rom_cache_slot_count; ++i) {
         if (_rom_bank_cache[i]) {
             std::fill(_rom_bank_cache[i], _rom_bank_cache[i] + GB_ROM_BANK_SIZE, 0xFF);
@@ -1116,24 +1197,24 @@ void AppPokemonYellow::startEmulator()
     _last_save_flush = GetHAL().millis();
     _last_save_write = 0;
 
-    if (!loadRomBank(0, s_rom_bank0.data(), s_rom_bank0.size())) {
+    if (!loadRomBank(0, s_gb_buffers->rom_bank0.data(), s_gb_buffers->rom_bank0.size())) {
         setStatus("ROM read failed");
         stopEmulator();
         renderBrowser();
         return;
     }
-    const bool forcedRtcMapper = forcePokemonGoldRtcMapper(s_rom_bank0.data(), _state.romPath);
-    const auto paletteSelection = applyStandardDmgPalette(s_rom_bank0.data());
+    const bool forcedRtcMapper = forcePokemonGoldRtcMapper(s_gb_buffers->rom_bank0.data(), _state.romPath);
+    const auto paletteSelection = applyStandardDmgPalette(s_gb_buffers->rom_bank0.data());
     mclog::tagInfo(getAppInfo().name,
                    "rom title='{}' cgb flag=0x{:02X} type=0x{:02X} ram=0x{:02X} checksum=0x{:02X} palette={} matched={} licensed={} rtc_mapper={} (Peanut-GB runs DMG display path)",
-                   romHeaderTitle(s_rom_bank0.data()),
-                   s_rom_bank0[0x0143],
-                   s_rom_bank0[0x0147],
-                   s_rom_bank0[0x0149],
+                   romHeaderTitle(s_gb_buffers->rom_bank0.data()),
+                   s_gb_buffers->rom_bank0[0x0143],
+                   s_gb_buffers->rom_bank0[0x0147],
+                   s_gb_buffers->rom_bank0[0x0149],
                    paletteSelection.checksum,
                    static_cast<unsigned>(paletteSelection.combination),
                    paletteSelection.matched ? "yes" : "no",
-                   isNintendoLicensedRom(s_rom_bank0.data()) ? "yes" : "no",
+                   isNintendoLicensedRom(s_gb_buffers->rom_bank0.data()) ? "yes" : "no",
                    forcedRtcMapper ? "forced" : "header");
     if (paletteSelection.cgb_capable) {
         if (flashBackend) {
@@ -1164,8 +1245,8 @@ void AppPokemonYellow::startEmulator()
         return;
     }
 
-    std::memset(&s_gb_context, 0, sizeof(s_gb_context));
-    _gb = &s_gb_context;
+    std::memset(&s_gb_buffers->gb_context, 0, sizeof(s_gb_buffers->gb_context));
+    _gb = &s_gb_buffers->gb_context;
 
     auto init = gb_init(_gb,
                         gbRomReadCallback,
@@ -1254,7 +1335,7 @@ bool AppPokemonYellow::startGnuboyCgbEmulator()
     _gnuboy_active = false;
     _gnuboy_pad = 0;
 
-    gnuboy_set_sram_buffer(s_save_ram.data(), s_save_ram.size());
+    gnuboy_set_sram_buffer(s_gb_buffers->save_ram.data(), s_gb_buffers->save_ram.size());
     gnuboy_set_color_mode(_gnuboy_color_mode);
     if (gnuboy_init(AUDIO_SAMPLE_RATE, GB_AUDIO_STEREO_S16, GB_PIXEL_565_LE, nullptr, gnuboyAudioCallback) < 0) {
         mclog::tagWarn(getAppInfo().name, "gnuboy init failed");
@@ -1265,7 +1346,7 @@ bool AppPokemonYellow::startGnuboyCgbEmulator()
     }
 
     gnuboy_set_framebuffer(_cgb_framebuffer);
-    gnuboy_set_soundbuffer(s_cgb_audio_stereo_buffer.data(), s_cgb_audio_stereo_buffer.size());
+    gnuboy_set_soundbuffer(s_gb_buffers->cgb_audio_stereo_buffer.data(), s_gb_buffers->cgb_audio_stereo_buffer.size());
 
     if (gnuboy_load_rom(_rom_flash_data, _rom_flash_size) < 0) {
         mclog::tagWarn(getAppInfo().name, "gnuboy ROM load failed");
@@ -1280,11 +1361,11 @@ bool AppPokemonYellow::startGnuboyCgbEmulator()
     gnuboy_reset(true);
     _save_ram_size = DEFAULT_SAVE_SIZE;
     if (!_state.savePath.empty()) {
-        std::fill(s_save_ram.begin(), s_save_ram.end(), 0xFF);
+        std::fill(s_gb_buffers->save_ram.begin(), s_gb_buffers->save_ram.end(), 0xFF);
         FILE* fp = std::fopen(_state.savePath.c_str(), "rb");
         size_t bytesRead = 0;
         if (fp) {
-            bytesRead = std::fread(s_save_ram.data(), 1, DEFAULT_SAVE_SIZE, fp);
+            bytesRead = std::fread(s_gb_buffers->save_ram.data(), 1, DEFAULT_SAVE_SIZE, fp);
             std::fclose(fp);
         }
         printf("gnuboy SRAM load: path=%s bytes=%u\n",
@@ -1434,6 +1515,9 @@ void AppPokemonYellow::stopEmulator()
     }
 
     stopEmulatorTask();
+    applyExternalPadButtons(0);
+    _external_pad_buttons = 0;
+    _external_pad_last_buttons = 0;
     if (_display_write_active) {
         GetHAL().display.endWrite();
         _display_write_active = false;
@@ -1458,7 +1542,9 @@ void AppPokemonYellow::stopEmulator()
     }
     releaseFlashRomCache();
     _gb = nullptr;
-    std::fill(s_rom_bank0.begin(), s_rom_bank0.end(), 0xFF);
+    if (s_gb_buffers) {
+        std::fill(s_gb_buffers->rom_bank0.begin(), s_gb_buffers->rom_bank0.end(), 0xFF);
+    }
     for (size_t i = 0; i < _rom_cache_slot_count; ++i) {
         if (_rom_bank_cache[i]) {
             std::fill(_rom_bank_cache[i], _rom_bank_cache[i] + GB_ROM_BANK_SIZE, 0xFF);
@@ -1722,9 +1808,9 @@ void AppPokemonYellow::renderCgbEmulatorFrame()
         _render_h = std::min(displayH, GB_RENDER_MAX_HEIGHT);
         _render_x = (displayW - _render_w) / 2;
         _render_y = (displayH - _render_h) / 2;
-        if (_render_w > 0 && _render_w <= static_cast<int>(s_render_x_map.size())) {
+        if (_render_w > 0 && _render_w <= static_cast<int>(s_gb_buffers->render_x_map.size())) {
             for (int x = 0; x < _render_w; ++x) {
-                s_render_x_map[x] = static_cast<uint8_t>(x * GB_SCREEN_WIDTH / _render_w);
+                s_gb_buffers->render_x_map[x] = static_cast<uint8_t>(x * GB_SCREEN_WIDTH / _render_w);
             }
         }
         _render_geometry_valid = true;
@@ -1741,12 +1827,12 @@ void AppPokemonYellow::renderCgbEmulatorFrame()
         for (int rowIndex = 0; rowIndex < rows; ++rowIndex) {
             const int srcY = (y + rowIndex) * GB_SCREEN_HEIGHT / _render_h;
             const uint16_t* src = _cgb_framebuffer + static_cast<size_t>(srcY) * GB_SCREEN_WIDTH;
-            uint16_t* dst = s_push_buffer.data() + static_cast<size_t>(rowIndex) * GB_RENDER_MAX_WIDTH;
+            uint16_t* dst = s_gb_buffers->push_buffer.data() + static_cast<size_t>(rowIndex) * GB_RENDER_MAX_WIDTH;
             for (int x = 0; x < _render_w; ++x) {
-                dst[x] = src[s_render_x_map[x]];
+                dst[x] = src[s_gb_buffers->render_x_map[x]];
             }
         }
-        GetHAL().display.pushImage(_render_x, _render_y + y, _render_w, rows, s_push_buffer.data());
+        GetHAL().display.pushImage(_render_x, _render_y + y, _render_w, rows, s_gb_buffers->push_buffer.data());
     }
     _perf_draw_ms_total += GetHAL().millis() - drawStart;
     ++_perf_drawn_frames;
@@ -1777,17 +1863,17 @@ void AppPokemonYellow::runCgbEmulatorFrame()
 
     int sampleCount = 0;
     _cgb_core->SetSoundMute(!_sound_enabled);
-    _cgb_core->RunToVBlank(_cgb_framebuffer, s_cgb_audio_stereo_buffer.data(), &sampleCount, false, nullptr);
+    _cgb_core->RunToVBlank(_cgb_framebuffer, s_gb_buffers->cgb_audio_stereo_buffer.data(), &sampleCount, false, nullptr);
     if (_sound_enabled && sampleCount > 1) {
-        const size_t frames = std::min(static_cast<size_t>(sampleCount / 2), s_gearboy_cgb_audio_mono_buffer.size());
+        const size_t frames = std::min(static_cast<size_t>(sampleCount / 2), s_gb_buffers->gearboy_cgb_audio_mono_buffer.size());
         for (size_t i = 0; i < frames; ++i) {
-            const int32_t left = s_cgb_audio_stereo_buffer[i * 2];
-            const int32_t right = s_cgb_audio_stereo_buffer[i * 2 + 1];
+            const int32_t left = s_gb_buffers->cgb_audio_stereo_buffer[i * 2];
+            const int32_t right = s_gb_buffers->cgb_audio_stereo_buffer[i * 2 + 1];
             int32_t mixed = ((left + right) / 2) * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
             mixed = std::clamp<int32_t>(mixed, INT16_MIN, INT16_MAX);
-            s_gearboy_cgb_audio_mono_buffer[i] = static_cast<int16_t>(mixed);
+            s_gb_buffers->gearboy_cgb_audio_mono_buffer[i] = static_cast<int16_t>(mixed);
         }
-        GetHAL().speaker.playRaw(s_gearboy_cgb_audio_mono_buffer.data(), frames, AUDIO_SAMPLE_RATE, false, 1, 0, false);
+        GetHAL().speaker.playRaw(s_gb_buffers->gearboy_cgb_audio_mono_buffer.data(), frames, AUDIO_SAMPLE_RATE, false, 1, 0, false);
     }
 
     ++_perf_emulated_frames;
@@ -1845,9 +1931,12 @@ bool AppPokemonYellow::allocateCgbFramebuffer()
     if (_cgb_framebuffer) {
         return true;
     }
+    if (!ensureGameBoyBuffers()) {
+        return false;
+    }
 
-    const size_t bytes = s_cgb_framebuffer_storage.size() * sizeof(uint16_t);
-    _cgb_framebuffer = s_cgb_framebuffer_storage.data();
+    const size_t bytes = s_gb_buffers->cgb_framebuffer_storage.size() * sizeof(uint16_t);
+    _cgb_framebuffer = s_gb_buffers->cgb_framebuffer_storage.data();
     std::fill(_cgb_framebuffer, _cgb_framebuffer + GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT, TFT_BLACK);
     mclog::tagInfo(getAppInfo().name, "CGB framebuffer ready: {} static bytes", static_cast<unsigned>(bytes));
     return true;
@@ -1867,9 +1956,12 @@ bool AppPokemonYellow::allocateFramebuffer()
     if (_framebuffer) {
         return true;
     }
+    if (!ensureGameBoyBuffers()) {
+        return false;
+    }
 
     const size_t bytes = GB_FRAMEBUFFER_PIXELS;
-    const size_t storageBytes = s_cgb_framebuffer_storage.size() * sizeof(uint16_t);
+    const size_t storageBytes = s_gb_buffers->cgb_framebuffer_storage.size() * sizeof(uint16_t);
     if (bytes > storageBytes) {
         mclog::tagError(getAppInfo().name,
                         "static framebuffer storage too small: need={} have={}",
@@ -1878,7 +1970,7 @@ bool AppPokemonYellow::allocateFramebuffer()
         return false;
     }
 
-    _framebuffer = reinterpret_cast<uint8_t*>(s_cgb_framebuffer_storage.data());
+    _framebuffer = reinterpret_cast<uint8_t*>(s_gb_buffers->cgb_framebuffer_storage.data());
     std::fill(_framebuffer, _framebuffer + GB_FRAMEBUFFER_PIXELS, 0);
     mclog::tagInfo(getAppInfo().name, "framebuffer ready: {} static bytes", static_cast<unsigned>(bytes));
     return true;
@@ -2007,7 +2099,7 @@ bool AppPokemonYellow::installFlashRomCache(const esp_partition_t* partition, ui
         mclog::tagWarn(getAppInfo().name, "flash cache install open failed: {}", errno);
         return false;
     }
-    std::setvbuf(fp, s_rom_file_buffer.data(), _IOFBF, s_rom_file_buffer.size());
+    std::setvbuf(fp, s_gb_buffers->rom_file_buffer.data(), _IOFBF, s_gb_buffers->rom_file_buffer.size());
 
     const size_t eraseSize = (ROM_FLASH_CACHE_DATA_OFFSET + _state.romSize + 4095) & ~static_cast<size_t>(4095);
     mclog::tagInfo(getAppInfo().name,
@@ -2027,19 +2119,19 @@ bool AppPokemonYellow::installFlashRomCache(const esp_partition_t* partition, ui
     uint32_t hash = 2166136261U;
     bool patchedGoldHeader = false;
     while (written < _state.romSize) {
-        const size_t want = std::min(s_rom_file_buffer.size(), _state.romSize - written);
-        const size_t got = std::fread(s_rom_file_buffer.data(), 1, want, fp);
+        const size_t want = std::min(s_gb_buffers->rom_file_buffer.size(), _state.romSize - written);
+        const size_t got = std::fread(s_gb_buffers->rom_file_buffer.data(), 1, want, fp);
         if (got == 0) {
             std::fclose(fp);
             mclog::tagWarn(getAppInfo().name, "flash cache read stopped at {}", static_cast<unsigned>(written));
             return false;
         }
         if (written == 0 && got > 0x150 &&
-            forcePokemonGoldRtcMapper(reinterpret_cast<uint8_t*>(s_rom_file_buffer.data()), _state.romPath)) {
+            forcePokemonGoldRtcMapper(reinterpret_cast<uint8_t*>(s_gb_buffers->rom_file_buffer.data()), _state.romPath)) {
             patchedGoldHeader = true;
         }
-        hash = fnv1a_update(hash, reinterpret_cast<const uint8_t*>(s_rom_file_buffer.data()), got);
-        err = esp_partition_write(partition, ROM_FLASH_CACHE_DATA_OFFSET + written, s_rom_file_buffer.data(), got);
+        hash = fnv1a_update(hash, reinterpret_cast<const uint8_t*>(s_gb_buffers->rom_file_buffer.data()), got);
+        err = esp_partition_write(partition, ROM_FLASH_CACHE_DATA_OFFSET + written, s_gb_buffers->rom_file_buffer.data(), got);
         if (err != ESP_OK) {
             std::fclose(fp);
             mclog::tagWarn(getAppInfo().name, "flash cache write failed at {}: {}", static_cast<unsigned>(written), esp_err_to_name(err));
@@ -2380,7 +2472,7 @@ uint8_t AppPokemonYellow::emulatorRomRead(uint_fast32_t addr)
     const size_t offset = static_cast<size_t>(addr % GB_ROM_BANK_SIZE);
 
     if (bank == 0) {
-        return offset < s_rom_bank0.size() ? s_rom_bank0[offset] : 0xFF;
+        return offset < s_gb_buffers->rom_bank0.size() ? s_gb_buffers->rom_bank0[offset] : 0xFF;
     }
 
     if (_rom_cache_slot_count == 0) {
@@ -2426,7 +2518,7 @@ uint8_t AppPokemonYellow::emulatorSaveRead(uint_fast32_t addr) const
     if (addr >= _save_ram_size) {
         return 0xFF;
     }
-    return s_save_ram[addr];
+    return s_gb_buffers->save_ram[addr];
 }
 
 void AppPokemonYellow::emulatorSaveWrite(uint_fast32_t addr, uint8_t value)
@@ -2434,8 +2526,8 @@ void AppPokemonYellow::emulatorSaveWrite(uint_fast32_t addr, uint8_t value)
     if (addr >= _save_ram_size) {
         return;
     }
-    if (s_save_ram[addr] != value) {
-        s_save_ram[addr] = value;
+    if (s_gb_buffers->save_ram[addr] != value) {
+        s_gb_buffers->save_ram[addr] = value;
         _save_dirty = true;
         _last_save_write = GetHAL().millis();
     }
@@ -2454,9 +2546,9 @@ void AppPokemonYellow::emulatorDrawLine(const uint8_t* pixels, uint_fast8_t line
         _render_h = std::min(displayH, GB_RENDER_MAX_HEIGHT);
         _render_x = (displayW - _render_w) / 2;
         _render_y = (displayH - _render_h) / 2;
-        if (_render_w > 0 && _render_w <= static_cast<int>(s_render_x_map.size())) {
+        if (_render_w > 0 && _render_w <= static_cast<int>(s_gb_buffers->render_x_map.size())) {
             for (int x = 0; x < _render_w; ++x) {
-                s_render_x_map[x] = static_cast<uint8_t>(x * GB_SCREEN_WIDTH / _render_w);
+                s_gb_buffers->render_x_map[x] = static_cast<uint8_t>(x * GB_SCREEN_WIDTH / _render_w);
             }
         }
         _render_geometry_valid = true;
@@ -2478,7 +2570,7 @@ void AppPokemonYellow::emulatorDrawLine(const uint8_t* pixels, uint_fast8_t line
 
     uint8_t* row = _framebuffer + static_cast<size_t>(frameRow) * GB_RENDER_MAX_WIDTH;
     for (int x = 0; x < _render_w; ++x) {
-        const uint8_t pixel = pixels[s_render_x_map[x]];
+        const uint8_t pixel = pixels[s_gb_buffers->render_x_map[x]];
         uint8_t paletteGroup = GB_PALETTE_GROUP_OBJ0;
         if ((pixel & LCD_PALETTE_ALL) == LCD_PALETTE_BG) {
             paletteGroup = GB_PALETTE_GROUP_BG;
@@ -2494,12 +2586,12 @@ void AppPokemonYellow::emulatorDrawLine(const uint8_t* pixels, uint_fast8_t line
             const int rows = std::min(GB_PUSH_CHUNK_HEIGHT, _render_h - y);
             for (int rowIndex = 0; rowIndex < rows; ++rowIndex) {
                 const uint8_t* src = _framebuffer + static_cast<size_t>(y + rowIndex) * GB_RENDER_MAX_WIDTH;
-                uint16_t* dst = s_push_buffer.data() + static_cast<size_t>(rowIndex) * GB_RENDER_MAX_WIDTH;
+                uint16_t* dst = s_gb_buffers->push_buffer.data() + static_cast<size_t>(rowIndex) * GB_RENDER_MAX_WIDTH;
                 for (int x = 0; x < _render_w; ++x) {
                     dst[x] = s_gameboy_palette[src[x] % s_gameboy_palette.size()];
                 }
             }
-            GetHAL().display.pushImage(_render_x, _render_y + y, _render_w, rows, s_push_buffer.data());
+            GetHAL().display.pushImage(_render_x, _render_y + y, _render_w, rows, s_gb_buffers->push_buffer.data());
         }
         _perf_draw_ms_total += GetHAL().millis() - drawStart;
         ++_perf_drawn_frames;
@@ -2508,16 +2600,16 @@ void AppPokemonYellow::emulatorDrawLine(const uint8_t* pixels, uint_fast8_t line
 
 void AppPokemonYellow::loadSaveRam(size_t saveSize)
 {
-    if (saveSize == 0 || saveSize > s_save_ram.size()) {
+    if (saveSize == 0 || saveSize > s_gb_buffers->save_ram.size()) {
         mclog::tagWarn(getAppInfo().name,
                        "unexpected save size {}, using {}",
                        static_cast<unsigned>(saveSize),
-                       static_cast<unsigned>(s_save_ram.size()));
-        saveSize = s_save_ram.size();
+                       static_cast<unsigned>(s_gb_buffers->save_ram.size()));
+        saveSize = s_gb_buffers->save_ram.size();
     }
 
     _save_ram_size = saveSize;
-    std::fill(s_save_ram.begin(), s_save_ram.end(), 0xFF);
+    std::fill(s_gb_buffers->save_ram.begin(), s_gb_buffers->save_ram.end(), 0xFF);
     if (_state.savePath.empty()) {
         return;
     }
@@ -2528,7 +2620,7 @@ void AppPokemonYellow::loadSaveRam(size_t saveSize)
         return;
     }
 
-    auto bytesRead = std::fread(s_save_ram.data(), 1, _save_ram_size, fp);
+    auto bytesRead = std::fread(s_gb_buffers->save_ram.data(), 1, _save_ram_size, fp);
     std::fclose(fp);
     mclog::tagInfo(getAppInfo().name, "save loaded: {} ({} bytes)", _state.savePath, static_cast<unsigned>(bytesRead));
 }
@@ -2591,7 +2683,7 @@ void AppPokemonYellow::flushSaveRam(bool force)
         mclog::tagError(getAppInfo().name, "save flush failed: {}", _state.savePath);
         return;
     }
-    std::fwrite(s_save_ram.data(), 1, _save_ram_size, fp);
+    std::fwrite(s_gb_buffers->save_ram.data(), 1, _save_ram_size, fp);
     std::fclose(fp);
     _last_save_flush = GetHAL().millis();
     _save_dirty = false;
@@ -2684,6 +2776,331 @@ void AppPokemonYellow::setJoypadButton(uint8_t button, bool pressed)
         _gb->direct.joypad &= ~button;
     } else {
         _gb->direct.joypad |= button;
+    }
+}
+
+void AppPokemonYellow::updateExternalInput()
+{
+    const auto now = GetHAL().millis();
+    if (now - _external_input_last_poll < EXTERNAL_INPUT_POLL_INTERVAL_MS) {
+        return;
+    }
+    _external_input_last_poll = now;
+
+    const bool connected = GetHAL().externalInput.isConnected();
+    const uint8_t buttons = GetHAL().externalInput.getButtons();
+    if (!connected && buttons == 0) {
+        if (_external_pad_buttons != 0) {
+            applyExternalPadButtons(0);
+        }
+        _external_pad_last_buttons = 0;
+        _external_pad_buttons = 0;
+        return;
+    }
+
+    if (_mode == Mode::Emulator) {
+        applyExternalPadButtons(buttons);
+    } else {
+        handleBrowserExternalInput(buttons);
+    }
+
+    _external_pad_last_buttons = _external_pad_buttons;
+    _external_pad_buttons = buttons;
+}
+
+void AppPokemonYellow::probeExternalInput()
+{
+    const auto previousJoystick = _external_joystick_type;
+    const bool previousButtons = _external_buttons_connected;
+    auto* previousBus = _external_i2c;
+    const auto now = GetHAL().millis();
+
+    M5.Ex_I2C.begin();
+
+    auto probeBus = [this](m5::I2C_Class& bus) {
+        ExternalJoystickType joystick = ExternalJoystickType::None;
+        if (bus.scanID(JOYSTICK2_ADDR, EXTERNAL_INPUT_I2C_FREQ)) {
+            joystick = ExternalJoystickType::Joystick2;
+        } else if (bus.scanID(JOYSTICK_UNIT_ADDR, EXTERNAL_INPUT_I2C_FREQ)) {
+            joystick = ExternalJoystickType::JoystickUnit;
+        }
+
+        const bool byteButtons = bus.scanID(BYTE_BUTTON_ADDR, EXTERNAL_INPUT_I2C_FREQ);
+        if (joystick == ExternalJoystickType::None && !byteButtons) {
+            return false;
+        }
+
+        _external_i2c = &bus;
+        _external_joystick_type = joystick;
+        _external_buttons_connected = byteButtons;
+        return true;
+    };
+
+    _external_i2c = nullptr;
+    _external_buttons_connected = false;
+    if (!probeBus(M5.Ex_I2C) && !probeBus(M5.In_I2C)) {
+        _external_joystick_type = ExternalJoystickType::None;
+    }
+    _external_input_last_probe = now;
+
+    const bool stateChanged = previousJoystick != _external_joystick_type ||
+                              previousButtons != _external_buttons_connected ||
+                              previousBus != _external_i2c;
+    const bool shouldLogScan = stateChanged ||
+                               !_external_input_scan_logged ||
+                               now - _external_input_last_scan_log >= EXTERNAL_INPUT_SCAN_LOG_INTERVAL_MS;
+
+    if (shouldLogScan) {
+        _external_input_scan_logged = true;
+        _external_input_last_scan_log = now;
+        mclog::tagInfo(getAppInfo().name,
+                       "external i2c scan: ex=[{}] in=[{}]",
+                       scanI2CBus(M5.Ex_I2C),
+                       scanI2CBus(M5.In_I2C));
+    }
+
+    if (stateChanged || shouldLogScan) {
+        const char* joystickName = "none";
+        if (_external_joystick_type == ExternalJoystickType::JoystickUnit) {
+            joystickName = "joystick-unit";
+        } else if (_external_joystick_type == ExternalJoystickType::Joystick2) {
+            joystickName = "joystick2";
+        }
+        mclog::tagInfo(getAppInfo().name,
+                       "external input: bus={} joystick={} byte_buttons={}",
+                       _external_i2c == &M5.Ex_I2C ? "ex" : (_external_i2c == &M5.In_I2C ? "in" : "none"),
+                       joystickName,
+                       _external_buttons_connected ? "yes" : "no");
+    }
+}
+
+std::string AppPokemonYellow::scanI2CBus(m5::I2C_Class& bus)
+{
+    std::string addresses;
+    for (uint8_t address = 0x08; address < 0x78; ++address) {
+        if (!bus.scanID(address, EXTERNAL_INPUT_I2C_FREQ)) {
+            continue;
+        }
+        if (!addresses.empty()) {
+            addresses += ",";
+        }
+        addresses += fmt::format("0x{:02X}", address);
+    }
+    if (addresses.empty()) {
+        return "none";
+    }
+    return addresses;
+}
+
+bool AppPokemonYellow::readExternalInput(uint8_t& buttons)
+{
+    buttons = 0;
+    const auto now = GetHAL().millis();
+    if (_external_joystick_type == ExternalJoystickType::None && !_external_buttons_connected &&
+        now - _external_input_last_probe >= EXTERNAL_INPUT_PROBE_INTERVAL_MS) {
+        probeExternalInput();
+    }
+
+    bool connected = false;
+    uint8_t joystickButtons = 0;
+    if (_external_joystick_type == ExternalJoystickType::JoystickUnit) {
+        if (readJoystickUnit(joystickButtons)) {
+            buttons |= joystickButtons;
+            connected = true;
+        } else {
+            mclog::tagWarn(getAppInfo().name, "joystick-unit read failed");
+            _external_joystick_type = ExternalJoystickType::None;
+        }
+    } else if (_external_joystick_type == ExternalJoystickType::Joystick2) {
+        if (readJoystick2(joystickButtons)) {
+            buttons |= joystickButtons;
+            connected = true;
+        } else {
+            mclog::tagWarn(getAppInfo().name, "joystick2 read failed");
+            _external_joystick_type = ExternalJoystickType::None;
+        }
+    }
+
+    uint8_t byteButtons = 0;
+    if (_external_buttons_connected) {
+        if (readByteButtons(byteButtons)) {
+            buttons |= byteButtons;
+            connected = true;
+        } else {
+            mclog::tagWarn(getAppInfo().name, "byte buttons read failed");
+            _external_buttons_connected = false;
+        }
+    }
+
+    if (!connected && now - _external_input_last_probe >= EXTERNAL_INPUT_PROBE_INTERVAL_MS) {
+        probeExternalInput();
+    }
+    return connected;
+}
+
+bool AppPokemonYellow::readJoystickUnit(uint8_t& buttons)
+{
+    buttons = 0;
+    if (!_external_i2c) {
+        return false;
+    }
+    uint8_t data[3] = {};
+    if (!_external_i2c->start(JOYSTICK_UNIT_ADDR, true, EXTERNAL_INPUT_I2C_FREQ)) {
+        return false;
+    }
+    const bool ok = _external_i2c->read(data, sizeof(data), true);
+    _external_i2c->stop();
+    if (!ok) {
+        return false;
+    }
+
+    const int x = data[0];
+    const int y = data[1];
+    if (x < JOYSTICK_UNIT_CENTER - JOYSTICK_UNIT_DEAD_ZONE) {
+        buttons |= EXT_PAD_LEFT;
+    } else if (x > JOYSTICK_UNIT_CENTER + JOYSTICK_UNIT_DEAD_ZONE) {
+        buttons |= EXT_PAD_RIGHT;
+    }
+    if (y < JOYSTICK_UNIT_CENTER - JOYSTICK_UNIT_DEAD_ZONE) {
+        buttons |= EXT_PAD_UP;
+    } else if (y > JOYSTICK_UNIT_CENTER + JOYSTICK_UNIT_DEAD_ZONE) {
+        buttons |= EXT_PAD_DOWN;
+    }
+    if (data[2] != 0) {
+        buttons |= EXT_PAD_A;
+    }
+    return true;
+}
+
+bool AppPokemonYellow::readJoystick2(uint8_t& buttons)
+{
+    buttons = 0;
+    if (!_external_i2c) {
+        return false;
+    }
+    uint8_t offsets[2] = {};
+    if (!_external_i2c->readRegister(JOYSTICK2_ADDR,
+                                     JOYSTICK2_OFFSET_ADC_VALUE_8BITS_REG,
+                                     offsets,
+                                     sizeof(offsets),
+                                     EXTERNAL_INPUT_I2C_FREQ)) {
+        return false;
+    }
+
+    const int x = static_cast<int8_t>(offsets[0]);
+    const int y = static_cast<int8_t>(offsets[1]);
+    if (x < -JOYSTICK2_DEAD_ZONE) {
+        buttons |= EXT_PAD_LEFT;
+    } else if (x > JOYSTICK2_DEAD_ZONE) {
+        buttons |= EXT_PAD_RIGHT;
+    }
+    if (y < -JOYSTICK2_DEAD_ZONE) {
+        buttons |= EXT_PAD_UP;
+    } else if (y > JOYSTICK2_DEAD_ZONE) {
+        buttons |= EXT_PAD_DOWN;
+    }
+
+    uint8_t button = 1;
+    if (_external_i2c->readRegister(JOYSTICK2_ADDR, JOYSTICK2_BUTTON_REG, &button, 1, EXTERNAL_INPUT_I2C_FREQ) &&
+        button == 0) {
+        buttons |= EXT_PAD_A;
+    }
+    return true;
+}
+
+bool AppPokemonYellow::readByteButtons(uint8_t& buttons)
+{
+    buttons = 0;
+    if (!_external_i2c) {
+        return false;
+    }
+    uint8_t status[8] = {};
+    if (!_external_i2c->readRegister(BYTE_BUTTON_ADDR,
+                                     BYTE_BUTTON_STATUS_8BYTE_REG,
+                                     status,
+                                     sizeof(status),
+                                     EXTERNAL_INPUT_I2C_FREQ)) {
+        return false;
+    }
+
+    if (status[0]) {
+        buttons |= EXT_PAD_B;
+    }
+    if (status[1]) {
+        buttons |= EXT_PAD_A;
+    }
+    if (status[2]) {
+        buttons |= EXT_PAD_SELECT;
+    }
+    if (status[3]) {
+        buttons |= EXT_PAD_START;
+    }
+    if (status[4]) {
+        buttons |= EXT_PAD_UP;
+    }
+    if (status[5]) {
+        buttons |= EXT_PAD_DOWN;
+    }
+    if (status[6]) {
+        buttons |= EXT_PAD_LEFT;
+    }
+    if (status[7]) {
+        buttons |= EXT_PAD_RIGHT;
+    }
+    return true;
+}
+
+void AppPokemonYellow::applyExternalPadButtons(uint8_t buttons)
+{
+    const uint8_t changed = buttons ^ _external_pad_buttons;
+    if (changed == 0) {
+        return;
+    }
+
+    auto apply = [this, buttons, changed](uint8_t externalButton, uint8_t joypadButton) {
+        if ((changed & externalButton) == 0) {
+            return;
+        }
+        setJoypadButton(joypadButton, (buttons & externalButton) != 0);
+    };
+
+    apply(EXT_PAD_UP, JOYPAD_UP);
+    apply(EXT_PAD_DOWN, JOYPAD_DOWN);
+    apply(EXT_PAD_LEFT, JOYPAD_LEFT);
+    apply(EXT_PAD_RIGHT, JOYPAD_RIGHT);
+    apply(EXT_PAD_A, JOYPAD_A);
+    apply(EXT_PAD_B, JOYPAD_B);
+    apply(EXT_PAD_SELECT, JOYPAD_SELECT);
+    apply(EXT_PAD_START, JOYPAD_START);
+}
+
+void AppPokemonYellow::handleBrowserExternalInput(uint8_t buttons)
+{
+    const uint8_t pressed = buttons & ~_external_pad_buttons;
+    if (pressed == 0) {
+        return;
+    }
+
+    if (pressed & EXT_PAD_UP) {
+        selectRom(-1);
+        setStatus("Selected");
+        render();
+    } else if (pressed & EXT_PAD_DOWN) {
+        selectRom(1);
+        setStatus("Selected");
+        render();
+    } else if (pressed & (EXT_PAD_A | EXT_PAD_START)) {
+        activateSelectedRom();
+        createSaveIfNeeded();
+        if (_state.romFound && !_state.savePath.empty()) {
+            _state.saveFound = fileExists(_state.savePath.c_str(), &_state.saveSize);
+        }
+        setStatus("Launching");
+        _pending_launch = true;
+        render();
+    } else if (pressed & EXT_PAD_SELECT) {
+        toggleSound();
+        render();
     }
 }
 

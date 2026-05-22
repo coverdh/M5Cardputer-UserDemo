@@ -18,6 +18,7 @@
 #include "app_set_wifi/app_set_wifi.h"
 #include "app_clock/app_clock.h"
 #include "app_keyboard/app_keyboard.h"
+#include "app_external_input_test/app_external_input_test.h"
 #include "app_imu/app_imu.h"
 #include "app_sdcard/app_sdcard.h"
 #include "app_lora_chat/app_lora_chat.h"

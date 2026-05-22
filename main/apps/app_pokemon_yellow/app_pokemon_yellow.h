@@ -62,6 +62,12 @@ private:
         Emulator,
     };
 
+    enum class ExternalJoystickType {
+        None,
+        JoystickUnit,
+        Joystick2,
+    };
+
     FileState _state;
     std::vector<RomEntry> _roms;
     int _key_event_slot_id = -1;
@@ -117,6 +123,15 @@ private:
     int _render_y = 0;
     int _render_w = 0;
     int _render_h = 0;
+    ExternalJoystickType _external_joystick_type = ExternalJoystickType::None;
+    m5::I2C_Class* _external_i2c = nullptr;
+    uint8_t _external_pad_buttons = 0;
+    uint8_t _external_pad_last_buttons = 0;
+    uint32_t _external_input_last_probe = 0;
+    uint32_t _external_input_last_poll = 0;
+    uint32_t _external_input_last_scan_log = 0;
+    bool _external_buttons_connected = false;
+    bool _external_input_scan_logged = false;
 
     void probe();
     void render();
@@ -155,6 +170,15 @@ private:
     void loadSaveRam(size_t saveSize);
     void flushSaveRam(bool force);
     void setJoypadButton(uint8_t button, bool pressed);
+    void updateExternalInput();
+    void probeExternalInput();
+    std::string scanI2CBus(m5::I2C_Class& bus);
+    bool readExternalInput(uint8_t& buttons);
+    bool readJoystickUnit(uint8_t& buttons);
+    bool readJoystick2(uint8_t& buttons);
+    bool readByteButtons(uint8_t& buttons);
+    void applyExternalPadButtons(uint8_t buttons);
+    void handleBrowserExternalInput(uint8_t buttons);
     void createSaveIfNeeded();
     void createDirectories();
     bool scanRomDirectory(const char* directory);

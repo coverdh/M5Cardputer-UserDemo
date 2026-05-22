@@ -54,6 +54,19 @@ void LauncherMenu::init(int launcherAppId)
 
 void LauncherMenu::onReadInput()
 {
+    const uint8_t padPressed = GetHAL().externalInput.getPressed();
+    const uint8_t padReleased = GetHAL().externalInput.getReleased();
+    if (padPressed & (ExternalInput::PAD_LEFT | ExternalInput::PAD_UP)) {
+        goLast();
+    } else if (padPressed & (ExternalInput::PAD_RIGHT | ExternalInput::PAD_DOWN)) {
+        goNext();
+    } else if (padPressed & (ExternalInput::PAD_A | ExternalInput::PAD_START)) {
+        press(getSelectedKeyframe());
+    }
+    if (padReleased & (ExternalInput::PAD_A | ExternalInput::PAD_START)) {
+        release();
+    }
+
     auto event = GetHAL().keyboard.getLatestKeyEventRaw();
     // mclog::info("({},{}) {}", event.row, event.col, event.state);
 

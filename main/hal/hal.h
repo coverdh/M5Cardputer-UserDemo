@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "keyboard/keyboard.h"
+#include "external_input.h"
 #include "cap_lora868/cap_lora868.h"
 #include "utils/settings/settings.h"
 #include <M5Unified.hpp>
@@ -79,6 +80,7 @@ public:
     /* ---------------------------------- Input --------------------------------- */
     m5::Button_Class& homeButton = M5.BtnA;
     Keyboard keyboard;
+    ExternalInput externalInput;
 
     /* ---------------------------------- Power --------------------------------- */
     inline uint8_t getBatLevel()
@@ -155,6 +157,7 @@ public:
 private:
     Settings* _settings             = nullptr;
     bool _is_wifi_inited            = false;
+    bool _wifi_init_failed          = false;
     bool _is_wifi_connected         = false;
     bool _is_esp_now_inited         = false;
     bool _is_ir_inited              = false;

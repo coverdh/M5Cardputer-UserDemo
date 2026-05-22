@@ -54,6 +54,7 @@ extern "C" void app_main(void)
     GetMooncake().installApp(std::make_unique<AppSetWiFi>());
     GetMooncake().installApp(std::make_unique<AppClock>());
     GetMooncake().installApp(std::make_unique<AppKeyboard>());
+    GetMooncake().installApp(std::make_unique<AppExternalInputTest>());
     GetMooncake().installApp(std::make_unique<AppImu>());
     GetMooncake().installApp(std::make_unique<AppSdcard>());
     GetMooncake().installApp(std::make_unique<AppStringIRToolKit>());
