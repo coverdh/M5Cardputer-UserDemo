@@ -342,7 +342,7 @@ void ble_hid_demo_task_mouse(void *pvParameters)
 #define USB_HID_DOT     0x37
 
 const unsigned char keyboardReportMap[] = {
-    // 8 bytes input (modifiers, reserved, keys*6), 1 byte output
+    // 7 bytes input (modifiers, resrvd, keys*5), 1 byte output
     0x05, 0x01,  // Usage Page (Generic Desktop Ctrls)
     0x09, 0x06,  // Usage (Keyboard)
     0xA1, 0x01,  // Collection (Application)
@@ -367,7 +367,7 @@ const unsigned char keyboardReportMap[] = {
     0x95, 0x01,  //   Report Count (1)
     0x75, 0x03,  //   Report Size (3)
     0x91, 0x03,  //   Output (Const,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0x95, 0x06,  //   Report Count (6)
+    0x95, 0x05,  //   Report Count (5)
     0x75, 0x08,  //   Report Size (8)
     0x15, 0x00,  //   Logical Minimum (0)
     0x25, 0x65,  //   Logical Maximum (101)
