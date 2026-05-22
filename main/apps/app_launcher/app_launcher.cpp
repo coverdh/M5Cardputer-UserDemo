@@ -24,6 +24,7 @@ void Launcher::onCreate()
     start_keyboard_bar();
 
     open();
+    open_boot_app("MacCtl");
 }
 
 void Launcher::onRunning()
@@ -43,5 +44,23 @@ void Launcher::onRunning()
         }
     } else {
         update_menu();
+    }
+}
+
+void Launcher::open_boot_app(const char* appName)
+{
+    auto installed_apps = GetMooncake().getAppAbilityManager()->getAllAbilityInstance();
+    for (auto& app_raw : installed_apps) {
+        auto app = static_cast<AppAbility*>(app_raw);
+        if (app->getId() == getId() || app->getAppInfo().name != appName) {
+            continue;
+        }
+
+        mclog::tagInfo(getAppInfo().name, "open boot app: {} id: {}", appName, app->getId());
+        GetMooncake().openApp(app->getId());
+        _data.running_app_id = app->getId();
+        render_system_bar();
+        render_keyboard_bar();
+        return;
     }
 }

@@ -18,10 +18,12 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
 
 #if CONFIG_BT_NIMBLE_ENABLED
+#include "host/ble_store.h"
 #include "host/ble_hs.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -51,6 +53,8 @@ static const char *TAG = "ble_hid";
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 static TickType_t s_ble_hid_ready_after_tick        = 0;
 
+#define MACCTL_BLE_STORE_SCHEMA_VERSION 2
+
 #define BLE_HID_MAP_INDEX_KEYBOARD 0
 #define BLE_HID_MAP_INDEX_MOUSE    1
 #define BLE_HID_MAP_INDEX_MEDIA    2
@@ -58,10 +62,6 @@ static TickType_t s_ble_hid_ready_after_tick        = 0;
 #define BLE_HID_RPT_ID_KEYBOARD 1
 #define BLE_HID_RPT_ID_MOUSE    2
 #define BLE_HID_RPT_ID_MEDIA    3
-
-#define USB_HID_KEY_F18 0x69
-#define USB_HID_KEY_F19 0x6A
-#define USB_HID_KEY_F20 0x6B
 
 typedef struct {
     TaskHandle_t task_hdl;
@@ -935,6 +935,37 @@ void ble_hid_device_host_task(void *param)
 void ble_store_config_init(void);
 #endif
 
+#if CONFIG_BT_NIMBLE_ENABLED
+static void ble_hid_device_helper_migrate_store(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("macctl_ble", NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "open BLE migration NVS failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    uint32_t version = 0;
+    err = nvs_get_u32(handle, "store_ver", &version);
+    if (err == ESP_OK && version == MACCTL_BLE_STORE_SCHEMA_VERSION) {
+        nvs_close(handle);
+        return;
+    }
+
+    int rc = ble_store_clear();
+    if (rc == 0) {
+        ESP_LOGW(TAG, "cleared stale BLE bond store for schema v%" PRIu32 " -> v%d", version,
+                 MACCTL_BLE_STORE_SCHEMA_VERSION);
+        ESP_ERROR_CHECK(nvs_set_u32(handle, "store_ver", MACCTL_BLE_STORE_SCHEMA_VERSION));
+        ESP_ERROR_CHECK(nvs_commit(handle));
+    } else {
+        ESP_LOGW(TAG, "BLE bond store clear failed: %d", rc);
+    }
+
+    nvs_close(handle);
+}
+#endif
+
 void _demo_app_main(void)
 {
     esp_err_t ret;
@@ -993,6 +1024,7 @@ void _demo_app_main(void)
 #if CONFIG_BT_NIMBLE_ENABLED
     /* XXX Need to have template for store */
     ble_store_config_init();
+    ble_hid_device_helper_migrate_store();
 
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
@@ -1031,44 +1063,29 @@ void ble_hid_device_helper_send_consumer(uint16_t usage_id)
     esp_hidd_send_consumer_value((uint8_t)usage_id, false);
 }
 
-static bool ble_hid_device_helper_send_keycode(uint8_t keycode)
+static bool ble_hid_device_helper_send_consumer_usage(uint8_t usage_id)
 {
     if (!s_ble_hid_param.hid_dev || s_ble_hid_keyboard_state != BLE_HID_DEVICE_STATE_CONNECTED ||
         xTaskGetTickCount() < s_ble_hid_ready_after_tick) {
         return false;
     }
 
-    uint8_t buffer[8] = {0};
-    buffer[2]         = keycode;
-    esp_err_t ret     = esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_KEYBOARD,
-                                               BLE_HID_RPT_ID_KEYBOARD, buffer, sizeof(buffer));
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "macctl key press failed: %s", esp_err_to_name(ret));
-        return false;
-    }
-
-    vTaskDelay(20 / portTICK_PERIOD_MS);
-    memset(buffer, 0, sizeof(buffer));
-    ret = esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_KEYBOARD, BLE_HID_RPT_ID_KEYBOARD, buffer,
-                                 sizeof(buffer));
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "macctl key release failed: %s", esp_err_to_name(ret));
-        return false;
-    }
-
+    esp_hidd_send_consumer_value(usage_id, true);
+    vTaskDelay(40 / portTICK_PERIOD_MS);
+    esp_hidd_send_consumer_value(usage_id, false);
     return true;
 }
 
 bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta)
 {
-    uint8_t keycode = delta > 0 ? USB_HID_KEY_F18 : USB_HID_KEY_F19;
+    uint8_t usage_id = delta > 0 ? HID_CONSUMER_VOLUME_UP : HID_CONSUMER_VOLUME_DOWN;
     uint8_t count   = (uint8_t)abs(delta);
     if (count == 0) {
         return true;
     }
 
     for (uint8_t i = 0; i < count; ++i) {
-        if (!ble_hid_device_helper_send_keycode(keycode)) {
+        if (!ble_hid_device_helper_send_consumer_usage(usage_id)) {
             return false;
         }
         vTaskDelay(20 / portTICK_PERIOD_MS);
@@ -1078,7 +1095,7 @@ bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta)
 
 bool ble_hid_device_helper_send_macctl_play_pause(void)
 {
-    return ble_hid_device_helper_send_keycode(USB_HID_KEY_F20);
+    return ble_hid_device_helper_send_consumer_usage(HID_CONSUMER_MUTE);
 }
 
 BleHidDeviceState_t ble_hid_device_helper_get_state(void)

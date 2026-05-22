@@ -75,6 +75,7 @@ private:
     void render_keyboard_bar();
     void render_system_bar();
     void handle_app_open(int index, int appId);
+    void open_boot_app(const char* appName);
 
 public:
     void onCreate() override;

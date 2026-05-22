@@ -50,7 +50,7 @@ void AppHomeControl::onOpen()
 
     _key_event_slot_id = GetHAL().keyboard.onKeyEvent.connect(
         [this](const Keyboard::KeyEvent_t& keyEvent) { handleKeyEvent(keyEvent); });
-    render();
+    startConnections();
 }
 
 void AppHomeControl::onRunning()
@@ -295,9 +295,9 @@ void AppHomeControl::handleExternalEncoder()
     }
     if (input.getEncoderPressed()) {
         if (GetHAL().bleMacCtlPlayPause()) {
-            setStatus("HomePod play/pause");
+            setStatus("HomePod mute toggle");
         } else {
-            setStatus("Mac helper not ready");
+            setStatus("BLE not ready");
         }
         render();
         return;
@@ -318,7 +318,7 @@ void AppHomeControl::handleExternalEncoder()
     if (GetHAL().bleMacCtlVolumeDelta(static_cast<int8_t>(std::max<int16_t>(-50, std::min<int16_t>(50, applyDelta))))) {
         setStatus(applyDelta > 0 ? "HomePod volume up" : "HomePod volume down");
     } else {
-        setStatus("Mac helper not ready");
+        setStatus("BLE not ready");
     }
     render();
 }
@@ -400,18 +400,18 @@ void AppHomeControl::renderSetup()
     canvas.setTextSize(1);
     canvas.setCursor(0, 0);
     canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-    canvas.println("MacCtl Setup");
+    canvas.println("MacCtl");
 
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
     canvas.printf("BLE:  %s\n",
                   GetHAL().bleKeyboardIsConnected() ? "paired" : (_ble_start_requested ? "pair MacCtl" : "stopped"));
-    canvas.println("HA:   Mac helper");
+    canvas.println("HA:   Karabiner");
 
     canvas.setTextColor(TFT_CYAN, THEME_COLOR_BG);
     canvas.println();
     canvas.println("W: WiFi settings");
     canvas.println("C: local settings");
-    canvas.println("Enter: start/connect");
+    canvas.println("Home: launcher");
 
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -704,7 +704,7 @@ void AppHomeControl::handleDashboardKey(const Keyboard::KeyEvent_t& keyEvent)
             if (GetHAL().bleMacCtlVolumeDelta(-1)) {
                 setStatus("HomePod volume down");
             } else {
-                setStatus("Mac helper not ready");
+                setStatus("BLE not ready");
             }
             render();
             return;
@@ -713,16 +713,16 @@ void AppHomeControl::handleDashboardKey(const Keyboard::KeyEvent_t& keyEvent)
             if (GetHAL().bleMacCtlVolumeDelta(1)) {
                 setStatus("HomePod volume up");
             } else {
-                setStatus("Mac helper not ready");
+                setStatus("BLE not ready");
             }
             render();
             return;
         }
         if (keyEvent.keyCode == KEY_SPACE) {
             if (GetHAL().bleMacCtlPlayPause()) {
-                setStatus("HomePod play/pause");
+                setStatus("HomePod mute toggle");
             } else {
-                setStatus("Mac helper not ready");
+                setStatus("BLE not ready");
             }
             render();
             return;
@@ -733,7 +733,7 @@ void AppHomeControl::handleDashboardKey(const Keyboard::KeyEvent_t& keyEvent)
             return;
         }
         if (keyEvent.keyCode == KEY_R) {
-            setStatus("Mac helper owns HA");
+            setStatus("Karabiner owns HA");
             render();
             return;
         }
@@ -891,21 +891,21 @@ void AppHomeControl::activateSelectedAction()
             if (GetHAL().bleMacCtlVolumeDelta(-1)) {
                 setStatus("HomePod volume down");
             } else {
-                setStatus("Mac helper not ready");
+                setStatus("BLE not ready");
             }
             break;
         case 4:
             if (GetHAL().bleMacCtlPlayPause()) {
-                setStatus("HomePod play/pause");
+                setStatus("HomePod mute toggle");
             } else {
-                setStatus("Mac helper not ready");
+                setStatus("BLE not ready");
             }
             break;
         case 5:
             if (GetHAL().bleMacCtlVolumeDelta(1)) {
                 setStatus("HomePod volume up");
             } else {
-                setStatus("Mac helper not ready");
+                setStatus("BLE not ready");
             }
             break;
         case 6:
