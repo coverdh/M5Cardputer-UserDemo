@@ -178,7 +178,7 @@ private final class BlackHoleAudioSink {
             return "Streaming to BlackHole 2ch"
         }
         if deviceUID != nil {
-            return "Waiting for an app to use BlackHole 2ch"
+            return "ADV microphone inactive"
         }
         return "BlackHole 2ch installed; restart required"
     }
@@ -198,20 +198,6 @@ private final class BlackHoleAudioSink {
         return deviceUID != nil
     }
 
-    func isInputRunningSomewhere() -> Bool {
-        guard let deviceID else {
-            return false
-        }
-        if let inputRunning = Self.uint32Property(deviceID,
-                                                  kAudioDevicePropertyDeviceIsRunningSomewhere,
-                                                  scope: kAudioObjectPropertyScopeInput) {
-            return inputRunning != 0
-        }
-        return Self.uint32Property(deviceID,
-                                   kAudioDevicePropertyDeviceIsRunningSomewhere,
-                                   scope: kAudioObjectPropertyScopeGlobal) != 0
-    }
-
     @discardableResult func start() -> Bool {
         if queue != nil {
             return true
@@ -221,13 +207,13 @@ private final class BlackHoleAudioSink {
             return false
         }
 
-        var format = AudioStreamBasicDescription(mSampleRate: 8000,
+        var format = AudioStreamBasicDescription(mSampleRate: 48000,
                                                  mFormatID: kAudioFormatLinearPCM,
                                                  mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-                                                 mBytesPerPacket: 2,
+                                                 mBytesPerPacket: 4,
                                                  mFramesPerPacket: 1,
-                                                 mBytesPerFrame: 2,
-                                                 mChannelsPerFrame: 1,
+                                                 mBytesPerFrame: 4,
+                                                 mChannelsPerFrame: 2,
                                                  mBitsPerChannel: 16,
                                                  mReserved: 0)
         var newQueue: AudioQueueRef?
@@ -280,9 +266,13 @@ private final class BlackHoleAudioSink {
             return
         }
         var pcm = [Int16]()
-        pcm.reserveCapacity(data.count)
+        pcm.reserveCapacity(data.count * 12)
         for byte in data {
-            pcm.append(Self.decodeULaw(byte))
+            let sample = Self.decodeULaw(byte)
+            for _ in 0..<6 {
+                pcm.append(sample)
+                pcm.append(sample)
+            }
         }
         let byteCount = pcm.count * MemoryLayout<Int16>.size
         var buffer: AudioQueueBufferRef?
@@ -333,21 +323,6 @@ private final class BlackHoleAudioSink {
             }
         }
         return nil
-    }
-
-    private static func uint32Property(_ objectID: AudioObjectID,
-                                       _ selector: AudioObjectPropertySelector,
-                                       scope: AudioObjectPropertyScope) -> UInt32? {
-        var address = AudioObjectPropertyAddress(mSelector: selector,
-                                                 mScope: scope,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var value: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value)
-        guard status == noErr else {
-            return nil
-        }
-        return value
     }
 
     private static func stringProperty(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
@@ -496,7 +471,6 @@ private final class ADVCtlBridge {
     private var hidDevices: [HIDDeviceRegistration] = []
     private var pressedKnobKeys = Set<UInt8>()
     private var nowPlayingTask: Task<Void, Never>?
-    private var audioDemandTimer: Timer?
     private var manualAudioTestActive = false
     private var advAudioBridgeActive = false
     private var lastNowPlayingTextSignature = ""
@@ -513,7 +487,6 @@ private final class ADVCtlBridge {
 
     deinit {
         nowPlayingTask?.cancel()
-        audioDemandTimer?.invalidate()
         audioSink.stop()
         for registration in hidDevices {
             registration.reportBuffer.deallocate()
@@ -553,7 +526,6 @@ private final class ADVCtlBridge {
             devices.forEach(attach)
         }
         startNowPlayingSync()
-        startAudioDemandMonitor()
         delegate?.bridgeDidUpdateAudioStatus(audioSink.statusText, active: audioSink.isRunning)
     }
 
@@ -590,7 +562,7 @@ private final class ADVCtlBridge {
 
     func sendAudioTest(active: Bool) {
         manualAudioTestActive = active
-        syncAudioBridgeDemand()
+        syncAudioBridgeDemand(forceControl: true)
     }
 
     @MainActor private func sendNowPlaying(_ snapshot: NowPlayingSnapshot) {
@@ -651,47 +623,35 @@ private final class ADVCtlBridge {
         }
     }
 
-    private func startAudioDemandMonitor() {
-        guard audioDemandTimer == nil else {
-            return
-        }
-        audioDemandTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.syncAudioBridgeDemand()
-        }
-        syncAudioBridgeDemand()
-    }
-
-    private func syncAudioBridgeDemand() {
+    private func syncAudioBridgeDemand(forceControl: Bool = false) {
         guard audioSink.refreshDevice() else {
-            stopAudioBridge(status: audioSink.statusText)
+            stopAudioBridge(status: audioSink.statusText, forceControl: forceControl)
             return
         }
 
-        let inputConsumerActive = audioSink.isInputRunningSomewhere()
-        let shouldRun = manualAudioTestActive || inputConsumerActive
-        guard shouldRun else {
-            stopAudioBridge(status: "Waiting for an app to use BlackHole 2ch")
+        guard manualAudioTestActive else {
+            stopAudioBridge(status: "ADV microphone inactive", forceControl: forceControl)
             return
         }
 
         guard audioSink.start() else {
-            stopAudioBridge(status: "BlackHole 2ch is not available; restart macOS after installing")
+            stopAudioBridge(status: "BlackHole 2ch is not available; restart macOS after installing",
+                            forceControl: forceControl)
             return
         }
 
-        sendAudioBridgeActive(true)
-        let status = manualAudioTestActive ? "ADV recording test active" : "App is using BlackHole 2ch"
-        delegate?.bridgeDidUpdateAudioStatus(status, active: true)
+        sendAudioBridgeActive(true, force: forceControl)
+        delegate?.bridgeDidUpdateAudioStatus("ADV recording test active", active: true)
     }
 
-    private func stopAudioBridge(status: String) {
+    private func stopAudioBridge(status: String, forceControl: Bool = false) {
         audioSink.stop()
-        sendAudioBridgeActive(false)
+        sendAudioBridgeActive(false, force: forceControl)
         delegate?.bridgeDidUpdateAudioStatus(status, active: false)
     }
 
-    private func sendAudioBridgeActive(_ active: Bool) {
-        guard advAudioBridgeActive != active else {
+    private func sendAudioBridgeActive(_ active: Bool, force: Bool = false) {
+        guard force || advAudioBridgeActive != active else {
             return
         }
         advAudioBridgeActive = active
@@ -774,8 +734,7 @@ private final class ADVCtlBridge {
         if kind == .control {
             sendTimeSync()
             requestSettings()
-            advAudioBridgeActive = false
-            syncAudioBridgeDemand()
+            syncAudioBridgeDemand(forceControl: true)
         }
     }
 
