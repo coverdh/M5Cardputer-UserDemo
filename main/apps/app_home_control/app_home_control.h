@@ -60,6 +60,7 @@ private:
     bool _auto_wifi_attempted      = false;
     bool _ble_start_requested      = false;
     bool _screen_off               = false;
+    bool _knob_scroll_mode         = false;
     bool _hold_left                = false;
     bool _hold_right               = false;
     bool _hold_up                  = false;
@@ -104,6 +105,8 @@ private:
     void sendHardwareSettings();
     void startAudioTest();
     void stopAudioTest();
+    void sendKnobWheelStep(int8_t step);
+    void sendKnobControlStep(int8_t step);
     int pointerStep();
     std::string pointerSensitivityLabel() const;
     void adjustPointerSensitivity(int delta);

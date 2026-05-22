@@ -5,6 +5,8 @@ CONFIGURATION="${1:-release}"
 APP_DIR=".build/${CONFIGURATION}/ADVCtl.app"
 EXECUTABLE=".build/${CONFIGURATION}/ADVCtl"
 
+export CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/advctl-clang-module-cache"
+
 swift build -c "${CONFIGURATION}"
 
 rm -rf "${APP_DIR}"

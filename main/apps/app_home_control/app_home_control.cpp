@@ -339,19 +339,18 @@ void AppHomeControl::handleExternalEncoder()
         std::max<int32_t>(0, std::min<int32_t>(2, GetHAL().getSettings().GetInt("adv_knob_mode", _knob_mode))));
     if (delta != 0) {
         markUserActivity();
+        const int8_t step = delta > 0 ? 1 : -1;
         const int count       = std::min<int>(5, std::abs(static_cast<int>(delta)));
         for (int i = 0; i < count; ++i) {
-            if (_knob_mode == 1) {
-                const int8_t step = delta > 0 ? 1 : -1;
-                if (!GetHAL().bleMacCtlVolumeDelta(step)) {
-                    const uint8_t keyCode = delta > 0 ? KEY_F13 : KEY_F14;
-                    GetHAL().bleKeyboardTap(0, static_cast<KeScanCode_t>(keyCode));
-                }
-            } else if (_knob_mode == 0) {
-                GetHAL().bleConsumerSend(delta > 0 ? BLE_HID_CONSUMER_VOLUME_UP : BLE_HID_CONSUMER_VOLUME_DOWN);
+            if (_knob_scroll_mode) {
+                sendKnobWheelStep(step);
+            } else {
+                sendKnobControlStep(step);
             }
         }
-        if (_knob_mode == 1) {
+        if (_knob_scroll_mode) {
+            setStatus(delta > 0 ? "Knob scroll up" : "Knob scroll down");
+        } else if (_knob_mode == 1) {
             setStatus(delta > 0 ? "Knob HomePod up" : "Knob HomePod down");
         } else if (_knob_mode == 0) {
             setStatus(delta > 0 ? "Knob volume up" : "Knob volume down");
@@ -361,20 +360,33 @@ void AppHomeControl::handleExternalEncoder()
     }
     if (input.getEncoderPressed()) {
         markUserActivity();
-        if (_knob_mode == 0) {
-            GetHAL().bleConsumerSend(BLE_HID_CONSUMER_MUTE);
-            setStatus("Knob mute");
-        } else if (_knob_mode == 1) {
-            GetHAL().bleKeyboardTap(0, KEY_F15);
-            setStatus("Knob F15");
-        } else {
-            setStatus("Knob disabled");
-        }
+        _knob_scroll_mode = !_knob_scroll_mode;
+        mclog::tagInfo(getAppInfo().name, "knob layer: {}", _knob_scroll_mode ? "mouse-wheel" : "control");
+        setStatus(_knob_scroll_mode ? "Knob mouse wheel" : "Knob control mode");
         render();
         return;
     }
     if (delta != 0) {
         render();
+    }
+}
+
+void AppHomeControl::sendKnobWheelStep(int8_t step)
+{
+    GetHAL().bleMouseMove(0, 0, step);
+    GetHAL().delay(8);
+    GetHAL().bleMouseMove(0, 0, 0);
+}
+
+void AppHomeControl::sendKnobControlStep(int8_t step)
+{
+    if (_knob_mode == 1) {
+        if (!GetHAL().bleMacCtlVolumeDelta(step)) {
+            const uint8_t keyCode = step > 0 ? KEY_F13 : KEY_F14;
+            GetHAL().bleKeyboardTap(0, static_cast<KeScanCode_t>(keyCode));
+        }
+    } else if (_knob_mode == 0) {
+        GetHAL().bleConsumerSend(step > 0 ? BLE_HID_CONSUMER_VOLUME_UP : BLE_HID_CONSUMER_VOLUME_DOWN);
     }
 }
 
@@ -627,6 +639,7 @@ void AppHomeControl::renderSetup()
     canvas.println();
     canvas.println("Fn+W: WiFi settings");
     canvas.println("Fn+C: local settings");
+    canvas.println("Fn+S: screen off");
     canvas.printf("Ptr:  %s  XY:%s X:%s Y:%s\n",
                   pointerSensitivityLabel().c_str(),
                   GetHAL().externalInput.getSwapAxes() ? "swap" : "normal",
@@ -705,6 +718,7 @@ void AppHomeControl::renderDashboard()
                   GetHAL().externalInput.getSwapAxes() ? "swap" : "normal",
                   GetHAL().externalInput.getFlipX() ? "inv" : "normal",
                   GetHAL().externalInput.getFlipY() ? "inv" : "normal");
+    canvas.println("Fn+S: screen off");
 
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -871,8 +885,10 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
     }
 
     markUserActivity();
-    if (!keyEvent.state && GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_ESC) {
-        sleepDisplay();
+    if (GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_S) {
+        if (!keyEvent.state) {
+            sleepDisplay();
+        }
         return;
     }
 
