@@ -78,6 +78,7 @@ static TaskHandle_t s_ble_hid_report_task   = NULL;
 static ble_hid_device_helper_output_callback_t s_ble_hid_output_callback = NULL;
 #if CONFIG_BT_NIMBLE_ENABLED
 static TickType_t s_ble_hid_last_drop_log    = 0;
+static TaskHandle_t s_ble_hid_forget_task    = NULL;
 #endif
 
 #define MACCTL_BLE_STORE_SCHEMA_VERSION 2
@@ -1152,7 +1153,7 @@ void ble_hid_device_helper_stop(void)
 #endif
 }
 
-bool ble_hid_device_helper_forget_bonds(void)
+static bool ble_hid_device_helper_forget_bonds_now(void)
 {
 #if CONFIG_BT_NIMBLE_ENABLED
     if (!s_ble_hid_stack_ready) {
@@ -1161,10 +1162,24 @@ bool ble_hid_device_helper_forget_bonds(void)
     }
 
     ESP_LOGW(TAG, "forget BLE bonds and restart pairing");
+    s_ble_hid_keyboard_state   = BLE_HID_DEVICE_STATE_IDLE;
+    s_ble_hid_notify_ready     = false;
+    s_ble_hid_ready_after_tick = 0;
+    if (s_ble_hid_report_queue) {
+        xQueueReset(s_ble_hid_report_queue);
+    }
+
     if (s_ble_hid_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        const uint16_t old_conn_handle = s_ble_hid_conn_handle;
         int term_rc = ble_gap_terminate(s_ble_hid_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         if (term_rc != 0) {
             ESP_LOGW(TAG, "terminate BLE connection failed: %d", term_rc);
+        }
+        for (int i = 0; i < 20 && s_ble_hid_conn_handle == old_conn_handle; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (s_ble_hid_conn_handle == old_conn_handle) {
+            ESP_LOGW(TAG, "BLE connection did not disconnect before clearing bonds");
         }
     }
 
@@ -1190,6 +1205,44 @@ bool ble_hid_device_helper_forget_bonds(void)
             return false;
         }
     }
+    return true;
+#else
+    ESP_LOGW(TAG, "forget BLE bonds is only implemented for NimBLE");
+    return false;
+#endif
+}
+
+#if CONFIG_BT_NIMBLE_ENABLED
+static void ble_hid_device_helper_forget_bonds_task(void *pvParameters)
+{
+    (void)pvParameters;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    bool ok = ble_hid_device_helper_forget_bonds_now();
+    ESP_LOGW(TAG, "forget BLE bonds task finished: %s", ok ? "ok" : "failed");
+    s_ble_hid_forget_task = NULL;
+    vTaskDelete(NULL);
+}
+#endif
+
+bool ble_hid_device_helper_forget_bonds(void)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    if (!s_ble_hid_stack_ready) {
+        ESP_LOGW(TAG, "cannot queue forget BLE bonds before stack init");
+        return false;
+    }
+    if (s_ble_hid_forget_task) {
+        ESP_LOGW(TAG, "forget BLE bonds already queued");
+        return true;
+    }
+    BaseType_t created = xTaskCreatePinnedToCore(ble_hid_device_helper_forget_bonds_task, "ble_forget", 4096, NULL, 4,
+                                                &s_ble_hid_forget_task, tskNO_AFFINITY);
+    if (created != pdPASS) {
+        s_ble_hid_forget_task = NULL;
+        ESP_LOGW(TAG, "queue forget BLE bonds task failed");
+        return false;
+    }
+    ESP_LOGW(TAG, "forget BLE bonds queued");
     return true;
 #else
     ESP_LOGW(TAG, "forget BLE bonds is only implemented for NimBLE");
