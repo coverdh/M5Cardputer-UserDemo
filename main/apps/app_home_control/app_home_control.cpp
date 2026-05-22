@@ -43,7 +43,7 @@ void AppHomeControl::onOpen()
     _auto_wifi_attempted  = false;
     _ble_start_requested  = false;
     resetPointerHolds();
-    setStatus("Enter starts BLE/WiFi");
+    setStatus("Enter starts BLE");
 
     loadConfig();
     loadWifiConfig();
@@ -77,11 +77,7 @@ void AppHomeControl::onRunning()
         handleExternalInput();
     }
 
-    if (_mode == Mode::Dashboard && _ha.isConfigured() && GetHAL().isWifiConnected() &&
-        GetHAL().millis() - _last_status_refresh > 15000) {
-        refreshHomePodState();
-        render();
-    }
+    (void)_last_status_refresh;
 }
 
 void AppHomeControl::onClose()
@@ -128,7 +124,6 @@ void AppHomeControl::startConnections()
         render();
         GetHAL().bleControlInit();
     }
-    tryAutoWifiConnect();
     enterControlIfReady();
 }
 
@@ -187,9 +182,6 @@ void AppHomeControl::enterControlIfReady()
     _mode = Mode::Dashboard;
     resetPointerHolds();
     setStatus("Control ready");
-    if (_ha.isConfigured()) {
-        refreshHomePodState();
-    }
     render();
 }
 
@@ -302,10 +294,10 @@ void AppHomeControl::handleExternalEncoder()
             std::max<int32_t>(-50, std::min<int32_t>(50, static_cast<int32_t>(_pending_volume_delta) + delta)));
     }
     if (input.getEncoderPressed()) {
-        if (ensureHomeAssistantReady() && _ha.homePodPlayPause()) {
-            refreshHomePodState();
+        if (GetHAL().bleMacCtlPlayPause()) {
+            setStatus("HomePod play/pause");
         } else {
-            setStatus("HA request failed");
+            setStatus("Mac helper not ready");
         }
         render();
         return;
@@ -323,32 +315,10 @@ void AppHomeControl::handleExternalEncoder()
     _pending_volume_delta    = 0;
     _last_volume_apply       = now;
 
-    if (!ensureHomeAssistantReady()) {
-        setStatus("HA not ready");
-        render();
-        return;
-    }
-
-    bool ok = false;
-    if (_homepod_state.volumePercent >= 0) {
-        const int target = std::max(0, std::min(100, _homepod_state.volumePercent + static_cast<int>(applyDelta) * 2));
-        ok               = _ha.homePodSetVolume(target);
-    } else {
-        ok              = true;
-        const int steps = std::min(5, std::abs(static_cast<int>(applyDelta)));
-        for (int i = 0; i < steps; ++i) {
-            ok = applyDelta > 0 ? _ha.homePodVolumeUp() : _ha.homePodVolumeDown();
-            if (!ok) {
-                break;
-            }
-        }
-    }
-
-    if (ok) {
-        refreshHomePodState();
+    if (GetHAL().bleMacCtlVolumeDelta(static_cast<int8_t>(std::max<int16_t>(-50, std::min<int16_t>(50, applyDelta))))) {
         setStatus(applyDelta > 0 ? "HomePod volume up" : "HomePod volume down");
     } else {
-        setStatus("HA request failed");
+        setStatus("Mac helper not ready");
     }
     render();
 }
@@ -435,14 +405,12 @@ void AppHomeControl::renderSetup()
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
     canvas.printf("BLE:  %s\n",
                   GetHAL().bleKeyboardIsConnected() ? "paired" : (_ble_start_requested ? "pair MacCtl" : "stopped"));
-    canvas.printf("WiFi: %s\n",
-                  GetHAL().isWifiConnected() ? "connected" : (_wifi_ssid.empty() ? "not set" : _wifi_ssid.c_str()));
-    canvas.printf("HA:   %s\n", _ha.isConfigured() ? "configured" : "not set");
+    canvas.println("HA:   Mac helper");
 
     canvas.setTextColor(TFT_CYAN, THEME_COLOR_BG);
     canvas.println();
-    canvas.println("W: WiFi");
-    canvas.println("C: Home Assistant");
+    canvas.println("W: WiFi settings");
+    canvas.println("C: local settings");
     canvas.println("Enter: start/connect");
 
     renderStatusBar();
@@ -733,28 +701,28 @@ void AppHomeControl::handleDashboardKey(const Keyboard::KeyEvent_t& keyEvent)
 {
     if (GetHAL().keyboard.isFnPressed() && keyEvent.state) {
         if (keyEvent.keyCode == KEY_MINUS) {
-            if (ensureHomeAssistantReady() && _ha.homePodVolumeDown()) {
-                refreshHomePodState();
+            if (GetHAL().bleMacCtlVolumeDelta(-1)) {
+                setStatus("HomePod volume down");
             } else {
-                setStatus("HA request failed");
+                setStatus("Mac helper not ready");
             }
             render();
             return;
         }
         if (keyEvent.keyCode == KEY_EQUAL) {
-            if (ensureHomeAssistantReady() && _ha.homePodVolumeUp()) {
-                refreshHomePodState();
+            if (GetHAL().bleMacCtlVolumeDelta(1)) {
+                setStatus("HomePod volume up");
             } else {
-                setStatus("HA request failed");
+                setStatus("Mac helper not ready");
             }
             render();
             return;
         }
         if (keyEvent.keyCode == KEY_SPACE) {
-            if (ensureHomeAssistantReady() && _ha.homePodPlayPause()) {
-                refreshHomePodState();
+            if (GetHAL().bleMacCtlPlayPause()) {
+                setStatus("HomePod play/pause");
             } else {
-                setStatus("HA request failed");
+                setStatus("Mac helper not ready");
             }
             render();
             return;
@@ -765,9 +733,7 @@ void AppHomeControl::handleDashboardKey(const Keyboard::KeyEvent_t& keyEvent)
             return;
         }
         if (keyEvent.keyCode == KEY_R) {
-            if (ensureHomeAssistantReady()) {
-                refreshHomePodState();
-            }
+            setStatus("Mac helper owns HA");
             render();
             return;
         }
@@ -922,30 +888,24 @@ void AppHomeControl::activateSelectedAction()
             setStatus("BLE keyboard ready");
             break;
         case 3:
-            if (ensureHomeAssistantReady()) {
-                if (_ha.homePodVolumeDown()) {
-                    refreshHomePodState();
-                } else {
-                    setStatus("HA request failed");
-                }
+            if (GetHAL().bleMacCtlVolumeDelta(-1)) {
+                setStatus("HomePod volume down");
+            } else {
+                setStatus("Mac helper not ready");
             }
             break;
         case 4:
-            if (ensureHomeAssistantReady()) {
-                if (_ha.homePodPlayPause()) {
-                    refreshHomePodState();
-                } else {
-                    setStatus("HA request failed");
-                }
+            if (GetHAL().bleMacCtlPlayPause()) {
+                setStatus("HomePod play/pause");
+            } else {
+                setStatus("Mac helper not ready");
             }
             break;
         case 5:
-            if (ensureHomeAssistantReady()) {
-                if (_ha.homePodVolumeUp()) {
-                    refreshHomePodState();
-                } else {
-                    setStatus("HA request failed");
-                }
+            if (GetHAL().bleMacCtlVolumeDelta(1)) {
+                setStatus("HomePod volume up");
+            } else {
+                setStatus("Mac helper not ready");
             }
             break;
         case 6:
@@ -1010,11 +970,7 @@ bool AppHomeControl::parseConfigLine(const std::string& line)
         _target_volume_percent = volume;
         GetHAL().setDeviceVolumePercent(_target_volume_percent);
     } else if (key == "hpvol") {
-        int volume = std::strtol(value.c_str(), nullptr, 0);
-        if (volume < 0 || volume > 100) {
-            return false;
-        }
-        return _ha.homePodSetVolume(volume);
+        return false;
     } else {
         return false;
     }

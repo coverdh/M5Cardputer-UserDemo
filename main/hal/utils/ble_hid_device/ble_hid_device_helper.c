@@ -23,8 +23,10 @@
 
 #if CONFIG_BT_NIMBLE_ENABLED
 #include "host/ble_hs.h"
+#include "host/ble_gatt.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "os/os_mbuf.h"
 #else
 #include "esp_bt_defs.h"
 #if CONFIG_BT_BLE_ENABLED
@@ -50,6 +52,11 @@ static const char *TAG = "ble_hid";
 
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 
+#define MACCTL_SERVICE_UUID      0xFFF0
+#define MACCTL_COMMAND_CHAR_UUID 0xFFF1
+#define MACCTL_CMD_VOLUME_DELTA  1
+#define MACCTL_CMD_PLAY_PAUSE    2
+
 #define BLE_HID_MAP_INDEX_KEYBOARD 0
 #define BLE_HID_MAP_INDEX_MOUSE    1
 #define BLE_HID_MAP_INDEX_MEDIA    2
@@ -67,6 +74,75 @@ typedef struct {
 
 #if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
 static local_param_t s_ble_hid_param = {0};
+
+#if CONFIG_BT_NIMBLE_ENABLED
+static uint16_t s_macctl_conn_handle          = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t s_macctl_command_value_handle = 0;
+
+static int macctl_command_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt,
+                                    void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)ctxt;
+    (void)arg;
+    return 0;
+}
+
+static const struct ble_gatt_chr_def s_macctl_characteristics[] = {
+    {
+        .uuid       = BLE_UUID16_DECLARE(MACCTL_COMMAND_CHAR_UUID),
+        .access_cb  = macctl_command_access_cb,
+        .val_handle = &s_macctl_command_value_handle,
+        .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+    },
+    {0},
+};
+
+static const struct ble_gatt_svc_def s_macctl_services[] = {
+    {
+        .type            = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid            = BLE_UUID16_DECLARE(MACCTL_SERVICE_UUID),
+        .characteristics = s_macctl_characteristics,
+    },
+    {0},
+};
+
+static int macctl_service_init(void)
+{
+    int rc = ble_gatts_count_cfg(s_macctl_services);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "macctl service count failed: %d", rc);
+        return rc;
+    }
+
+    rc = ble_gatts_add_svcs(s_macctl_services);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "macctl service add failed: %d", rc);
+    }
+    return rc;
+}
+
+static bool macctl_notify(uint8_t command, int8_t value)
+{
+    if (s_macctl_conn_handle == BLE_HS_CONN_HANDLE_NONE || s_macctl_command_value_handle == 0) {
+        return false;
+    }
+
+    uint8_t payload[3] = {command, (uint8_t)value, 0};
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(payload, sizeof(payload));
+    if (!om) {
+        return false;
+    }
+
+    int rc = ble_gatts_notify_custom(s_macctl_conn_handle, s_macctl_command_value_handle, om);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "macctl notify failed: %d", rc);
+        return false;
+    }
+    return true;
+}
+#endif
 
 const unsigned char mediaReportMap[] = {
     0x05, 0x0C,  // Usage Page (Consumer)
@@ -128,9 +204,9 @@ const unsigned char mediaReportMap[] = {
     0xC0,        // End Collection
 };
 const unsigned char bleMouseReportMap[] = {
-    0x05, 0x01,  // USAGE_PAGE (Generic Desktop)
-    0x09, 0x02,  // USAGE (Mouse)
-    0xa1, 0x01,  // COLLECTION (Application)
+    0x05, 0x01,                  // USAGE_PAGE (Generic Desktop)
+    0x09, 0x02,                  // USAGE (Mouse)
+    0xa1, 0x01,                  // COLLECTION (Application)
     0x85, BLE_HID_RPT_ID_MOUSE,  //   REPORT_ID (2)
 
     0x09, 0x01,  //   USAGE (Pointer)
@@ -389,20 +465,21 @@ static esp_hid_raw_report_map_t ble_report_maps[] = {
 #endif
 };
 
-static esp_hid_device_config_t ble_hid_config = {.vendor_id  = 0x16C0,
-                                                 .product_id = 0x05DF,
-                                                 .version    = 0x0100,
+static esp_hid_device_config_t ble_hid_config = {
+    .vendor_id  = 0x16C0,
+    .product_id = 0x05DF,
+    .version    = 0x0100,
 #if CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
-                                                 .device_name = "MacCtl",
+    .device_name = "MacCtl",
 #elif CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
-                                                 .device_name = "ESP Mouse",
+    .device_name = "ESP Mouse",
 #else
-                                                 .device_name = "ESP BLE HID2",
+    .device_name = "ESP BLE HID2",
 #endif
-                                                 .manufacturer_name = "M5Stack",
-                                                 .serial_number     = "1234567890",
-                                                 .report_maps       = ble_report_maps,
-                                                 .report_maps_len   = sizeof(ble_report_maps) / sizeof(ble_report_maps[0])};
+    .manufacturer_name = "M5Stack",
+    .serial_number     = "1234567890",
+    .report_maps       = ble_report_maps,
+    .report_maps_len   = sizeof(ble_report_maps) / sizeof(ble_report_maps[0])};
 
 #define HID_CC_RPT_MUTE          1
 #define HID_CC_RPT_POWER         2
@@ -435,7 +512,7 @@ static esp_hid_device_config_t ble_hid_config = {.vendor_id  = 0x16C0,
     (s)[0] = (x)
 #define HID_CC_RPT_SET_CHANNEL(s, x)   \
     (s)[0] &= HID_CC_RPT_CHANNEL_BITS; \
-    (s)[0] |= ((x)&0x03) << 4
+    (s)[0] |= ((x) & 0x03) << 4
 #define HID_CC_RPT_SET_VOLUME_UP(s)   \
     (s)[0] &= HID_CC_RPT_VOLUME_BITS; \
     (s)[0] |= 0x40
@@ -447,7 +524,7 @@ static esp_hid_device_config_t ble_hid_config = {.vendor_id  = 0x16C0,
     (s)[1] |= (x)
 #define HID_CC_RPT_SET_SELECTION(s, x)   \
     (s)[1] &= HID_CC_RPT_SELECTION_BITS; \
-    (s)[1] |= ((x)&0x03) << 4
+    (s)[1] |= ((x) & 0x03) << 4
 
 // HID Consumer Usage IDs (subset of the codes available in the USB HID Usage Tables spec)
 #define HID_CONSUMER_POWER 48  // Power
@@ -989,6 +1066,12 @@ void _demo_app_main(void)
     ble_store_config_init();
 
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ret                        = macctl_service_init();
+    if (ret) {
+        ESP_LOGE(TAG, "macctl service init failed: %d", ret);
+        return;
+    }
+
     /* Starting nimble task after gatts is initialized*/
     ret = esp_nimble_enable(ble_hid_device_host_task);
     if (ret) {
@@ -1024,7 +1107,46 @@ void ble_hid_device_helper_send_consumer(uint16_t usage_id)
     esp_hidd_send_consumer_value((uint8_t)usage_id, false);
 }
 
+bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    return macctl_notify(MACCTL_CMD_VOLUME_DELTA, delta);
+#else
+    (void)delta;
+    return false;
+#endif
+}
+
+bool ble_hid_device_helper_send_macctl_play_pause(void)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    return macctl_notify(MACCTL_CMD_PLAY_PAUSE, 0);
+#else
+    return false;
+#endif
+}
+
 BleHidDeviceState_t ble_hid_device_helper_get_state(void)
 {
     return s_ble_hid_keyboard_state;
+}
+
+void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    s_macctl_conn_handle = conn_handle;
+#else
+    (void)conn_handle;
+#endif
+}
+
+void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    if (s_macctl_conn_handle == conn_handle) {
+        s_macctl_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    }
+#else
+    (void)conn_handle;
+#endif
 }

@@ -13,6 +13,7 @@
 #include "freertos/semphr.h"
 
 #include "ble_hid_gap.h"
+#include "ble_hid_device_helper.h"
 
 #if CONFIG_BT_NIMBLE_ENABLED
 #include "host/ble_hs.h"
@@ -390,7 +391,7 @@ static void handle_ble_device_result(struct ble_scan_result_evt_param *scan_rst)
 
     uint8_t uuid_len = 0;
     uint8_t *uuid_d  = esp_ble_resolve_adv_data_by_type(
-         scan_rst->ble_adv, scan_rst->adv_data_len + scan_rst->scan_rsp_len, ESP_BLE_AD_TYPE_16SRV_CMPL, &uuid_len);
+        scan_rst->ble_adv, scan_rst->adv_data_len + scan_rst->scan_rsp_len, ESP_BLE_AD_TYPE_16SRV_CMPL, &uuid_len);
     if (uuid_d != NULL && uuid_len) {
         uuid = uuid_d[0] + (uuid_d[1] << 8);
     }
@@ -405,7 +406,7 @@ static void handle_ble_device_result(struct ble_scan_result_evt_param *scan_rst)
 
     uint8_t adv_name_len = 0;
     uint8_t *adv_name    = esp_ble_resolve_adv_data_by_type(
-           scan_rst->ble_adv, scan_rst->adv_data_len + scan_rst->scan_rsp_len, ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
+        scan_rst->ble_adv, scan_rst->adv_data_len + scan_rst->scan_rsp_len, ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
 
     if (adv_name == NULL) {
         adv_name = esp_ble_resolve_adv_data_by_type(scan_rst->ble_adv, scan_rst->adv_data_len + scan_rst->scan_rsp_len,
@@ -765,7 +766,8 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
 #endif /* CONFIG_BT_BLE_ENABLED */
 
 #if CONFIG_BT_NIMBLE_ENABLED
-#define GATT_SVR_SVC_HID_UUID 0x1812
+#define GATT_SVR_SVC_HID_UUID    0x1812
+#define GATT_SVR_SVC_MACCTL_UUID 0xFFF0
 
 extern void ble_hid_task_start_up(void);
 static struct ble_hs_adv_fields fields;
@@ -803,11 +805,11 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
     fields.name_len         = strlen(device_name);
     fields.name_is_complete = 1;
 
-    uuid16   = (ble_uuid16_t *)malloc(sizeof(ble_uuid16_t));
-    uuid16_1 = (ble_uuid16_t[]){BLE_UUID16_INIT(GATT_SVR_SVC_HID_UUID)};
-    memcpy(uuid16, uuid16_1, sizeof(ble_uuid16_t));
+    uuid16   = (ble_uuid16_t *)malloc(sizeof(ble_uuid16_t) * 2);
+    uuid16_1 = (ble_uuid16_t[]){BLE_UUID16_INIT(GATT_SVR_SVC_HID_UUID), BLE_UUID16_INIT(GATT_SVR_SVC_MACCTL_UUID)};
+    memcpy(uuid16, uuid16_1, sizeof(ble_uuid16_t) * 2);
     fields.uuids16             = uuid16;
-    fields.num_uuids16         = 1;
+    fields.num_uuids16         = 2;
     fields.uuids16_is_complete = 1;
 
     /* Initialize the security configuration */
@@ -834,16 +836,17 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "connection %s; status=%d", event->connect.status == 0 ? "established" : "failed",
                      event->connect.status);
             if (event->connect.status == 0) {
+                ble_hid_device_helper_gap_connected(event->connect.conn_handle);
                 /* Request connection parameters optimised for a HID keyboard:
                  * - 15-60 ms interval: responsive without hammering the radio
                  * - latency: allows the device to skip a few intervals when idle;
                  *   increases battery life.
                  * - supervision timeout: tolerates brief radio gaps */
                 struct ble_gap_upd_params conn_params = {
-                    .itvl_min            = 12,   /* 15 ms (units of 1.25 ms) */
-                    .itvl_max            = 48,   /* 60 ms */
-                    .latency             = 8,    /* might skip up to 8 intervals */
-                    .supervision_timeout = 600,  /* 6000 ms (units of 10 ms) */
+                    .itvl_min            = 12,  /* 15 ms (units of 1.25 ms) */
+                    .itvl_max            = 48,  /* 60 ms */
+                    .latency             = 8,   /* might skip up to 8 intervals */
+                    .supervision_timeout = 600, /* 6000 ms (units of 10 ms) */
                     .min_ce_len          = 0,
                     .max_ce_len          = 0,
                 };
@@ -853,6 +856,7 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
             break;
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
+            ble_hid_device_helper_gap_disconnected(event->disconnect.conn.conn_handle);
 
             return 0;
         case BLE_GAP_EVENT_CONN_UPDATE:

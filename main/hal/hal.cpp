@@ -95,7 +95,7 @@ void Hal::setFullscreenMode(bool fullscreen)
 
 void Hal::setDeviceBrightnessPercent(int percent)
 {
-    percent = std::max(1, std::min(100, percent));
+    percent                     = std::max(1, std::min(100, percent));
     _display_brightness_percent = percent;
     display.setBrightness(static_cast<uint8_t>(percent * 255 / 100));
     if (_settings) {
@@ -339,15 +339,15 @@ void Hal::wifiInit()
     }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    cfg.static_rx_buf_num = 3;
+    cfg.static_rx_buf_num  = 3;
     cfg.dynamic_rx_buf_num = 8;
     cfg.dynamic_tx_buf_num = 8;
-    cfg.rx_mgmt_buf_num = 3;
-    cfg.cache_tx_buf_num = 4;
-    cfg.rx_ba_win = 2;
-    cfg.ampdu_rx_enable = 0;
-    cfg.ampdu_tx_enable = 0;
-    ret = esp_wifi_init(&cfg);
+    cfg.rx_mgmt_buf_num    = 3;
+    cfg.cache_tx_buf_num   = 4;
+    cfg.rx_ba_win          = 2;
+    cfg.ampdu_rx_enable    = 0;
+    cfg.ampdu_tx_enable    = 0;
+    ret                    = esp_wifi_init(&cfg);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         mclog::tagError(_tag, "wifi driver init failed: {}", esp_err_to_name(ret));
         _wifi_init_failed = true;
@@ -379,7 +379,7 @@ void Hal::wifiInit()
         _wifi_init_failed = true;
         return;
     }
-    _is_wifi_inited = true;
+    _is_wifi_inited   = true;
     _wifi_init_failed = false;
 }
 
@@ -737,6 +737,24 @@ void Hal::bleConsumerSend(uint16_t usageId)
     ble_hid_device_helper_send_consumer(usageId);
 }
 
+bool Hal::bleMacCtlVolumeDelta(int8_t delta)
+{
+    if (!bleKeyboardIsConnected()) {
+        return false;
+    }
+
+    return ble_hid_device_helper_send_macctl_volume_delta(delta);
+}
+
+bool Hal::bleMacCtlPlayPause()
+{
+    if (!bleKeyboardIsConnected()) {
+        return false;
+    }
+
+    return ble_hid_device_helper_send_macctl_play_pause();
+}
+
 void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
 {
     if (keyboard.isFnPressed() && keyEvent.state &&
@@ -960,7 +978,7 @@ void Hal::sdCardUnmount()
 
     mclog::tagInfo(_tag, "sd card unmount");
     esp_vfs_fat_sdcard_unmount(MOUNT_POINT, _sd_card);
-    _sd_card = nullptr;
+    _sd_card            = nullptr;
     _is_sd_card_mounted = false;
 }
 

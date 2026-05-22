@@ -121,6 +121,8 @@ public:
     void bleMouseMove(int8_t dx, int8_t dy, int8_t wheel = 0);
     void bleMouseClick(uint8_t buttons);
     void bleConsumerSend(uint16_t usageId);
+    bool bleMacCtlVolumeDelta(int8_t delta);
+    bool bleMacCtlPlayPause();
 
     /* ----------------------------------- USB ---------------------------------- */
     void usbKeyboardInit();
