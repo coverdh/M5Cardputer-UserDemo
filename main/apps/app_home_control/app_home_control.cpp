@@ -640,6 +640,7 @@ void AppHomeControl::renderSetup()
     canvas.println("Fn+W: WiFi settings");
     canvas.println("Fn+C: local settings");
     canvas.println("Fn+S: screen off");
+    canvas.println("Fn+Enter: TV power");
     canvas.printf("Ptr:  %s  XY:%s X:%s Y:%s\n",
                   pointerSensitivityLabel().c_str(),
                   GetHAL().externalInput.getSwapAxes() ? "swap" : "normal",
@@ -719,6 +720,7 @@ void AppHomeControl::renderDashboard()
                   GetHAL().externalInput.getFlipX() ? "inv" : "normal",
                   GetHAL().externalInput.getFlipY() ? "inv" : "normal");
     canvas.println("Fn+S: screen off");
+    canvas.println("Fn+Enter: TV power");
 
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -1056,6 +1058,8 @@ bool AppHomeControl::handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEve
     } else if (keyEvent.keyCode == KEY_RIGHTBRACE) {
         GetHAL().bleMouseClick(2);
         setStatus("Right click");
+    } else if (isEnterKey(keyEvent)) {
+        sendTvPower();
     } else if (keyEvent.keyCode == KEY_SPACE) {
         if (GetHAL().bleMacCtlPlayPause()) {
             setStatus("HomePod mute toggle");
