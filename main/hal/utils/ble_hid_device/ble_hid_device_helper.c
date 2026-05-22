@@ -171,63 +171,18 @@ static bool ble_hid_device_helper_queue_macctl_command(uint8_t command, int8_t v
 }
 
 const unsigned char mediaReportMap[] = {
-    0x05, 0x0C,  // Usage Page (Consumer)
-    0x09, 0x01,  // Usage (Consumer Control)
-    0xA1, 0x01,  // Collection (Application)
-    0x85, 0x03,  //   Report ID (3)
-    0x09, 0x02,  //   Usage (Numeric Key Pad)
-    0xA1, 0x02,  //   Collection (Logical)
-    0x05, 0x09,  //     Usage Page (Button)
-    0x19, 0x01,  //     Usage Minimum (0x01)
-    0x29, 0x0A,  //     Usage Maximum (0x0A)
-    0x15, 0x01,  //     Logical Minimum (1)
-    0x25, 0x0A,  //     Logical Maximum (10)
-    0x75, 0x04,  //     Report Size (4)
-    0x95, 0x01,  //     Report Count (1)
-    0x81, 0x00,  //     Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,        //   End Collection
-    0x05, 0x0C,  //   Usage Page (Consumer)
-    0x09, 0x86,  //   Usage (Channel)
-    0x15, 0xFF,  //   Logical Minimum (-1)
-    0x25, 0x01,  //   Logical Maximum (1)
-    0x75, 0x02,  //   Report Size (2)
-    0x95, 0x01,  //   Report Count (1)
-    0x81, 0x46,  //   Input (Data,Var,Rel,No Wrap,Linear,Preferred State,Null State)
-    0x09, 0xE9,  //   Usage (Volume Increment)
-    0x09, 0xEA,  //   Usage (Volume Decrement)
-    0x15, 0x00,  //   Logical Minimum (0)
-    0x75, 0x01,  //   Report Size (1)
-    0x95, 0x02,  //   Report Count (2)
-    0x81, 0x02,  //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0x09, 0xE2,  //   Usage (Mute)
-    0x09, 0x30,  //   Usage (Power)
-    0x09, 0x83,  //   Usage (Recall Last)
-    0x09, 0x81,  //   Usage (Assign Selection)
-    0x09, 0xB0,  //   Usage (Play)
-    0x09, 0xB1,  //   Usage (Pause)
-    0x09, 0xB2,  //   Usage (Record)
-    0x09, 0xB3,  //   Usage (Fast Forward)
-    0x09, 0xB4,  //   Usage (Rewind)
-    0x09, 0xB5,  //   Usage (Scan Next Track)
-    0x09, 0xB6,  //   Usage (Scan Previous Track)
-    0x09, 0xB7,  //   Usage (Stop)
-    0x15, 0x01,  //   Logical Minimum (1)
-    0x25, 0x0C,  //   Logical Maximum (12)
-    0x75, 0x04,  //   Report Size (4)
-    0x95, 0x01,  //   Report Count (1)
-    0x81, 0x00,  //   Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0x09, 0x80,  //   Usage (Selection)
-    0xA1, 0x02,  //   Collection (Logical)
-    0x05, 0x09,  //     Usage Page (Button)
-    0x19, 0x01,  //     Usage Minimum (0x01)
-    0x29, 0x03,  //     Usage Maximum (0x03)
-    0x15, 0x01,  //     Logical Minimum (1)
-    0x25, 0x03,  //     Logical Maximum (3)
-    0x75, 0x02,  //     Report Size (2)
-    0x81, 0x00,  //     Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,        //   End Collection
-    0x81, 0x03,  //   Input (Const,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,        // End Collection
+    0x05, 0x0C,                    // Usage Page (Consumer)
+    0x09, 0x01,                    // Usage (Consumer Control)
+    0xA1, 0x01,                    // Collection (Application)
+    0x85, BLE_HID_RPT_ID_MEDIA,    //   Report ID (3)
+    0x15, 0x00,                    //   Logical Minimum (0)
+    0x26, 0xFF, 0x03,              //   Logical Maximum (0x03FF)
+    0x19, 0x00,                    //   Usage Minimum (0)
+    0x2A, 0xFF, 0x03,              //   Usage Maximum (0x03FF)
+    0x75, 0x10,                    //   Report Size (16)
+    0x95, 0x01,                    //   Report Count (1)
+    0x81, 0x00,                    //   Input (Data,Array,Abs)
+    0xC0,                          // End Collection
 };
 const unsigned char bleMouseReportMap[] = {
     0x05, 0x01,                  // USAGE_PAGE (Generic Desktop)
@@ -609,78 +564,12 @@ static esp_hid_device_config_t ble_hid_config = {
 
 #define HID_RPT_ID_CC_IN  3  // Consumer Control input report ID
 #define HID_CC_IN_RPT_LEN 2  // Consumer Control input report Len
-void esp_hidd_send_consumer_value(uint8_t key_cmd, bool key_pressed)
+void esp_hidd_send_consumer_value(uint16_t key_cmd, bool key_pressed)
 {
     uint8_t buffer[HID_CC_IN_RPT_LEN] = {0, 0};
     if (key_pressed) {
-        switch (key_cmd) {
-            case HID_CONSUMER_CHANNEL_UP:
-                HID_CC_RPT_SET_CHANNEL(buffer, HID_CC_RPT_CHANNEL_UP);
-                break;
-
-            case HID_CONSUMER_CHANNEL_DOWN:
-                HID_CC_RPT_SET_CHANNEL(buffer, HID_CC_RPT_CHANNEL_DOWN);
-                break;
-
-            case HID_CONSUMER_VOLUME_UP:
-                HID_CC_RPT_SET_VOLUME_UP(buffer);
-                break;
-
-            case HID_CONSUMER_VOLUME_DOWN:
-                HID_CC_RPT_SET_VOLUME_DOWN(buffer);
-                break;
-
-            case HID_CONSUMER_MUTE:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_MUTE);
-                break;
-
-            case HID_CONSUMER_POWER:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_POWER);
-                break;
-
-            case HID_CONSUMER_RECALL_LAST:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_LAST);
-                break;
-
-            case HID_CONSUMER_ASSIGN_SEL:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_ASSIGN_SEL);
-                break;
-
-            case HID_CONSUMER_PLAY:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_PLAY);
-                break;
-
-            case HID_CONSUMER_PAUSE:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_PAUSE);
-                break;
-
-            case HID_CONSUMER_RECORD:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_RECORD);
-                break;
-
-            case HID_CONSUMER_FAST_FORWARD:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_FAST_FWD);
-                break;
-
-            case HID_CONSUMER_REWIND:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_REWIND);
-                break;
-
-            case HID_CONSUMER_SCAN_NEXT_TRK:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_SCAN_NEXT_TRK);
-                break;
-
-            case HID_CONSUMER_SCAN_PREV_TRK:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_SCAN_PREV_TRK);
-                break;
-
-            case HID_CONSUMER_STOP:
-                HID_CC_RPT_SET_BUTTON(buffer, HID_CC_RPT_STOP);
-                break;
-
-            default:
-                break;
-        }
+        buffer[0] = (uint8_t)(key_cmd & 0xFF);
+        buffer[1] = (uint8_t)((key_cmd >> 8) & 0xFF);
     }
     ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_MEDIA, HID_RPT_ID_CC_IN, buffer, HID_CC_IN_RPT_LEN,
                                        key_pressed ? 40 : 8);
@@ -1190,9 +1079,9 @@ void ble_hid_device_helper_send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int
 
 void ble_hid_device_helper_send_consumer(uint16_t usage_id)
 {
-    esp_hidd_send_consumer_value((uint8_t)usage_id, true);
+    esp_hidd_send_consumer_value(usage_id, true);
     vTaskDelay(40 / portTICK_PERIOD_MS);
-    esp_hidd_send_consumer_value((uint8_t)usage_id, false);
+    esp_hidd_send_consumer_value(0, false);
 }
 
 bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta)
