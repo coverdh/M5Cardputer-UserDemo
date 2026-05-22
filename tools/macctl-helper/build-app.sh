@@ -15,3 +15,7 @@ cp "${EXECUTABLE}" "${APP_DIR}/Contents/MacOS/ADVCtl"
 cp Sources/MacCtlHelper/Info.plist "${APP_DIR}/Contents/Info.plist"
 
 echo "${APP_DIR}"
+
+/usr/bin/osascript -e 'tell application "ADVCtl" to quit' >/dev/null 2>&1 || true
+/bin/sleep 0.5
+/usr/bin/open "${APP_DIR}"
