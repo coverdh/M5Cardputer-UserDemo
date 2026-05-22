@@ -42,6 +42,7 @@ void AppHomeControl::onOpen()
     _pending_volume_delta = 0;
     _auto_wifi_attempted  = false;
     _ble_start_requested  = false;
+    _last_ble_retry       = 0;
     _screen_off           = false;
     _power_save_active    = false;
     _last_user_activity   = GetHAL().millis();
@@ -76,6 +77,9 @@ void AppHomeControl::onRunning()
 
     if (_mode == Mode::Setup) {
         enterControlIfReady();
+        if (!_ble_start_requested && GetHAL().millis() - _last_ble_retry > 3000) {
+            startConnections();
+        }
         if (GetHAL().millis() - _last_setup_render > SETUP_RENDER_MS) {
             _last_setup_render = GetHAL().millis();
             render();
@@ -153,10 +157,14 @@ void AppHomeControl::saveWifiConfig()
 void AppHomeControl::startConnections()
 {
     if (!_ble_start_requested) {
-        _ble_start_requested = true;
         setStatus("Starting BLE");
         render();
-        GetHAL().bleControlInit();
+        if (!GetHAL().bleControlInit()) {
+            _last_ble_retry = GetHAL().millis();
+            setStatus("BLE init failed; auto retry");
+            return;
+        }
+        _ble_start_requested = true;
         if (!GetHAL().bleKeyboardIsConnected()) {
             setStatus("Pair ADVCtl");
         }
@@ -512,12 +520,10 @@ uint8_t AppHomeControl::encodeULaw(int16_t sample) const
     constexpr int BIAS = 0x84;
     constexpr int CLIP = 32635;
     int pcm = sample;
-    int mask;
+    int sign = 0;
     if (pcm < 0) {
         pcm = -pcm;
-        mask = 0x7F;
-    } else {
-        mask = 0xFF;
+        sign = 0x80;
     }
     if (pcm > CLIP) {
         pcm = CLIP;
@@ -529,7 +535,7 @@ uint8_t AppHomeControl::encodeULaw(int16_t sample) const
         --segment;
     }
     const int mantissa = (pcm >> (segment + 3)) & 0x0F;
-    return static_cast<uint8_t>(mask & ((segment << 4) | mantissa));
+    return static_cast<uint8_t>(~(sign | (segment << 4) | mantissa));
 }
 
 void AppHomeControl::streamAudioFrame()
@@ -574,6 +580,18 @@ void AppHomeControl::adjustPointerSensitivity(int delta)
         sendHardwareSettings();
     }
     setStatus("Pointer sensitivity " + pointerSensitivityLabel());
+}
+
+void AppHomeControl::adjustKeyboardSfxVolume(int delta)
+{
+    const int volume = audio::adjust_keyboard_sfx_volume_percent(delta);
+    setStatus(volume > 0 ? "Key sound " + std::to_string(volume) + "%" : "Key sound off");
+}
+
+void AppHomeControl::toggleKeyboardSfx()
+{
+    const bool enabled = audio::toggle_keyboard_sfx_user_enabled();
+    setStatus(enabled ? "Key sound on" : "Key sound off");
 }
 
 void AppHomeControl::loadPowerSettings()
@@ -1106,6 +1124,39 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
         return;
     }
 
+    if (GetHAL().keyboard.isFnPressed() && !keyEvent.isModifier && keyEvent.keyCode == KEY_B) {
+        if (keyEvent.state) {
+            if (GetHAL().bleControlForgetBonds()) {
+                _ble_start_requested = true;
+                setStatus("BLE pairing reset");
+            } else {
+                setStatus("BLE reset failed");
+            }
+        }
+        if (_mode == Mode::Dashboard) {
+            render();
+        }
+        return;
+    }
+
+    if (GetHAL().keyboard.isFnPressed() && keyEvent.state && !keyEvent.isModifier &&
+        (keyEvent.keyCode == KEY_LEFTBRACE || keyEvent.keyCode == KEY_RIGHTBRACE)) {
+        const int volume = audio::get_keyboard_sfx_volume_percent();
+        setStatus(volume > 0 ? "Key sound " + std::to_string(volume) + "%" : "Key sound off");
+        if (_mode == Mode::Dashboard) {
+            render();
+        }
+        return;
+    }
+
+    if (GetHAL().keyboard.isFnPressed() && keyEvent.state && !keyEvent.isModifier && keyEvent.keyCode == KEY_M) {
+        setStatus(audio::is_keyboard_sfx_user_enabled() ? "Key sound on" : "Key sound off");
+        if (_mode == Mode::Dashboard) {
+            render();
+        }
+        return;
+    }
+
     if (_mode == Mode::Dashboard) {
         handleDashboardKey(keyEvent);
         return;
@@ -1126,6 +1177,17 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
         return;
     }
 
+    if (_mode == Mode::AudioTest) {
+        if (keyEvent.state && !keyEvent.isModifier && (keyEvent.keyCode == KEY_ESC || isEnterKey(keyEvent))) {
+            stopAudioTest();
+            _mode = Mode::Dashboard;
+            render();
+        } else {
+            forwardKeyboardEvent(keyEvent);
+        }
+        return;
+    }
+
     if (!keyEvent.state || keyEvent.isModifier) {
         return;
     }
@@ -1139,13 +1201,6 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
             break;
         case Mode::Config:
             handleConfigKey(keyEvent);
-            break;
-        case Mode::AudioTest:
-            if (keyEvent.keyCode == KEY_ESC || isEnterKey(keyEvent)) {
-                stopAudioTest();
-                _mode = Mode::Dashboard;
-                render();
-            }
             break;
         case Mode::Dashboard:
         default:
@@ -1265,11 +1320,9 @@ bool AppHomeControl::handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEve
     } else if (keyEvent.keyCode == KEY_R) {
         resetHardwareSettings();
     } else if (keyEvent.keyCode == KEY_LEFTBRACE) {
-        GetHAL().bleMouseClick(1);
-        setStatus("Left click");
+        setStatus(audio::get_keyboard_sfx_volume_percent() > 0 ? "Key sound on" : "Key sound off");
     } else if (keyEvent.keyCode == KEY_RIGHTBRACE) {
-        GetHAL().bleMouseClick(2);
-        setStatus("Right click");
+        setStatus(audio::get_keyboard_sfx_volume_percent() > 0 ? "Key sound on" : "Key sound off");
     } else if (isEnterKey(keyEvent)) {
         sendTvPower();
     } else if (keyEvent.keyCode == KEY_SPACE) {

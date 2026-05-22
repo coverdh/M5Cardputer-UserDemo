@@ -18,7 +18,6 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("AppKit"),
-                .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",

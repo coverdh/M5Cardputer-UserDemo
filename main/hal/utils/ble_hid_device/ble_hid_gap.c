@@ -850,6 +850,8 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
                     .max_ce_len          = 0,
                 };
                 ble_gap_update_params(event->connect.conn_handle, &conn_params);
+            } else {
+                esp_hid_ble_gap_adv_start();
             }
             return 0;
             break;
@@ -865,6 +867,7 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
             ESP_LOGI(TAG, "advertise complete; reason=%d", event->adv_complete.reason);
+            esp_hid_ble_gap_adv_start();
             return 0;
 
         case BLE_GAP_EVENT_SUBSCRIBE:

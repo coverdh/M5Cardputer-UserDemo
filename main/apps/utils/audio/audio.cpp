@@ -15,6 +15,32 @@
 namespace audio {
 
 static std::vector<int> c_major_scale = {60, 62, 64, 65, 67, 69, 71};  // C大调音阶（C D E F G A B）
+static constexpr const char* KEYBOARD_SFX_VOLUME_KEY = "kbd_sfx_vol";
+static constexpr const char* KEYBOARD_SFX_LAST_VOLUME_KEY = "kbd_sfx_last";
+static constexpr const char* KEYBOARD_SFX_ENABLED_KEY = "kbd_sfx_en";
+static int s_keyboard_sfx_volume_percent             = -1;
+static int s_keyboard_sfx_user_enabled               = -1;
+
+static int clamp_percent(int percent)
+{
+    return std::max(0, std::min(100, percent));
+}
+
+static int ensure_keyboard_sfx_volume_loaded()
+{
+    if (s_keyboard_sfx_volume_percent < 0) {
+        s_keyboard_sfx_volume_percent = clamp_percent(GetHAL().getSettings().GetInt(KEYBOARD_SFX_VOLUME_KEY, 45));
+    }
+    return s_keyboard_sfx_volume_percent;
+}
+
+static bool ensure_keyboard_sfx_user_enabled_loaded()
+{
+    if (s_keyboard_sfx_user_enabled < 0) {
+        s_keyboard_sfx_user_enabled = GetHAL().getSettings().GetInt(KEYBOARD_SFX_ENABLED_KEY, 1) != 0 ? 1 : 0;
+    }
+    return s_keyboard_sfx_user_enabled != 0;
+}
 
 static bool is_volume_shortcut(const Keyboard::KeyEvent_t& event)
 {
@@ -56,6 +82,52 @@ void play_tone(int frequency, double durationSec)
     }
 
     GetHAL().speaker.playRaw(buffer.data(), buffer.size());
+}
+
+static void play_keyboard_tone(int frequency, double durationSec)
+{
+    const int sfx_volume = ensure_keyboard_sfx_volume_loaded();
+    if (!ensure_keyboard_sfx_user_enabled_loaded() || sfx_volume <= 0 || GetHAL().speaker.getVolume() <= 0) {
+        return;
+    }
+
+    const int sample_rate = GetHAL().speaker.config().sample_rate;
+    const int samples     = static_cast<int>(sample_rate * durationSec);
+    std::vector<int16_t> buffer(samples * 2);
+
+    const int fade_len = 200;
+    const float amplitude = (32767.0f / 5) * (static_cast<float>(sfx_volume) / 100.0f);
+
+    for (int i = 0; i < samples; ++i) {
+        float amp = amplitude;
+        if (i >= samples - fade_len) {
+            float fade_factor = static_cast<float>(samples - i) / fade_len;
+            amp *= fade_factor;
+        }
+
+        int16_t value     = static_cast<int16_t>(amp * sin(2.0 * M_PI * frequency * i / sample_rate));
+        buffer[i * 2]     = value;
+        buffer[i * 2 + 1] = value;
+    }
+
+    GetHAL().speaker.playRaw(buffer.data(), buffer.size());
+}
+
+static void play_keyboard_tone_from_midi(int midi, double durationSec)
+{
+    double freq = 440.0 * std::pow(2.0, (midi - 69) / 12.0);
+    play_keyboard_tone(static_cast<int>(freq), durationSec);
+}
+
+static void play_random_keyboard_tone(int semitoneShift, double durationSec)
+{
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dist(0, static_cast<int>(c_major_scale.size()) - 1);
+
+    int index = dist(gen);
+    int midi  = c_major_scale[index] + semitoneShift;
+    play_keyboard_tone_from_midi(midi, durationSec);
 }
 
 void play_melody(const std::vector<int>& midiList, double durationSec = 0.1)
@@ -140,28 +212,28 @@ static void _keyboard_sfx_on_key_event(const Keyboard::KeyEvent_t& event)
     int semitoneShift = 48;
     switch (event.keyCode) {
         case KEY_1:
-            play_tone_from_midi(c_major_scale[0] + semitoneShift, 0.02);
+            play_keyboard_tone_from_midi(c_major_scale[0] + semitoneShift, 0.02);
             return;
         case KEY_2:
-            play_tone_from_midi(c_major_scale[1] + semitoneShift, 0.02);
+            play_keyboard_tone_from_midi(c_major_scale[1] + semitoneShift, 0.02);
             return;
         case KEY_3:
-            play_tone_from_midi(c_major_scale[2] + semitoneShift, 0.02);
+            play_keyboard_tone_from_midi(c_major_scale[2] + semitoneShift, 0.02);
             return;
         case KEY_4:
-            play_tone_from_midi(c_major_scale[3] + semitoneShift, 0.02);
+            play_keyboard_tone_from_midi(c_major_scale[3] + semitoneShift, 0.02);
             return;
         case KEY_5:
-            play_tone_from_midi(c_major_scale[4] + semitoneShift, 0.02);
+            play_keyboard_tone_from_midi(c_major_scale[4] + semitoneShift, 0.02);
             return;
         case KEY_6:
-            play_tone_from_midi(c_major_scale[5] + semitoneShift, 0.02);
+            play_keyboard_tone_from_midi(c_major_scale[5] + semitoneShift, 0.02);
             return;
         case KEY_7:
-            play_tone_from_midi(c_major_scale[6] + semitoneShift, 0.02);
+            play_keyboard_tone_from_midi(c_major_scale[6] + semitoneShift, 0.02);
             return;
         default:
-            play_random_tone(semitoneShift, 0.02);
+            play_random_keyboard_tone(semitoneShift, 0.02);
     }
 }
 
@@ -186,6 +258,71 @@ void set_keyboard_sfx_enable(bool enable)
     }
 }
 
+int get_keyboard_sfx_volume_percent()
+{
+    return ensure_keyboard_sfx_volume_loaded();
+}
+
+void set_keyboard_sfx_volume_percent(int percent)
+{
+    const int previous = ensure_keyboard_sfx_volume_loaded();
+    s_keyboard_sfx_volume_percent = clamp_percent(percent);
+    if (s_keyboard_sfx_volume_percent > 0) {
+        s_keyboard_sfx_user_enabled = 1;
+        GetHAL().getSettings().SetInt(KEYBOARD_SFX_ENABLED_KEY, 1);
+        GetHAL().getSettings().SetInt(KEYBOARD_SFX_LAST_VOLUME_KEY, s_keyboard_sfx_volume_percent);
+    } else {
+        s_keyboard_sfx_user_enabled = 0;
+        GetHAL().getSettings().SetInt(KEYBOARD_SFX_ENABLED_KEY, 0);
+        if (previous > 0) {
+            GetHAL().getSettings().SetInt(KEYBOARD_SFX_LAST_VOLUME_KEY, previous);
+        }
+    }
+    GetHAL().getSettings().SetInt(KEYBOARD_SFX_VOLUME_KEY, s_keyboard_sfx_volume_percent);
+    mclog::tagInfo("audio", "keyboard sfx volume: {}%", s_keyboard_sfx_volume_percent);
+}
+
+int adjust_keyboard_sfx_volume_percent(int delta)
+{
+    const int volume = clamp_percent(ensure_keyboard_sfx_volume_loaded() + delta);
+    set_keyboard_sfx_volume_percent(volume);
+    if (volume > 0) {
+        play_keyboard_tone_from_midi(108, 0.03);
+    }
+    return volume;
+}
+
+bool is_keyboard_sfx_user_enabled()
+{
+    return ensure_keyboard_sfx_user_enabled_loaded() && ensure_keyboard_sfx_volume_loaded() > 0;
+}
+
+bool toggle_keyboard_sfx_user_enabled()
+{
+    const bool enabled = !is_keyboard_sfx_user_enabled();
+    if (enabled) {
+        int restoreVolume = clamp_percent(GetHAL().getSettings().GetInt(KEYBOARD_SFX_LAST_VOLUME_KEY, 45));
+        if (restoreVolume <= 0) {
+            restoreVolume = 45;
+        }
+        s_keyboard_sfx_volume_percent = restoreVolume;
+        s_keyboard_sfx_user_enabled = 1;
+        GetHAL().getSettings().SetInt(KEYBOARD_SFX_VOLUME_KEY, restoreVolume);
+        GetHAL().getSettings().SetInt(KEYBOARD_SFX_LAST_VOLUME_KEY, restoreVolume);
+        GetHAL().getSettings().SetInt(KEYBOARD_SFX_ENABLED_KEY, 1);
+        play_keyboard_tone_from_midi(108, 0.03);
+    } else {
+        const int currentVolume = ensure_keyboard_sfx_volume_loaded();
+        if (currentVolume > 0) {
+            GetHAL().getSettings().SetInt(KEYBOARD_SFX_LAST_VOLUME_KEY, currentVolume);
+        }
+        s_keyboard_sfx_user_enabled = 0;
+        GetHAL().getSettings().SetInt(KEYBOARD_SFX_ENABLED_KEY, 0);
+    }
+    mclog::tagInfo("audio", "keyboard sfx user enabled: {}", enabled);
+    return enabled;
+}
+
 static void _global_shortcuts_on_key_event(const Keyboard::KeyEvent_t& event)
 {
     if (!event.state || event.isModifier || !GetHAL().keyboard.isFnPressed()) {
@@ -193,17 +330,11 @@ static void _global_shortcuts_on_key_event(const Keyboard::KeyEvent_t& event)
     }
 
     if (event.keyCode == KEY_LEFTBRACE) {
-        int volume = GetHAL().getDeviceVolumePercent();
-        volume = std::max(0, volume - 5);
-        GetHAL().setDeviceVolumePercent(volume);
-        mclog::tagInfo("audio", "device volume shortcut: {}%", volume);
-        play_random_tone(60, 0.04);
+        adjust_keyboard_sfx_volume_percent(-10);
     } else if (event.keyCode == KEY_RIGHTBRACE) {
-        int volume = GetHAL().getDeviceVolumePercent();
-        volume = std::min(100, volume + 5);
-        GetHAL().setDeviceVolumePercent(volume);
-        mclog::tagInfo("audio", "device volume shortcut: {}%", volume);
-        play_random_tone(60, 0.04);
+        adjust_keyboard_sfx_volume_percent(10);
+    } else if (event.keyCode == KEY_M) {
+        toggle_keyboard_sfx_user_enabled();
     } else if (event.keyCode == KEY_MINUS) {
         int brightness = GetHAL().getDeviceBrightnessPercent();
         brightness = std::max(1, brightness - 10);

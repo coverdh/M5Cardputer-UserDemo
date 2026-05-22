@@ -24,8 +24,10 @@
 #include "esp_bt.h"
 
 #if CONFIG_BT_NIMBLE_ENABLED
+#include "host/ble_gap.h"
 #include "host/ble_store.h"
 #include "host/ble_hs.h"
+#include "nimble/ble.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #else
@@ -52,11 +54,16 @@
 static const char *TAG = "ble_hid";
 
 #define BLE_HID_MACCTL_REPORT_LEN 63
+#define BLE_HID_AUDIO_QUEUE_RESERVE 8
+#define BLE_HID_MACCTL_AUDIO_FRAME 0xA0
 
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 static TickType_t s_ble_hid_ready_after_tick        = 0;
 static bool s_ble_hid_notify_ready                  = false;
 static bool s_ble_hid_stack_ready                   = false;
+#if CONFIG_BT_NIMBLE_ENABLED
+static uint16_t s_ble_hid_conn_handle               = BLE_HS_CONN_HANDLE_NONE;
+#endif
 
 typedef struct {
     uint8_t map_index;
@@ -102,6 +109,17 @@ static bool ble_hid_device_helper_queue_report(uint8_t map_index, uint8_t report
                                                uint16_t delay_after_ms)
 {
     if (!ble_hid_device_helper_is_ready() || !s_ble_hid_report_queue || !data || len > sizeof(((BleHidQueuedReport_t *)0)->data)) {
+        return false;
+    }
+
+    const bool is_audio_frame = map_index == BLE_HID_MAP_INDEX_MACCTL && report_id == BLE_HID_RPT_ID_MACCTL &&
+                                len > 0 && data[0] == BLE_HID_MACCTL_AUDIO_FRAME;
+    if (is_audio_frame && uxQueueSpacesAvailable(s_ble_hid_report_queue) <= BLE_HID_AUDIO_QUEUE_RESERVE) {
+        TickType_t now = xTaskGetTickCount();
+        if (now - s_ble_hid_last_drop_log > pdMS_TO_TICKS(2000)) {
+            s_ble_hid_last_drop_log = now;
+            ESP_LOGW(TAG, "hid audio queue congested; drop audio frame");
+        }
         return false;
     }
 
@@ -993,24 +1011,34 @@ static void ble_hid_device_helper_clear_stored_cccds(void)
 }
 #endif
 
-void _demo_app_main(void)
+bool _demo_app_main(void)
 {
     esp_err_t ret;
 #if HID_DEV_MODE == HIDD_IDLE_MODE
     ESP_LOGE(TAG, "Please turn on BT HID device or BLE!");
-    return;
+    return false;
 #endif
     if (!s_ble_hid_stack_ready) {
         ret = nvs_flash_init();
         if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            ESP_ERROR_CHECK(nvs_flash_erase());
+            ret = nvs_flash_erase();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "nvs erase failed: %d", ret);
+                return false;
+            }
             ret = nvs_flash_init();
         }
-        ESP_ERROR_CHECK(ret);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "nvs init failed: %d", ret);
+            return false;
+        }
 
         ESP_LOGI(TAG, "setting hid gap, mode:%d", HID_DEV_MODE);
         ret = esp_hid_gap_init(HID_DEV_MODE);
-        ESP_ERROR_CHECK(ret);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "hid gap init failed: %d", ret);
+            return false;
+        }
 
 #if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
 #if CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
@@ -1020,11 +1048,14 @@ void _demo_app_main(void)
 #else
         ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_GENERIC, ble_hid_config.device_name);
 #endif
-        ESP_ERROR_CHECK(ret);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "ble gap adv init failed: %d", ret);
+            return false;
+        }
 #if CONFIG_BT_BLE_ENABLED
         if ((ret = esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler)) != ESP_OK) {
             ESP_LOGE(TAG, "GATTS register callback failed: %d", ret);
-            return;
+            return false;
         }
 #endif
 #endif
@@ -1034,11 +1065,14 @@ void _demo_app_main(void)
 #if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
     if (s_ble_hid_param.hid_dev) {
         ESP_LOGI(TAG, "ble hid device already initialized");
-        return;
+        return true;
     }
     ESP_LOGI(TAG, "setting ble device");
-    ESP_ERROR_CHECK(
-        esp_hidd_dev_init(&ble_hid_config, ESP_HID_TRANSPORT_BLE, ble_hidd_event_callback, &s_ble_hid_param.hid_dev));
+    ret = esp_hidd_dev_init(&ble_hid_config, ESP_HID_TRANSPORT_BLE, ble_hidd_event_callback, &s_ble_hid_param.hid_dev);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ble hid device init failed: %d", ret);
+        return false;
+    }
 #endif
 
 #if CONFIG_BT_HID_DEVICE_ENABLED
@@ -1051,11 +1085,22 @@ void _demo_app_main(void)
     esp_bt_gap_set_cod(cod, ESP_BT_SET_COD_MAJOR_MINOR);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     ESP_LOGI(TAG, "setting bt device");
-    ESP_ERROR_CHECK(
-        esp_hidd_dev_init(&bt_hid_config, ESP_HID_TRANSPORT_BT, bt_hidd_event_callback, &s_bt_hid_param.hid_dev));
+    ret = esp_hidd_dev_init(&bt_hid_config, ESP_HID_TRANSPORT_BT, bt_hidd_event_callback, &s_bt_hid_param.hid_dev);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "bt hid device init failed: %d", ret);
+        return false;
+    }
 #if CONFIG_BT_SDP_COMMON_ENABLED
-    ESP_ERROR_CHECK(esp_sdp_register_callback(esp_sdp_cb));
-    ESP_ERROR_CHECK(esp_sdp_init());
+    ret = esp_sdp_register_callback(esp_sdp_cb);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "sdp callback init failed: %d", ret);
+        return false;
+    }
+    ret = esp_sdp_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "sdp init failed: %d", ret);
+        return false;
+    }
 #endif /* CONFIG_BT_SDP_COMMON_ENABLED */
 #endif /* CONFIG_BT_HID_DEVICE_ENABLED */
 #if CONFIG_BT_NIMBLE_ENABLED
@@ -1070,17 +1115,19 @@ void _demo_app_main(void)
     ret = esp_nimble_enable(ble_hid_device_host_task);
     if (ret) {
         ESP_LOGE(TAG, "esp_nimble_enable failed: %d", ret);
+        return false;
     }
 
     ESP_LOGI(TAG, "Setting battery level to 100%%");
     ble_svc_bas_battery_level_set(100);
 #endif
+    return true;
 }
 
-void ble_hid_device_helper_init(void)
+bool ble_hid_device_helper_init(void)
 {
     ble_hid_device_helper_ensure_report_task();
-    _demo_app_main();
+    return _demo_app_main();
 }
 
 void ble_hid_device_helper_stop(void)
@@ -1100,9 +1147,57 @@ void ble_hid_device_helper_stop(void)
     s_ble_hid_keyboard_state  = BLE_HID_DEVICE_STATE_IDLE;
     s_ble_hid_notify_ready    = false;
     s_ble_hid_ready_after_tick = 0;
+#if CONFIG_BT_NIMBLE_ENABLED
+    s_ble_hid_conn_handle      = BLE_HS_CONN_HANDLE_NONE;
+#endif
     if (s_ble_hid_report_queue) {
         xQueueReset(s_ble_hid_report_queue);
     }
+#endif
+}
+
+bool ble_hid_device_helper_forget_bonds(void)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    if (!s_ble_hid_stack_ready) {
+        ESP_LOGW(TAG, "cannot forget BLE bonds before stack init");
+        return false;
+    }
+
+    ESP_LOGW(TAG, "forget BLE bonds and restart pairing");
+    if (s_ble_hid_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        int term_rc = ble_gap_terminate(s_ble_hid_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (term_rc != 0) {
+            ESP_LOGW(TAG, "terminate BLE connection failed: %d", term_rc);
+        }
+    }
+
+    s_ble_hid_keyboard_state   = BLE_HID_DEVICE_STATE_IDLE;
+    s_ble_hid_notify_ready     = false;
+    s_ble_hid_ready_after_tick = 0;
+    s_ble_hid_conn_handle      = BLE_HS_CONN_HANDLE_NONE;
+    if (s_ble_hid_report_queue) {
+        xQueueReset(s_ble_hid_report_queue);
+    }
+
+    int rc = ble_store_clear();
+    if (rc != 0) {
+        ESP_LOGW(TAG, "clear BLE bond store failed: %d", rc);
+        return false;
+    }
+    ble_hid_device_helper_clear_stored_cccds();
+
+    if (s_ble_hid_param.hid_dev && !ble_gap_adv_active()) {
+        rc = esp_hid_ble_gap_adv_start();
+        if (rc != 0) {
+            ESP_LOGW(TAG, "restart BLE advertising failed: %d", rc);
+            return false;
+        }
+    }
+    return true;
+#else
+    ESP_LOGW(TAG, "forget BLE bonds is only implemented for NimBLE");
+    return false;
 #endif
 }
 
@@ -1181,7 +1276,11 @@ bool ble_hid_device_helper_is_ready(void)
 
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
+#if CONFIG_BT_NIMBLE_ENABLED
+    s_ble_hid_conn_handle = conn_handle;
+#else
     (void)conn_handle;
+#endif
     if (s_ble_hid_notify_ready) {
         s_ble_hid_ready_after_tick = xTaskGetTickCount();
     } else {
@@ -1191,7 +1290,13 @@ void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
 {
+#if CONFIG_BT_NIMBLE_ENABLED
+    if (s_ble_hid_conn_handle == conn_handle) {
+        s_ble_hid_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    }
+#else
     (void)conn_handle;
+#endif
     s_ble_hid_notify_ready     = false;
     s_ble_hid_ready_after_tick = 0;
 }

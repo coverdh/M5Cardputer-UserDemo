@@ -1,6 +1,6 @@
 import AppKit
-import AudioToolbox
 import CoreAudio
+import Darwin
 import Foundation
 import IOKit.hid
 import MacCtlCore
@@ -36,6 +36,11 @@ private let macKeyF14: UInt16 = 0x6B
 private let macKeyF15: UInt16 = 0x71
 private let systemDefinedKeyDownSubtype: Int16 = 8
 private let systemDefinedKeyStateDown = 0x0A
+private let advCtlAudioRingPath = "/tmp/advctl_audio_pcm.ring"
+private let advCtlAudioRingMagic: UInt32 = 0x41445641
+private let advCtlAudioRingVersion: UInt32 = 1
+private let advCtlAudioRingHeaderSize = 64
+private let advCtlAudioRingCapacityFrames = 48_000 * 5
 private let nxKeyTypeBrightnessDown = 3
 private let nxKeyTypeBrightnessUp = 2
 private let advCtlTimeSyncEpoch: TimeInterval = 1_704_067_200
@@ -160,136 +165,173 @@ private struct NowPlayingSnapshot: Equatable {
     }
 }
 
-private let blackHoleAudioCallback: AudioQueueOutputCallback = { _, queue, buffer in
-    AudioQueueFreeBuffer(queue, buffer)
-}
-
-private final class BlackHoleAudioSink {
-    private var queue: AudioQueueRef?
-    private(set) var deviceID: AudioDeviceID?
-    private(set) var deviceUID: String?
+private final class ADVCtlAudioRingSink {
+    private var mapped: UnsafeMutableRawPointer?
+    private var mappedSize = 0
+    private var fileHandle: FileHandle?
+    private var ringDevice: UInt64 = 0
+    private var ringInode: UInt64 = 0
 
     var isRunning: Bool {
-        queue != nil
+        isInputRequested()
     }
 
     var statusText: String {
-        if isRunning {
-            return "Streaming to BlackHole 2ch"
+        if isInputRequested() {
+            return "ADVCtlAudio is requesting input"
         }
-        if deviceUID != nil {
-            return "ADV microphone inactive"
-        }
-        return "BlackHole 2ch installed; restart required"
+        return isMapped ? "ADVCtlAudio driver idle" : "ADVCtlAudio driver not loaded"
+    }
+
+    private var isMapped: Bool {
+        mapped != nil
     }
 
     init() {
         refreshDevice()
     }
 
-    @discardableResult func refreshDevice() -> Bool {
-        if let device = Self.findBlackHoleDevice() {
-            deviceID = device.id
-            deviceUID = device.uid
-        } else {
-            deviceID = nil
-            deviceUID = nil
-        }
-        return deviceUID != nil
+    deinit {
+        unmapRing()
     }
 
-    @discardableResult func start() -> Bool {
-        if queue != nil {
+    @discardableResult func refreshDevice() -> Bool {
+        if mapped != nil, isCurrentRingFileMapped() {
             return true
         }
-        guard let deviceUID else {
-            refreshDevice()
+        if mapped != nil {
+            log("ADVCtlAudio ring file changed; remapping")
+            unmapRing()
+        }
+        mappedSize = advCtlAudioRingHeaderSize + advCtlAudioRingCapacityFrames * MemoryLayout<Float32>.size
+        if !FileManager.default.fileExists(atPath: advCtlAudioRingPath) {
             return false
         }
-
-        var format = AudioStreamBasicDescription(mSampleRate: 48000,
-                                                 mFormatID: kAudioFormatLinearPCM,
-                                                 mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-                                                 mBytesPerPacket: 4,
-                                                 mFramesPerPacket: 1,
-                                                 mBytesPerFrame: 4,
-                                                 mChannelsPerFrame: 2,
-                                                 mBitsPerChannel: 16,
-                                                 mReserved: 0)
-        var newQueue: AudioQueueRef?
-        var status = AudioQueueNewOutput(&format,
-                                         blackHoleAudioCallback,
-                                         nil,
-                                         CFRunLoopGetMain(),
-                                         CFRunLoopMode.commonModes.rawValue,
-                                         0,
-                                         &newQueue)
-        guard status == noErr, let newQueue else {
-            log("BlackHole AudioQueueNewOutput failed: \(status)")
+        guard let handle = try? FileHandle(forUpdating: URL(fileURLWithPath: advCtlAudioRingPath)) else {
+            log("ADVCtlAudio open ring file failed: \(advCtlAudioRingPath)")
             return false
         }
-
-        var uid = deviceUID as CFString
-        status = withUnsafePointer(to: &uid) { pointer in
-            AudioQueueSetProperty(newQueue,
-                                  kAudioQueueProperty_CurrentDevice,
-                                  pointer,
-                                  UInt32(MemoryLayout<CFString>.size))
-        }
-        guard status == noErr else {
-            log("BlackHole set current device failed: \(status)")
-            AudioQueueDispose(newQueue, true)
+        do {
+            try handle.truncate(atOffset: UInt64(mappedSize))
+        } catch {
+            log("ADVCtlAudio truncate ring failed: \(error)")
+            try? handle.close()
             return false
         }
-
-        status = AudioQueueStart(newQueue, nil)
-        guard status == noErr else {
-            log("BlackHole AudioQueueStart failed: \(status)")
-            AudioQueueDispose(newQueue, true)
+        let fd = handle.fileDescriptor
+        let pointer = mmap(nil, mappedSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+        guard pointer != MAP_FAILED else {
+            log("ADVCtlAudio mmap failed: \(errno)")
+            try? handle.close()
             return false
         }
-        queue = newQueue
+        var fileStat = stat()
+        if fstat(fd, &fileStat) == 0 {
+            ringDevice = UInt64(fileStat.st_dev)
+            ringInode = UInt64(fileStat.st_ino)
+        }
+        fileHandle = handle
+        mapped = pointer
+        initializeRingIfNeeded()
         return true
     }
 
-    func stop() {
-        guard let queue else {
-            return
+    @discardableResult func start() -> Bool {
+        refreshDevice()
+    }
+
+    func stop() {}
+
+    func isInputRequested() -> Bool {
+        guard refreshDevice(), let mapped else {
+            return false
         }
-        AudioQueueStop(queue, true)
-        AudioQueueDispose(queue, true)
-        self.queue = nil
+        return mapped.load(fromByteOffset: 12, as: UInt32.self) != 0
     }
 
     func enqueueULaw(_ data: Data) {
-        guard let queue, !data.isEmpty else {
+        guard refreshDevice(), !data.isEmpty else {
             return
         }
-        var pcm = [Int16]()
-        pcm.reserveCapacity(data.count * 12)
+        var samples = [Float32]()
+        samples.reserveCapacity(data.count * 6)
         for byte in data {
-            let sample = Self.decodeULaw(byte)
+            let decoded = Float32(Self.decodeULaw(byte)) / 32768.0
             for _ in 0..<6 {
-                pcm.append(sample)
-                pcm.append(sample)
+                samples.append(decoded)
             }
         }
-        let byteCount = pcm.count * MemoryLayout<Int16>.size
-        var buffer: AudioQueueBufferRef?
-        guard AudioQueueAllocateBuffer(queue, UInt32(byteCount), &buffer) == noErr, let buffer else {
+        write(samples)
+    }
+
+    private func initializeRingIfNeeded() {
+        guard let mapped else {
             return
         }
-        pcm.withUnsafeBytes { raw in
-            if let baseAddress = raw.baseAddress {
-                memcpy(buffer.pointee.mAudioData, baseAddress, byteCount)
-            }
+        let magic = mapped.load(fromByteOffset: 0, as: UInt32.self)
+        let version = mapped.load(fromByteOffset: 4, as: UInt32.self)
+        let capacity = mapped.load(fromByteOffset: 8, as: UInt32.self)
+        guard magic != advCtlAudioRingMagic ||
+              version != advCtlAudioRingVersion ||
+              capacity != UInt32(advCtlAudioRingCapacityFrames) else {
+            return
         }
-        buffer.pointee.mAudioDataByteSize = UInt32(byteCount)
-        let status = AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
-        if status != noErr {
-            AudioQueueFreeBuffer(queue, buffer)
-            log("BlackHole enqueue failed: \(status)")
+        memset(mapped, 0, mappedSize)
+        mapped.storeBytes(of: advCtlAudioRingMagic, toByteOffset: 0, as: UInt32.self)
+        mapped.storeBytes(of: advCtlAudioRingVersion, toByteOffset: 4, as: UInt32.self)
+        mapped.storeBytes(of: UInt32(advCtlAudioRingCapacityFrames), toByteOffset: 8, as: UInt32.self)
+    }
+
+    private func isCurrentRingFileMapped() -> Bool {
+        guard ringDevice != 0 || ringInode != 0 else {
+            return true
         }
+        var pathStat = stat()
+        guard stat(advCtlAudioRingPath, &pathStat) == 0 else {
+            return false
+        }
+        return UInt64(pathStat.st_dev) == ringDevice && UInt64(pathStat.st_ino) == ringInode
+    }
+
+    private func unmapRing() {
+        if let mapped {
+            munmap(mapped, mappedSize)
+            self.mapped = nil
+        }
+        try? fileHandle?.close()
+        fileHandle = nil
+        ringDevice = 0
+        ringInode = 0
+    }
+
+    private func write(_ samples: [Float32]) {
+        guard let mapped, !samples.isEmpty else {
+            return
+        }
+        let capacity = Int(mapped.load(fromByteOffset: 8, as: UInt32.self))
+        guard capacity > 0 else {
+            return
+        }
+
+        var writeIndex = mapped.load(fromByteOffset: 32, as: UInt64.self)
+        var readIndex = mapped.load(fromByteOffset: 40, as: UInt64.self)
+        let available = writeIndex >= readIndex ? Int(writeIndex - readIndex) : 0
+        if available + samples.count > capacity {
+            let newRead = writeIndex + UInt64(samples.count - capacity)
+            readIndex = newRead
+            mapped.storeBytes(of: readIndex, toByteOffset: 40, as: UInt64.self)
+            let overrun = mapped.load(fromByteOffset: 56, as: UInt64.self) + 1
+            mapped.storeBytes(of: overrun, toByteOffset: 56, as: UInt64.self)
+        }
+
+        for (offset, sample) in samples.enumerated() {
+            let frame = Int((writeIndex + UInt64(offset)) % UInt64(capacity))
+            mapped.storeBytes(of: sample,
+                              toByteOffset: advCtlAudioRingHeaderSize + frame * MemoryLayout<Float32>.size,
+                              as: Float32.self)
+        }
+        writeIndex += UInt64(samples.count)
+        mapped.storeBytes(of: writeIndex, toByteOffset: 32, as: UInt64.self)
     }
 
     private static func decodeULaw(_ byte: UInt8) -> Int16 {
@@ -297,47 +339,6 @@ private final class BlackHoleAudioSink {
         var sample = Int16(((Int(value & 0x0F) << 3) + 0x84) << Int((value & 0x70) >> 4))
         sample -= 0x84
         return (value & 0x80) != 0 ? -sample : sample
-    }
-
-    private static func findBlackHoleDevice() -> (id: AudioDeviceID, uid: String)? {
-        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
-                                                 mScope: kAudioObjectPropertyScopeGlobal,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize) == noErr else {
-            return nil
-        }
-        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var devices = [AudioDeviceID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &devices) == noErr else {
-            return nil
-        }
-
-        for device in devices {
-            let name = stringProperty(device, kAudioObjectPropertyName) ?? ""
-            guard name.localizedCaseInsensitiveContains("BlackHole") else {
-                continue
-            }
-            if let uid = stringProperty(device, kAudioDevicePropertyDeviceUID) {
-                return (device, uid)
-            }
-        }
-        return nil
-    }
-
-    private static func stringProperty(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
-        var address = AudioObjectPropertyAddress(mSelector: selector,
-                                                 mScope: kAudioObjectPropertyScopeGlobal,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var value: CFString = "" as CFString
-        var size = UInt32(MemoryLayout<CFString>.size)
-        let status = withUnsafeMutablePointer(to: &value) { pointer in
-            AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, pointer)
-        }
-        guard status == noErr else {
-            return nil
-        }
-        return value as String
     }
 }
 
@@ -465,13 +466,15 @@ private final class HIDDeviceRegistration {
 private final class ADVCtlBridge {
     private let config: HelperConfig
     private let homeAssistant: HomeAssistantClient?
-    private let audioSink = BlackHoleAudioSink()
+    private let audioSink = ADVCtlAudioRingSink()
     private var handledCommands = 0
     private var hidManager: IOHIDManager?
     private var hidDevices: [HIDDeviceRegistration] = []
     private var pressedKnobKeys = Set<UInt8>()
     private var nowPlayingTask: Task<Void, Never>?
+    private var audioDemandTimer: Timer?
     private var manualAudioTestActive = false
+    private var driverAudioDemandActive = false
     private var advAudioBridgeActive = false
     private var audioFrameCount = 0
     private var lastNowPlayingTextSignature = ""
@@ -488,6 +491,7 @@ private final class ADVCtlBridge {
 
     deinit {
         nowPlayingTask?.cancel()
+        audioDemandTimer?.invalidate()
         sendAudioBridgeActive(false, force: true, updateStatus: false)
         audioSink.stop()
         for registration in hidDevices {
@@ -528,6 +532,7 @@ private final class ADVCtlBridge {
             devices.forEach(attach)
         }
         startNowPlayingSync()
+        startAudioDemandMonitor()
         syncAudioBridgeDemand(forceControl: true)
         delegate?.bridgeDidUpdateAudioStatus(audioSink.statusText, active: audioSink.isRunning)
     }
@@ -626,25 +631,38 @@ private final class ADVCtlBridge {
         }
     }
 
-    private func syncAudioBridgeDemand(forceControl: Bool = false) {
-        let blackHoleAvailable = audioSink.refreshDevice()
+    private func startAudioDemandMonitor() {
+        guard audioDemandTimer == nil else {
+            return
+        }
+        audioDemandTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.syncAudioBridgeDemand()
+        }
+    }
 
-        guard manualAudioTestActive else {
-            stopAudioBridge(status: blackHoleAvailable ? "ADV microphone inactive" : audioSink.statusText,
+    private func syncAudioBridgeDemand(forceControl: Bool = false) {
+        let driverAvailable = audioSink.refreshDevice()
+        driverAudioDemandActive = driverAvailable && audioSink.isInputRequested()
+
+        guard manualAudioTestActive || driverAudioDemandActive else {
+            stopAudioBridge(status: driverAvailable ? "ADV microphone inactive" : audioSink.statusText,
                             forceControl: forceControl)
             return
         }
 
-        let blackHoleStreaming = blackHoleAvailable && audioSink.start()
-        if !blackHoleStreaming {
+        let driverReady = driverAvailable && audioSink.start()
+        if !driverReady {
             audioSink.stop()
         }
         sendAudioBridgeActive(true, force: forceControl)
 
-        if manualAudioTestActive {
-            let status = blackHoleStreaming ? "ADV recording test active" : "ADV recording active; BlackHole unavailable"
-            delegate?.bridgeDidUpdateAudioStatus(status, active: true)
+        let status: String
+        if driverAudioDemandActive {
+            status = driverReady ? "ADVCtlAudio requested input" : "ADVCtlAudio requested input; ring unavailable"
+        } else {
+            status = driverReady ? "ADV recording test active" : "ADV recording active; ADVCtlAudio unavailable"
         }
+        delegate?.bridgeDidUpdateAudioStatus(status, active: true)
     }
 
     private func stopAudioBridge(status: String, forceControl: Bool = false) {
@@ -1007,7 +1025,7 @@ private final class SettingsWindowController: NSWindowController {
     private let knobValueLabel = NSTextField(labelWithString: "No input")
     private let messageValueLabel = NSTextField(labelWithString: "Starting")
     private let audioStateLabel = NSTextField(labelWithString: "Inactive")
-    private let microphoneStatusLabel = NSTextField(labelWithString: "Checking BlackHole 2ch")
+    private let microphoneStatusLabel = NSTextField(labelWithString: "Checking ADVCtlAudio")
     private let swapAxesButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let invertXButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let invertYButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
@@ -1228,7 +1246,7 @@ private final class SettingsWindowController: NSWindowController {
                             symbol: "waveform",
                             accent: .systemPink,
                             pageTitle: "音频",
-                            pageSubtitle: "仅在需要语音输入时激活 ADV 麦克风，并把音频写入 BlackHole 2ch。",
+                            pageSubtitle: "系统应用读取 ADVCtlAudio 麦克风时自动激活 ADV，并通过本地环形缓冲传输音频。",
                             groups: [
                                 group("音频", rows: [
                                     valueRow("录制测试", audioStateLabel),

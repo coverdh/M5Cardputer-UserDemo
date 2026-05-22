@@ -113,8 +113,9 @@ public:
     void irSend(uint8_t addr, uint8_t cmd);
 
     /* ----------------------------------- BLE ---------------------------------- */
-    void bleControlInit();
+    bool bleControlInit();
     void bleControlStop();
+    bool bleControlForgetBonds();
     void bleKeyboardInit();
     bool bleKeyboardIsConnected() const;
     void bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode);

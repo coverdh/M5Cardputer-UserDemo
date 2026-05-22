@@ -19,6 +19,16 @@ void play_random_tone(int semitoneShift = 48, double durationSec = 0.02);
 
 void set_keyboard_sfx_enable(bool enable);
 
+int get_keyboard_sfx_volume_percent();
+
+void set_keyboard_sfx_volume_percent(int percent);
+
+int adjust_keyboard_sfx_volume_percent(int delta);
+
+bool is_keyboard_sfx_user_enabled();
+
+bool toggle_keyboard_sfx_user_enabled();
+
 void set_global_shortcuts_enable(bool enable);
 
 }  // namespace audio

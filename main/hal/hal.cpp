@@ -802,17 +802,21 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
     send_advctl_config_report();
 }
 
-void Hal::bleControlInit()
+bool Hal::bleControlInit()
 {
     if (_is_ble_keyboard_inited) {
         mclog::tagWarn(_tag, "ble hid already initialized");
-        return;
+        return true;
     }
 
     mclog::tagInfo(_tag, "ble control hid init");
     ble_hid_device_helper_set_output_callback(handle_advctl_output_report);
-    ble_hid_device_helper_init();
+    if (!ble_hid_device_helper_init()) {
+        mclog::tagWarn(_tag, "ble control hid init failed");
+        return false;
+    }
     _is_ble_keyboard_inited = true;
+    return true;
 }
 
 void Hal::bleControlStop()
@@ -827,6 +831,18 @@ void Hal::bleControlStop()
     s_advctl_control_ready  = false;
     s_advctl_time_synced    = false;
     s_advctl_now_playing    = {};
+}
+
+bool Hal::bleControlForgetBonds()
+{
+    mclog::tagWarn(_tag, "ble control forget bonds");
+    if (!_is_ble_keyboard_inited && !bleControlInit()) {
+        return false;
+    }
+    const bool ok = ble_hid_device_helper_forget_bonds();
+    s_advctl_control_ready = false;
+    s_advctl_time_synced   = false;
+    return ok;
 }
 
 void Hal::bleKeyboardInit()

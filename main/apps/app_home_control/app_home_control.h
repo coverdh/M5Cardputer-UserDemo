@@ -56,6 +56,7 @@ private:
     uint32_t _last_external_render = 0;
     uint32_t _last_volume_apply    = 0;
     uint32_t _last_setup_render    = 0;
+    uint32_t _last_ble_retry       = 0;
     uint32_t _last_user_activity   = 0;
     int16_t _pending_volume_delta  = 0;
     int _display_brightness_before_sleep = 100;
@@ -122,6 +123,8 @@ private:
     int pointerStep();
     std::string pointerSensitivityLabel() const;
     void adjustPointerSensitivity(int delta);
+    void adjustKeyboardSfxVolume(int delta);
+    void toggleKeyboardSfx();
     void loadPowerSettings();
     void markUserActivity();
     void updatePowerSave();
