@@ -26,6 +26,8 @@ private struct HelperConfig {
                 values["MACCTL_HA_URL"] = value
             case "--ha-token":
                 values["MACCTL_HA_TOKEN"] = value
+            case "--ha-token-file":
+                values["MACCTL_HA_TOKEN_FILE"] = value
             case "--entity":
                 values["MACCTL_HA_ENTITY"] = value
             default:
@@ -35,6 +37,9 @@ private struct HelperConfig {
 
         let urlString = values["MACCTL_HA_URL"] ?? "http://homeassistant.orb.local:8123"
         let entity = values["MACCTL_HA_ENTITY"] ?? "media_player.ke_ting"
+        if values["MACCTL_HA_TOKEN"] == nil, let tokenFile = values["MACCTL_HA_TOKEN_FILE"] {
+            values["MACCTL_HA_TOKEN"] = try? String(contentsOfFile: tokenFile).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         config.expectedCommands = values["MACCTL_E2E_EXPECTED_COMMANDS"].flatMap(Int.init)
         if let url = URL(string: urlString), let token = values["MACCTL_HA_TOKEN"], !token.isEmpty {
             config.homeAssistant = HomeAssistantConfig(baseURL: url, token: token, entityID: entity)
