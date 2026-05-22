@@ -788,7 +788,7 @@ void AppHomeControl::renderDashboard()
                   input.getSwapAxes() ? "swap" : "norm",
                   input.getFlipX() ? "inv" : "norm",
                   input.getFlipY() ? "inv" : "norm");
-    canvas.printf("Mic: %s  Fn+S sleep\n", _audio_test_active ? "on" : "off");
+    canvas.printf("Mic: %s  Fn+ESAD mouse\n", _audio_test_active ? "on" : "off");
 
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -955,7 +955,7 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
     }
 
     markUserActivity();
-    if (GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_S) {
+    if (_mode != Mode::Dashboard && GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_S) {
         if (!keyEvent.state) {
             sleepDisplay();
         }
@@ -1106,19 +1106,19 @@ bool AppHomeControl::handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEve
         return false;
     }
 
-    if (isUpKey(keyEvent)) {
+    if (keyEvent.keyCode == KEY_E) {
         adjustPointerSensitivity(1);
-    } else if (isDownKey(keyEvent)) {
+    } else if (keyEvent.keyCode == KEY_S) {
         adjustPointerSensitivity(-1);
-    } else if (isLeftKey(keyEvent)) {
+    } else if (keyEvent.keyCode == KEY_A) {
         GetHAL().externalInput.toggleSwapAxes();
         sendHardwareSettings();
         setStatus(GetHAL().externalInput.getSwapAxes() ? "Joystick XY swapped" : "Joystick XY normal");
-    } else if (isRightKey(keyEvent)) {
+    } else if (keyEvent.keyCode == KEY_D) {
         GetHAL().externalInput.toggleFlipX();
         sendHardwareSettings();
         setStatus(GetHAL().externalInput.getFlipX() ? "Joystick X inverted" : "Joystick X normal");
-    } else if (keyEvent.keyCode == KEY_A) {
+    } else if (keyEvent.keyCode == KEY_R) {
         resetHardwareSettings();
     } else if (keyEvent.keyCode == KEY_LEFTBRACE) {
         GetHAL().bleMouseClick(1);
