@@ -342,8 +342,11 @@ void AppHomeControl::handleExternalEncoder()
         const int count       = std::min<int>(5, std::abs(static_cast<int>(delta)));
         for (int i = 0; i < count; ++i) {
             if (_knob_mode == 1) {
-                const uint8_t keyCode = delta > 0 ? KEY_F13 : KEY_F14;
-                GetHAL().bleKeyboardTap(0, static_cast<KeScanCode_t>(keyCode));
+                const int8_t step = delta > 0 ? 1 : -1;
+                if (!GetHAL().bleMacCtlVolumeDelta(step)) {
+                    const uint8_t keyCode = delta > 0 ? KEY_F13 : KEY_F14;
+                    GetHAL().bleKeyboardTap(0, static_cast<KeScanCode_t>(keyCode));
+                }
             } else if (_knob_mode == 0) {
                 GetHAL().bleConsumerSend(delta > 0 ? BLE_HID_CONSUMER_VOLUME_UP : BLE_HID_CONSUMER_VOLUME_DOWN);
             }

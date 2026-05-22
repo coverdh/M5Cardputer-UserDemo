@@ -817,7 +817,7 @@ bool ExternalInput::readChainEncoder()
     }
     _encoder_read_failures = 0;
 
-    _encoder_delta = static_cast<int16_t>(data[0] | (data[1] << 8));
+    _encoder_delta = static_cast<int16_t>(static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8));
     _encoder_value = static_cast<int16_t>(_encoder_value + _encoder_delta);
 
     responseSize = sizeof(response);

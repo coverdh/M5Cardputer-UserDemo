@@ -24,6 +24,10 @@ private let hidKeyF15: UInt8 = 0x6A
 private let macKeyF13: UInt16 = 0x69
 private let macKeyF14: UInt16 = 0x6B
 private let macKeyF15: UInt16 = 0x71
+private let systemDefinedKeyDownSubtype: Int16 = 8
+private let systemDefinedKeyStateDown = 0x0A
+private let nxKeyTypeBrightnessDown = 3
+private let nxKeyTypeBrightnessUp = 2
 private let advCtlLogURL = URL(fileURLWithPath: NSHomeDirectory())
     .appendingPathComponent(".config/karabiner/advctl.log")
 
@@ -1032,22 +1036,50 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     }
 
     private func installKeyMonitors() {
-        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .systemDefined]) { [weak self] event in
             self?.handleKnobEvent(event)
         }
-        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .systemDefined]) { [weak self] event in
             self?.handleKnobEvent(event)
             return event
         }
     }
 
     private func handleKnobEvent(_ event: NSEvent) {
+        if event.type == .systemDefined {
+            handleSystemDefinedKnobEvent(event)
+            return
+        }
+
         switch event.keyCode {
         case macKeyF13:
             bridge.handleKnobKey(hidKeyF13)
         case macKeyF14:
             bridge.handleKnobKey(hidKeyF14)
         case macKeyF15:
+            bridge.handleKnobKey(hidKeyF15)
+        default:
+            break
+        }
+    }
+
+    private func handleSystemDefinedKnobEvent(_ event: NSEvent) {
+        guard event.subtype.rawValue == systemDefinedKeyDownSubtype else {
+            return
+        }
+
+        let keyType = Int((event.data1 & 0xFFFF0000) >> 16)
+        let keyState = Int((event.data1 & 0x0000FF00) >> 8)
+        guard keyState == systemDefinedKeyStateDown else {
+            return
+        }
+
+        switch keyType {
+        case nxKeyTypeBrightnessDown:
+            log("Mapped system-defined brightness down to F14")
+            bridge.handleKnobKey(hidKeyF14)
+        case nxKeyTypeBrightnessUp:
+            log("Mapped system-defined brightness up to F15")
             bridge.handleKnobKey(hidKeyF15)
         default:
             break
