@@ -49,6 +49,7 @@
 static const char *TAG = "ble_hid";
 
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
+static bool s_ble_hid_input_notify_ready            = false;
 
 #define BLE_HID_MAP_INDEX_KEYBOARD 0
 #define BLE_HID_MAP_INDEX_MOUSE    1
@@ -1032,7 +1033,8 @@ void ble_hid_device_helper_send_consumer(uint16_t usage_id)
 
 static bool ble_hid_device_helper_send_keycode(uint8_t keycode)
 {
-    if (!s_ble_hid_param.hid_dev || s_ble_hid_keyboard_state != BLE_HID_DEVICE_STATE_CONNECTED) {
+    if (!s_ble_hid_param.hid_dev || s_ble_hid_keyboard_state != BLE_HID_DEVICE_STATE_CONNECTED ||
+        !s_ble_hid_input_notify_ready) {
         return false;
     }
 
@@ -1087,16 +1089,21 @@ BleHidDeviceState_t ble_hid_device_helper_get_state(void)
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
     (void)conn_handle;
+    s_ble_hid_input_notify_ready = false;
 }
 
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
 {
     (void)conn_handle;
+    s_ble_hid_input_notify_ready = false;
 }
 
 void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled)
 {
     (void)conn_handle;
     (void)attr_handle;
-    (void)notify_enabled;
+    if (notify_enabled) {
+        s_ble_hid_input_notify_ready = true;
+        ESP_LOGI(TAG, "hid input notify ready");
+    }
 }
