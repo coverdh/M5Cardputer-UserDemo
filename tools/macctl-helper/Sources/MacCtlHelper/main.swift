@@ -66,6 +66,29 @@ private func hidProperty<T>(_ device: IOHIDDevice, _ key: CFString, as type: T.T
     IOHIDDeviceGetProperty(device, key) as? T
 }
 
+private func hidUsagePairs(_ device: IOHIDDevice) -> [(page: Int, usage: Int)] {
+    guard let rawPairs = IOHIDDeviceGetProperty(device, kIOHIDDeviceUsagePairsKey as CFString) as? [Any] else {
+        return []
+    }
+    return rawPairs.compactMap { rawPair in
+        guard let pair = rawPair as? [String: Any] else {
+            return nil
+        }
+        let page = (pair[kIOHIDDeviceUsagePageKey] as? NSNumber)?.intValue ??
+                   (pair["DeviceUsagePage"] as? NSNumber)?.intValue
+        let usage = (pair[kIOHIDDeviceUsageKey] as? NSNumber)?.intValue ??
+                    (pair["DeviceUsage"] as? NSNumber)?.intValue
+        guard let page, let usage else {
+            return nil
+        }
+        return (page, usage)
+    }
+}
+
+private func hidUsagePairsDescription(_ pairs: [(page: Int, usage: Int)]) -> String {
+    pairs.map { "\($0.page):\($0.usage)" }.joined(separator: ",")
+}
+
 private func clippedUTF8Bytes(_ string: String, maxBytes: Int) -> [UInt8] {
     var result: [UInt8] = []
     for scalar in string.unicodeScalars {
@@ -152,8 +175,7 @@ private struct NowPlayingSnapshot: Equatable {
         let attributes = state.attributes
         playing = state.state == "playing"
         muted = attributes.isVolumeMuted ?? ((attributes.volumeLevel ?? 0) <= 0.001)
-        let hasMedia = !(attributes.mediaTitle ?? "").isEmpty || !(attributes.mediaArtist ?? "").isEmpty
-        active = (state.state == "playing" || state.state == "paused") && hasMedia
+        active = state.state == "playing" || state.state == "paused"
         volumePercent = UInt8(min(100, max(0, Int(((attributes.volumeLevel ?? 0) * 100).rounded()))))
         if let position = attributes.mediaPosition, let duration = attributes.mediaDuration, duration > 0 {
             progressPercent = UInt8(min(100, max(0, Int((position / duration * 100).rounded()))))
@@ -446,6 +468,15 @@ private protocol ADVCtlBridgeDelegate: AnyObject {
 private enum HIDEndpointKind {
     case control
     case keyboard
+    case combined
+
+    var handlesControl: Bool {
+        self == .control || self == .combined
+    }
+
+    var handlesKeyboard: Bool {
+        self == .keyboard || self == .combined
+    }
 }
 
 private final class HIDDeviceRegistration {
@@ -688,7 +719,7 @@ private final class ADVCtlBridge {
         }
         var sent = false
         for registration in hidDevices {
-            guard registration.kind == .control else {
+            guard registration.kind.handlesControl else {
                 continue
             }
             let status = IOHIDDeviceSetReport(registration.device,
@@ -712,19 +743,34 @@ private final class ADVCtlBridge {
             return
         }
         let product = hidProperty(device, kIOHIDProductKey as CFString, as: NSString.self) as String?
-        if product != advCtlProductName {
-            updateMessage("Ignoring stale HID product: \(product ?? "unknown")")
+        let manufacturer = hidProperty(device, kIOHIDManufacturerKey as CFString, as: NSString.self) as String?
+        let vendorID = hidProperty(device, kIOHIDVendorIDKey as CFString, as: NSNumber.self)?.intValue ?? -1
+        let productID = hidProperty(device, kIOHIDProductIDKey as CFString, as: NSNumber.self)?.intValue ?? -1
+        let likelyAdvCtl = (vendorID == advCtlVendorID && productID == advCtlProductID) ||
+                           product == advCtlProductName ||
+                           product == "CardputerADV Keyboard" ||
+                           ((manufacturer ?? "").localizedCaseInsensitiveContains("M5Stack") &&
+                            ((product ?? "").localizedCaseInsensitiveContains("ADV") ||
+                             (product ?? "").localizedCaseInsensitiveContains("Cardputer")))
+        if !likelyAdvCtl {
             return
         }
         let usagePage = hidProperty(device, kIOHIDPrimaryUsagePageKey as CFString, as: NSNumber.self)?.intValue ?? -1
         let usage = hidProperty(device, kIOHIDPrimaryUsageKey as CFString, as: NSNumber.self)?.intValue ?? -1
+        let usagePairs = hidUsagePairs(device)
+        let hasControlUsage = (usagePage == advCtlUsagePage && usage == advCtlUsage) ||
+                              usagePairs.contains(where: { $0.page == advCtlUsagePage && $0.usage == advCtlUsage })
+        let hasKeyboardUsage = (usagePage == hidUsagePageGenericDesktop && usage == hidUsageKeyboard) ||
+                               usagePairs.contains(where: { $0.page == hidUsagePageGenericDesktop && $0.usage == hidUsageKeyboard })
         let kind: HIDEndpointKind
-        if usagePage == advCtlUsagePage && usage == advCtlUsage {
+        if hasControlUsage && hasKeyboardUsage {
+            kind = .combined
+        } else if hasControlUsage {
             kind = .control
-        } else if usagePage == hidUsagePageGenericDesktop && usage == hidUsageKeyboard {
+        } else if hasKeyboardUsage {
             kind = .keyboard
         } else {
-            updateMessage("Ignoring non-control HID endpoint usagePage=\(usagePage) usage=\(usage)")
+            updateMessage("Ignoring ADVCtl HID endpoint usagePage=\(usagePage) usage=\(usage) pairs=[\(hidUsagePairsDescription(usagePairs))]")
             return
         }
 
@@ -752,8 +798,8 @@ private final class ADVCtlBridge {
 
         let maxInput = hidProperty(device, kIOHIDMaxInputReportSizeKey as CFString, as: NSNumber.self)?.intValue ?? -1
         updateConnection()
-        updateMessage("Attached \(kind) usagePage=\(usagePage) usage=\(usage) maxInput=\(maxInput) openStatus=\(openStatus)")
-        if kind == .control {
+        updateMessage("Attached \(kind) product=\(product ?? "unknown") usagePage=\(usagePage) usage=\(usage) pairs=[\(hidUsagePairsDescription(usagePairs))] maxInput=\(maxInput) openStatus=\(openStatus)")
+        if kind.handlesControl {
             sendTimeSync()
             requestSettings()
             syncAudioBridgeDemand(forceControl: true)
@@ -775,6 +821,9 @@ private final class ADVCtlBridge {
         case .control:
             handleControlReport(reportID: reportID, report: report, length: length)
         case .keyboard:
+            handleKeyboardReport(reportID: reportID, report: report, length: length)
+        case .combined:
+            handleControlReport(reportID: reportID, report: report, length: length)
             handleKeyboardReport(reportID: reportID, report: report, length: length)
         }
     }

@@ -146,18 +146,14 @@ static void ble_hid_device_helper_report_task(void *pvParameters)
             continue;
         }
         if (ble_hid_device_helper_is_ready()) {
-#if CONFIG_BT_NIMBLE_ENABLED
-            if (!esp_vhci_host_check_send_available()) {
+            esp_err_t err = esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, report.map_index, report.report_id, report.data, report.len);
+            if (err != ESP_OK) {
                 TickType_t now = xTaskGetTickCount();
                 if (now - s_ble_hid_last_drop_log > pdMS_TO_TICKS(2000)) {
                     s_ble_hid_last_drop_log = now;
-                    ESP_LOGW(TAG, "VHCI not ready; drop hid report=%u", report.report_id);
+                    ESP_LOGW(TAG, "hid report send failed: map=%u report=%u err=%d", report.map_index, report.report_id, err);
                 }
-                vTaskDelay(pdMS_TO_TICKS(20));
-                continue;
             }
-#endif
-            esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, report.map_index, report.report_id, report.data, report.len);
         }
         vTaskDelay(pdMS_TO_TICKS(report.delay_after_ms > 0 ? report.delay_after_ms : 50));
     }
@@ -345,7 +341,7 @@ void ble_hid_demo_task_mouse(void *pvParameters)
 #define USB_HID_DOT     0x37
 
 const unsigned char keyboardReportMap[] = {
-    // 7 bytes input (modifiers, resrvd, keys*5), 1 byte output
+    // 8 bytes input (modifiers, reserved, keys*6), 1 byte output
     0x05, 0x01,  // Usage Page (Generic Desktop Ctrls)
     0x09, 0x06,  // Usage (Keyboard)
     0xA1, 0x01,  // Collection (Application)
@@ -370,7 +366,7 @@ const unsigned char keyboardReportMap[] = {
     0x95, 0x01,  //   Report Count (1)
     0x75, 0x03,  //   Report Size (3)
     0x91, 0x03,  //   Output (Const,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0x95, 0x05,  //   Report Count (5)
+    0x95, 0x06,  //   Report Count (6)
     0x75, 0x08,  //   Report Size (8)
     0x15, 0x00,  //   Logical Minimum (0)
     0x25, 0x65,  //   Logical Maximum (101)
@@ -1278,6 +1274,9 @@ void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
 #if CONFIG_BT_NIMBLE_ENABLED
     s_ble_hid_conn_handle = conn_handle;
+    s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_CONNECTED;
+    s_ble_hid_notify_ready = true;
+    s_ble_hid_ready_after_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
 #else
     (void)conn_handle;
 #endif
