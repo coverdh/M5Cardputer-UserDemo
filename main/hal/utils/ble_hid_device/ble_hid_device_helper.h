@@ -26,6 +26,7 @@ bool ble_hid_device_helper_send_macctl_play_pause(void);
 BleHidDeviceState_t ble_hid_device_helper_get_state(void);
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle);
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle);
+void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled);
 
 enum {
     BLE_HID_CONSUMER_POWER               = 48,

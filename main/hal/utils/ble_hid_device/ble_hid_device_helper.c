@@ -79,6 +79,7 @@ static local_param_t s_ble_hid_param = {0};
 #if CONFIG_BT_NIMBLE_ENABLED
 static uint16_t s_macctl_conn_handle          = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_macctl_command_value_handle = 0;
+static bool s_macctl_command_notify_enabled   = false;
 extern struct ble_npl_eventq *ble_hs_evq_get(void);
 
 typedef struct {
@@ -166,7 +167,8 @@ static int macctl_service_init(void)
 
 static bool macctl_notify(uint8_t command, int8_t value)
 {
-    if (s_macctl_conn_handle == BLE_HS_CONN_HANDLE_NONE || s_macctl_command_value_handle == 0) {
+    if (s_macctl_conn_handle == BLE_HS_CONN_HANDLE_NONE || s_macctl_command_value_handle == 0 ||
+        !s_macctl_command_notify_enabled) {
         return false;
     }
 
@@ -1180,7 +1182,8 @@ BleHidDeviceState_t ble_hid_device_helper_get_state(void)
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
 #if CONFIG_BT_NIMBLE_ENABLED
-    s_macctl_conn_handle = conn_handle;
+    s_macctl_conn_handle                = conn_handle;
+    s_macctl_command_notify_enabled     = false;
 #else
     (void)conn_handle;
 #endif
@@ -1191,8 +1194,26 @@ void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
 #if CONFIG_BT_NIMBLE_ENABLED
     if (s_macctl_conn_handle == conn_handle) {
         s_macctl_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_macctl_command_notify_enabled = false;
     }
 #else
     (void)conn_handle;
+#endif
+}
+
+void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    if (s_macctl_conn_handle != conn_handle || s_macctl_command_value_handle == 0) {
+        return;
+    }
+    if (attr_handle == s_macctl_command_value_handle || attr_handle == s_macctl_command_value_handle + 1) {
+        s_macctl_command_notify_enabled = notify_enabled;
+        ESP_LOGI(TAG, "macctl command notify %s", notify_enabled ? "enabled" : "disabled");
+    }
+#else
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)notify_enabled;
 #endif
 }

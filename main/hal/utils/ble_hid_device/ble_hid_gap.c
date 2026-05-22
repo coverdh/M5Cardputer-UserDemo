@@ -875,6 +875,8 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
                      event->subscribe.conn_handle, event->subscribe.attr_handle, event->subscribe.reason,
                      event->subscribe.prev_notify, event->subscribe.cur_notify, event->subscribe.prev_indicate,
                      event->subscribe.cur_indicate);
+            ble_hid_device_helper_gap_subscribe(event->subscribe.conn_handle, event->subscribe.attr_handle,
+                                                event->subscribe.cur_notify);
             return 0;
 
         case BLE_GAP_EVENT_MTU:
