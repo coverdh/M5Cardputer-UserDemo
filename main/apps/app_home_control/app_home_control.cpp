@@ -9,6 +9,7 @@
 #include <apps/utils/audio/audio.h>
 #include <apps/utils/common.h>
 #include <apps/utils/theme.h>
+#include <hal/utils/ble_hid_device/ble_hid_device_helper.h>
 #include <mooncake_log.h>
 #include <algorithm>
 #include <cstring>
@@ -118,6 +119,7 @@ void AppHomeControl::loadConfig()
     const int savedWholeStep = settings.GetInt("macctl_ptr_sens", 1);
     _pointer_sensitivity     = savedHalfStep >= 2 ? savedHalfStep : savedWholeStep * 2;
     _pointer_sensitivity     = std::max(2, std::min(6, _pointer_sensitivity));
+    _knob_mode               = static_cast<uint8_t>(std::max<int32_t>(0, std::min<int32_t>(2, settings.GetInt("adv_knob_mode", 0))));
     _ha.setConfig(_ha_config);
 }
 
@@ -333,19 +335,38 @@ void AppHomeControl::handleExternalEncoder()
 {
     auto& input         = GetHAL().externalInput;
     const int16_t delta = input.getEncoderDelta();
+    _knob_mode = static_cast<uint8_t>(
+        std::max<int32_t>(0, std::min<int32_t>(2, GetHAL().getSettings().GetInt("adv_knob_mode", _knob_mode))));
     if (delta != 0) {
         markUserActivity();
-        const uint8_t keyCode = delta > 0 ? KEY_F13 : KEY_F14;
         const int count       = std::min<int>(5, std::abs(static_cast<int>(delta)));
         for (int i = 0; i < count; ++i) {
-            GetHAL().bleKeyboardTap(0, static_cast<KeScanCode_t>(keyCode));
+            if (_knob_mode == 1) {
+                const uint8_t keyCode = delta > 0 ? KEY_F13 : KEY_F14;
+                GetHAL().bleKeyboardTap(0, static_cast<KeScanCode_t>(keyCode));
+            } else if (_knob_mode == 0) {
+                GetHAL().bleConsumerSend(delta > 0 ? BLE_HID_CONSUMER_VOLUME_UP : BLE_HID_CONSUMER_VOLUME_DOWN);
+            }
         }
-        setStatus(delta > 0 ? "Knob F13" : "Knob F14");
+        if (_knob_mode == 1) {
+            setStatus(delta > 0 ? "Knob HomePod up" : "Knob HomePod down");
+        } else if (_knob_mode == 0) {
+            setStatus(delta > 0 ? "Knob volume up" : "Knob volume down");
+        } else {
+            setStatus("Knob disabled");
+        }
     }
     if (input.getEncoderPressed()) {
         markUserActivity();
-        GetHAL().bleKeyboardTap(0, KEY_F15);
-        setStatus("Knob F15");
+        if (_knob_mode == 0) {
+            GetHAL().bleConsumerSend(BLE_HID_CONSUMER_MUTE);
+            setStatus("Knob mute");
+        } else if (_knob_mode == 1) {
+            GetHAL().bleKeyboardTap(0, KEY_F15);
+            setStatus("Knob F15");
+        } else {
+            setStatus("Knob disabled");
+        }
         render();
         return;
     }
@@ -369,6 +390,34 @@ void AppHomeControl::handleBleControlRequests()
         _mode = Mode::Dashboard;
         render();
     }
+}
+
+void AppHomeControl::applyHardwareSettings(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)
+{
+    const uint8_t clampedSensitivity = std::max<uint8_t>(2, std::min<uint8_t>(6, sensitivity));
+    const uint8_t clampedKnobMode    = std::min<uint8_t>(2, knobMode);
+    GetHAL().externalInput.setDirectionTransform((flags & 0x02) != 0, (flags & 0x04) != 0, (flags & 0x01) != 0);
+    _pointer_sensitivity = clampedSensitivity;
+    _knob_mode           = clampedKnobMode;
+    GetHAL().getSettings().SetInt("ptr_sens2", _pointer_sensitivity);
+    GetHAL().getSettings().SetInt("adv_knob_mode", _knob_mode);
+    sendHardwareSettings();
+    setStatus("Hardware settings saved");
+}
+
+void AppHomeControl::resetHardwareSettings()
+{
+    applyHardwareSettings(0, 2, 0);
+    setStatus("Hardware reset");
+}
+
+void AppHomeControl::sendHardwareSettings()
+{
+    uint8_t flags = 0;
+    if (GetHAL().externalInput.getSwapAxes()) flags |= 0x01;
+    if (GetHAL().externalInput.getFlipX()) flags |= 0x02;
+    if (GetHAL().externalInput.getFlipY()) flags |= 0x04;
+    GetHAL().bleMacCtlConfig(flags, static_cast<uint8_t>(_pointer_sensitivity), _knob_mode);
 }
 
 void AppHomeControl::startAudioTest()
@@ -439,6 +488,7 @@ void AppHomeControl::adjustPointerSensitivity(int delta)
     _pointer_sensitivity = std::max(2, std::min(6, _pointer_sensitivity + delta));
     if (_pointer_sensitivity != previous) {
         GetHAL().getSettings().SetInt("ptr_sens2", _pointer_sensitivity);
+        sendHardwareSettings();
     }
     setStatus("Pointer sensitivity " + pointerSensitivityLabel());
 }
@@ -973,10 +1023,14 @@ bool AppHomeControl::handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEve
         adjustPointerSensitivity(-1);
     } else if (isLeftKey(keyEvent)) {
         GetHAL().externalInput.toggleSwapAxes();
+        sendHardwareSettings();
         setStatus(GetHAL().externalInput.getSwapAxes() ? "Joystick XY swapped" : "Joystick XY normal");
     } else if (isRightKey(keyEvent)) {
         GetHAL().externalInput.toggleFlipX();
+        sendHardwareSettings();
         setStatus(GetHAL().externalInput.getFlipX() ? "Joystick X inverted" : "Joystick X normal");
+    } else if (keyEvent.keyCode == KEY_A) {
+        resetHardwareSettings();
     } else if (keyEvent.keyCode == KEY_LEFTBRACE) {
         GetHAL().bleMouseClick(1);
         setStatus("Left click");

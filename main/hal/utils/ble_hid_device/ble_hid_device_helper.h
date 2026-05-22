@@ -25,6 +25,7 @@ void ble_hid_device_helper_send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int
 void ble_hid_device_helper_send_consumer(uint16_t usage_id);
 bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta);
 bool ble_hid_device_helper_send_macctl_play_pause(void);
+bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity, uint8_t knob_mode);
 void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback);
 BleHidDeviceState_t ble_hid_device_helper_get_state(void);
 bool ble_hid_device_helper_is_ready(void);

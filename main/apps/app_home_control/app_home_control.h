@@ -65,6 +65,7 @@ private:
     bool _hold_up                  = false;
     bool _hold_down                = false;
     bool _audio_test_active        = false;
+    uint8_t _knob_mode             = 0;
     std::string _wifi_ssid;
     std::string _wifi_password;
     std::string _input_buffer;
@@ -98,6 +99,9 @@ private:
     void handleExternalPointer(uint8_t buttons, uint8_t pressed, uint8_t released);
     void handleExternalEncoder();
     void handleBleControlRequests();
+    void applyHardwareSettings(uint8_t flags, uint8_t sensitivity, uint8_t knobMode);
+    void resetHardwareSettings();
+    void sendHardwareSettings();
     void startAudioTest();
     void stopAudioTest();
     int pointerStep();

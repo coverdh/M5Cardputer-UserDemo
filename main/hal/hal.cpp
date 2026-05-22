@@ -653,6 +653,24 @@ static bool s_advctl_control_ready = false;
 static bool s_advctl_audio_test_pending = false;
 static bool s_advctl_audio_test_active = false;
 
+static uint8_t advctl_config_flags()
+{
+    uint8_t flags = 0;
+    if (GetHAL().externalInput.getSwapAxes()) flags |= 0x01;
+    if (GetHAL().externalInput.getFlipX()) flags |= 0x02;
+    if (GetHAL().externalInput.getFlipY()) flags |= 0x04;
+    return flags;
+}
+
+static void send_advctl_config_report()
+{
+    const uint8_t sensitivity = static_cast<uint8_t>(
+        std::max<int32_t>(2, std::min<int32_t>(6, GetHAL().getSettings().GetInt("ptr_sens2", 2))));
+    const uint8_t knob_mode = static_cast<uint8_t>(
+        std::max<int32_t>(0, std::min<int32_t>(2, GetHAL().getSettings().GetInt("adv_knob_mode", 0))));
+    GetHAL().bleMacCtlConfig(advctl_config_flags(), sensitivity, knob_mode);
+}
+
 static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
 {
     if (!data || len < 2) {
@@ -660,10 +678,23 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
     }
 
     s_advctl_control_ready = true;
+    if (data[0] == 0x80) {
+        send_advctl_config_report();
+        return;
+    }
+
     if (data[0] == 0x82) {
         s_advctl_audio_test_active = data[1] != 0;
         s_advctl_audio_test_pending = true;
         mclog::tagInfo("hal", "advctl audio test request: {}", s_advctl_audio_test_active ? "start" : "stop");
+        return;
+    }
+
+    if (data[0] == 0x83) {
+        GetHAL().externalInput.setDirectionTransform(false, false, false);
+        GetHAL().getSettings().SetInt("ptr_sens2", 2);
+        GetHAL().getSettings().SetInt("adv_knob_mode", 0);
+        send_advctl_config_report();
         return;
     }
 
@@ -680,6 +711,10 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
             GetHAL().getSettings().SetInt("ptr_sens2", data[2] * 2);
         }
     }
+    if (len >= 4) {
+        GetHAL().getSettings().SetInt("adv_knob_mode", std::max(0, std::min(2, static_cast<int>(data[3]))));
+    }
+    send_advctl_config_report();
 }
 
 void Hal::bleControlInit()
@@ -797,6 +832,15 @@ bool Hal::bleMacCtlPlayPause()
     }
 
     return ble_hid_device_helper_send_macctl_play_pause();
+}
+
+bool Hal::bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)
+{
+    if (!bleKeyboardIsConnected()) {
+        return false;
+    }
+
+    return ble_hid_device_helper_send_macctl_config(flags, sensitivity, knobMode);
 }
 
 bool Hal::bleConsumeAudioTestRequest(bool& active)

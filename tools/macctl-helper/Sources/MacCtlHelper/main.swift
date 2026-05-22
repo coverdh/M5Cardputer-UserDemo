@@ -12,8 +12,11 @@ private let hidUsagePageGenericDesktop = 0x01
 private let hidUsageKeyboard = 0x06
 private let advCtlReportID: UInt32 = 4
 private let advCtlReportLength = 64
+private let advCtlRequestConfigCommand: UInt8 = 0x80
 private let advCtlSetInputCommand: UInt8 = 0x81
 private let advCtlAudioTestCommand: UInt8 = 0x82
+private let advCtlResetConfigCommand: UInt8 = 0x83
+private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlKeyboardReportID: UInt32 = 1
 private let hidKeyF13: UInt8 = 0x68
 private let hidKeyF14: UInt8 = 0x69
@@ -136,6 +139,28 @@ private final class JoystickSettings {
         sensitivity.isMultiple(of: 2) ? "\(sensitivity / 2)x" : "\(sensitivity / 2).5x"
     }
 
+    var knobMode: Int {
+        get { defaults.object(forKey: "advctl.knobMode") as? Int ?? 0 }
+        set { defaults.set(min(2, max(0, newValue)), forKey: "advctl.knobMode") }
+    }
+
+    var knobModeLabel: String {
+        switch knobMode {
+        case 1: return "HomePod"
+        case 2: return "Disabled"
+        default: return "System volume"
+        }
+    }
+
+    func applyHardware(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
+        swapAxes = (flags & 0x01) != 0
+        invertX = (flags & 0x02) != 0
+        invertY = (flags & 0x04) != 0
+        self.sensitivity = Int(sensitivity)
+        self.knobMode = Int(knobMode)
+        synchronize()
+    }
+
     func synchronize() {
         defaults.synchronize()
     }
@@ -145,6 +170,7 @@ private protocol ADVCtlBridgeDelegate: AnyObject {
     func bridgeDidUpdateConnection(deviceCount: Int)
     func bridgeDidReceive(command: MacCtlCommand)
     func bridgeDidReceiveKnobKey(_ keyCode: UInt8)
+    func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8)
     func bridgeDidUpdateMessage(_ message: String)
 }
 
@@ -227,7 +253,7 @@ private final class ADVCtlBridge {
     }
 
     func sendSettings(_ settings: JoystickSettings) {
-        var payload: [UInt8] = [advCtlSetInputCommand, settings.flags, UInt8(settings.sensitivity), 0]
+        var payload: [UInt8] = [advCtlSetInputCommand, settings.flags, UInt8(settings.sensitivity), UInt8(settings.knobMode)]
         for registration in hidDevices {
             guard registration.kind == .control else {
                 continue
@@ -245,8 +271,21 @@ private final class ADVCtlBridge {
         }
     }
 
+    func requestSettings() {
+        sendControlPayload([advCtlRequestConfigCommand, 0, 0, 0], successMessage: "Requested hardware settings")
+    }
+
+    func resetHardwareSettings() {
+        sendControlPayload([advCtlResetConfigCommand, 0, 0, 0], successMessage: "Reset hardware settings")
+    }
+
     func sendAudioTest(active: Bool) {
-        var payload: [UInt8] = [advCtlAudioTestCommand, active ? 1 : 0, 0, 0]
+        sendControlPayload([advCtlAudioTestCommand, active ? 1 : 0, 0, 0],
+                           successMessage: active ? "ADV recording test activated" : "ADV recording test stopped")
+    }
+
+    private func sendControlPayload(_ bytes: [UInt8], successMessage: String) {
+        var payload = bytes
         var sent = false
         for registration in hidDevices {
             guard registration.kind == .control else {
@@ -263,8 +302,7 @@ private final class ADVCtlBridge {
                 updateMessage("Set audio test failed: \(status)")
             }
         }
-        updateMessage(sent ? (active ? "ADV recording test activated" : "ADV recording test stopped")
-                           : "ADV control endpoint not connected")
+        updateMessage(sent ? successMessage : "ADV control endpoint not connected")
     }
 
     private func attach(_ device: IOHIDDevice) {
@@ -313,6 +351,9 @@ private final class ADVCtlBridge {
         let maxInput = hidProperty(device, kIOHIDMaxInputReportSizeKey as CFString, as: NSNumber.self)?.intValue ?? -1
         updateConnection()
         updateMessage("Attached \(kind) usagePage=\(usagePage) usage=\(usage) maxInput=\(maxInput) openStatus=\(openStatus)")
+        if kind == .control {
+            requestSettings()
+        }
     }
 
     private func detach(_ device: IOHIDDevice) {
@@ -345,6 +386,15 @@ private final class ADVCtlBridge {
         }
 
         guard let command = MacCtlCommand(payload: payload) else {
+            if payload.count >= 4, payload[0] == advCtlConfigReport {
+                DispatchQueue.main.async {
+                    self.delegate?.bridgeDidReceiveHardwareSettings(flags: payload[1],
+                                                                    sensitivity: payload[2],
+                                                                    knobMode: payload[3])
+                }
+                updateMessage("Hardware settings received")
+                return
+            }
             updateMessage("Ignored unknown report: \(payload as NSData)")
             return
         }
@@ -533,6 +583,8 @@ private final class SettingsWindowController: NSWindowController {
     private let settings: JoystickSettings
     var onSettingsChanged: (() -> Void)?
     var onAudioTestChanged: ((Bool) -> Void)?
+    var onRefreshSettings: (() -> Void)?
+    var onResetHardwareSettings: (() -> Void)?
 
     private let connectionValueLabel = NSTextField(labelWithString: "Disconnected")
     private let knobValueLabel = NSTextField(labelWithString: "No input")
@@ -544,6 +596,9 @@ private final class SettingsWindowController: NSWindowController {
     private let invertYButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let sensitivitySlider = NSSlider()
     private let sensitivityValueLabel = NSTextField(labelWithString: "1x")
+    private let knobModePopup = NSPopUpButton()
+    private let resetButton = NSButton(title: "Reset Hardware Defaults", target: nil, action: nil)
+    private let refreshButton = NSButton(title: "Refresh from ADV", target: nil, action: nil)
     private let waveformView = WaveformView(frame: .zero)
     private let recordButton = NSButton(title: "Activate Recording Test", target: nil, action: nil)
     private var audioTestActive = false
@@ -551,11 +606,12 @@ private final class SettingsWindowController: NSWindowController {
     init(settings: JoystickSettings) {
         self.settings = settings
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
-                              styleMask: [.titled, .closable, .miniaturizable],
+                              styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
                               backing: .buffered,
                               defer: false)
         window.title = "ADVCtl"
         window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         super.init(window: window)
         buildContent()
@@ -633,6 +689,7 @@ private final class SettingsWindowController: NSWindowController {
             valueRow("Connection", connectionValueLabel),
             valueRow("Knob", knobValueLabel),
             valueRow("Last message", messageValueLabel),
+            controlRow("Hardware config", refreshButton),
         ]))
         contentStack.addArrangedSubview(group("Pointer", rows: [
             controlRow("Swap X/Y axes", swapAxesButton),
@@ -641,8 +698,9 @@ private final class SettingsWindowController: NSWindowController {
             sensitivityRow(),
         ]))
         contentStack.addArrangedSubview(group("Knob", rows: [
-            valueRow("F13 / F14", NSTextField(labelWithString: "HomePod volume")),
-            valueRow("F15", NSTextField(labelWithString: "Normal button event")),
+            controlRow("Rotation", knobModePopup),
+            valueRow("Press", NSTextField(labelWithString: "Mute in system mode, F15 in HomePod mode")),
+            controlRow("Defaults", resetButton),
         ]))
         contentStack.addArrangedSubview(group("Audio", rows: [
             valueRow("Recording test", audioStateLabel),
@@ -662,6 +720,13 @@ private final class SettingsWindowController: NSWindowController {
         invertXButton.action = #selector(settingsChanged)
         invertYButton.target = self
         invertYButton.action = #selector(settingsChanged)
+        knobModePopup.addItems(withTitles: ["System volume", "HomePod volume", "Disabled"])
+        knobModePopup.target = self
+        knobModePopup.action = #selector(settingsChanged)
+        resetButton.target = self
+        resetButton.action = #selector(resetHardwareDefaults)
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshHardwareSettings)
         sensitivitySlider.minValue = 2
         sensitivitySlider.maxValue = 6
         sensitivitySlider.numberOfTickMarks = 5
@@ -828,6 +893,7 @@ private final class SettingsWindowController: NSWindowController {
         invertYButton.state = settings.invertY ? .on : .off
         sensitivitySlider.integerValue = settings.sensitivity
         sensitivityValueLabel.stringValue = settings.sensitivityLabel
+        knobModePopup.selectItem(at: settings.knobMode)
         audioStateLabel.stringValue = audioTestActive ? "Active" : "Inactive"
         audioStateLabel.textColor = audioTestActive ? .systemBlue : .secondaryLabelColor
         recordButton.title = audioTestActive ? "Stop Recording Test" : "Activate Recording Test"
@@ -839,9 +905,23 @@ private final class SettingsWindowController: NSWindowController {
         settings.invertX = invertXButton.state == .on
         settings.invertY = invertYButton.state == .on
         settings.sensitivity = Int(round(sensitivitySlider.doubleValue))
+        settings.knobMode = knobModePopup.indexOfSelectedItem
         settings.synchronize()
         refresh()
         onSettingsChanged?()
+    }
+
+    func applyHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
+        settings.applyHardware(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
+        refresh()
+    }
+
+    @objc private func refreshHardwareSettings() {
+        onRefreshSettings?()
+    }
+
+    @objc private func resetHardwareDefaults() {
+        onResetHardwareSettings?()
     }
 
     @objc private func toggleAudioTest() {
@@ -872,6 +952,12 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         }
         settingsWindow.onAudioTestChanged = { [weak self] active in
             self?.bridge.sendAudioTest(active: active)
+        }
+        settingsWindow.onRefreshSettings = { [weak self] in
+            self?.bridge.requestSettings()
+        }
+        settingsWindow.onResetHardwareSettings = { [weak self] in
+            self?.bridge.resetHardwareSettings()
         }
         buildStatusItem()
         bridge.delegate = self
@@ -909,6 +995,12 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         }
         knobMenuItem.title = knobStatus
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
+    }
+
+    func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
+        settings.applyHardware(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
+        settingsWindow.applyHardwareSettings(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
+        messageMenuItem.title = "Hardware settings received"
     }
 
     func bridgeDidUpdateMessage(_ message: String) {
@@ -993,6 +1085,7 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     }
 
     @objc private func openSettings() {
+        bridge.requestSettings()
         settingsWindow.refresh()
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
         settingsWindow.showWindow(nil)

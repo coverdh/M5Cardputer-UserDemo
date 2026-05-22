@@ -124,6 +124,7 @@ public:
     void bleConsumerSend(uint16_t usageId);
     bool bleMacCtlVolumeDelta(int8_t delta);
     bool bleMacCtlPlayPause();
+    bool bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode);
     bool bleConsumeAudioTestRequest(bool& active);
 
     /* ----------------------------------- USB ---------------------------------- */

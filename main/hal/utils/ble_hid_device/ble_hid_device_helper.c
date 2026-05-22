@@ -1209,6 +1209,12 @@ bool ble_hid_device_helper_send_macctl_play_pause(void)
     return ble_hid_device_helper_queue_macctl_command(MACCTL_CMD_PLAY_PAUSE, 0);
 }
 
+bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity, uint8_t knob_mode)
+{
+    const uint8_t buffer[4] = {0x90, flags, sensitivity, knob_mode};
+    return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
+}
+
 void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback)
 {
     s_ble_hid_output_callback = callback;
