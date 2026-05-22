@@ -24,6 +24,7 @@
 #if CONFIG_BT_NIMBLE_ENABLED
 #include "host/ble_hs.h"
 #include "host/ble_gatt.h"
+#include "nimble/nimble_npl.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "os/os_mbuf.h"
@@ -78,6 +79,46 @@ static local_param_t s_ble_hid_param = {0};
 #if CONFIG_BT_NIMBLE_ENABLED
 static uint16_t s_macctl_conn_handle          = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_macctl_command_value_handle = 0;
+extern struct ble_npl_eventq *ble_hs_evq_get(void);
+
+typedef struct {
+    struct ble_npl_event event;
+    uint8_t payload[3];
+    uint16_t conn_handle;
+    uint16_t value_handle;
+    bool in_use;
+} macctl_notify_event_t;
+
+#define MACCTL_NOTIFY_EVENT_COUNT 4
+static macctl_notify_event_t s_macctl_notify_events[MACCTL_NOTIFY_EVENT_COUNT];
+static bool s_macctl_notify_events_initialized = false;
+
+static void macctl_notify_event_cb(struct ble_npl_event *event)
+{
+    macctl_notify_event_t *notify_event = (macctl_notify_event_t *)ble_npl_event_get_arg(event);
+    struct os_mbuf *om                  = ble_hs_mbuf_from_flat(notify_event->payload, sizeof(notify_event->payload));
+    if (!om) {
+        notify_event->in_use = false;
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(notify_event->conn_handle, notify_event->value_handle, om);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "macctl notify failed: %d", rc);
+    }
+    notify_event->in_use = false;
+}
+
+static void macctl_notify_events_init(void)
+{
+    if (s_macctl_notify_events_initialized) {
+        return;
+    }
+    for (size_t i = 0; i < MACCTL_NOTIFY_EVENT_COUNT; ++i) {
+        ble_npl_event_init(&s_macctl_notify_events[i].event, macctl_notify_event_cb, &s_macctl_notify_events[i]);
+    }
+    s_macctl_notify_events_initialized = true;
+}
 
 static int macctl_command_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt,
                                     void *arg)
@@ -129,18 +170,23 @@ static bool macctl_notify(uint8_t command, int8_t value)
         return false;
     }
 
-    uint8_t payload[3] = {command, (uint8_t)value, 0};
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(payload, sizeof(payload));
-    if (!om) {
-        return false;
+    macctl_notify_events_init();
+    for (size_t i = 0; i < MACCTL_NOTIFY_EVENT_COUNT; ++i) {
+        if (s_macctl_notify_events[i].in_use) {
+            continue;
+        }
+        s_macctl_notify_events[i].payload[0]    = command;
+        s_macctl_notify_events[i].payload[1]    = (uint8_t)value;
+        s_macctl_notify_events[i].payload[2]    = 0;
+        s_macctl_notify_events[i].conn_handle   = s_macctl_conn_handle;
+        s_macctl_notify_events[i].value_handle  = s_macctl_command_value_handle;
+        s_macctl_notify_events[i].in_use        = true;
+        ble_npl_eventq_put(ble_hs_evq_get(), &s_macctl_notify_events[i].event);
+        return true;
     }
 
-    int rc = ble_gatts_notify_custom(s_macctl_conn_handle, s_macctl_command_value_handle, om);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "macctl notify failed: %d", rc);
-        return false;
-    }
-    return true;
+    ESP_LOGW(TAG, "macctl notify queue full");
+    return false;
 }
 #endif
 
