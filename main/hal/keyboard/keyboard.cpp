@@ -200,7 +200,7 @@ const KeyValue_t _key_value_map[4][14] = {
      {"j",     KEY_J,          "J",     KEY_J,          "J",     KEY_J,         KEY_MOD_LSHIFT },
      {"k",     KEY_K,          "K",     KEY_K,          "K",     KEY_K,         KEY_MOD_LSHIFT },
      {"l",     KEY_L,          "L",     KEY_L,          "L",     KEY_L,         KEY_MOD_LSHIFT },
-     {";",     KEY_SEMICOLON,  ":",     KEY_SEMICOLON,  "up",    KEY_UP,        0              },
+     {"up",    KEY_UP,         "up",    KEY_UP,         ";",     KEY_SEMICOLON, 0              },
      {"'",     KEY_APOSTROPHE, "\"",    KEY_APOSTROPHE, nullptr, KEY_NONE,      0              },
      {"enter", KEY_ENTER,      "enter", KEY_ENTER,      nullptr, KEY_NONE,      0              }},
     // Row 3
@@ -214,9 +214,9 @@ const KeyValue_t _key_value_map[4][14] = {
      {"b",     KEY_B,          "B",     KEY_B,          "B",     KEY_B,         KEY_MOD_LSHIFT },
      {"n",     KEY_N,          "N",     KEY_N,          "N",     KEY_N,         KEY_MOD_LSHIFT },
      {"m",     KEY_M,          "M",     KEY_M,          "M",     KEY_M,         KEY_MOD_LSHIFT },
-     {",",     KEY_COMMA,      "<",     KEY_COMMA,      "left",  KEY_LEFT,      0              },
-     {".",     KEY_DOT,        ">",     KEY_DOT,        "down",  KEY_DOWN,      0              },
-     {"/",     KEY_SLASH,      "?",     KEY_SLASH,      "right", KEY_RIGHT,     0              },
+     {"left",  KEY_LEFT,       "left",  KEY_LEFT,       ",",     KEY_COMMA,     0              },
+     {"down",  KEY_DOWN,       "down",  KEY_DOWN,       ".",     KEY_DOT,       0              },
+     {"right", KEY_RIGHT,      "right", KEY_RIGHT,      "/",     KEY_SLASH,     0              },
      {" ",     KEY_SPACE,      " ",     KEY_SPACE,      nullptr, KEY_NONE,      0              }}};
 // clang-format on
 

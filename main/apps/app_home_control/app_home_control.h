@@ -69,6 +69,7 @@ private:
     bool _hold_up                  = false;
     bool _hold_down                = false;
     bool _audio_test_active        = false;
+    uint8_t _audio_frame_sequence  = 0;
     uint8_t _knob_mode             = 0;
     std::string _wifi_ssid;
     std::string _wifi_password;
@@ -77,6 +78,7 @@ private:
     std::string _knob_status       = "idle";
     std::string _pointer_status    = "idle";
     std::vector<int16_t> _audio_test_buffer;
+    std::vector<uint8_t> _audio_stream_buffer;
 
     static constexpr int POINTER_STEP            = 12;
     static constexpr uint32_t POINTER_REPEAT_MS  = 55;
@@ -88,6 +90,7 @@ private:
     static constexpr int ACTION_COUNT            = 8;
     static constexpr size_t AUDIO_TEST_LENGTH    = 200;
     static constexpr size_t AUDIO_TEST_RATE      = 16000;
+    static constexpr size_t AUDIO_STREAM_PAYLOAD = 60;
     static const Action ACTIONS[ACTION_COUNT];
 
     void loadConfig();
@@ -112,6 +115,8 @@ private:
     void sendHardwareSettings();
     void startAudioTest();
     void stopAudioTest();
+    uint8_t encodeULaw(int16_t sample) const;
+    void streamAudioFrame();
     void sendKnobWheelStep(int8_t step);
     void sendKnobControlStep(int8_t step);
     int pointerStep();

@@ -28,6 +28,7 @@ bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta);
 bool ble_hid_device_helper_send_macctl_play_pause(void);
 bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity, uint8_t knob_mode);
 bool ble_hid_device_helper_send_macctl_power_config(uint8_t screen_timeout_s, uint8_t power_save_timeout_min);
+bool ble_hid_device_helper_send_macctl_audio(uint8_t sequence, const uint8_t* data, uint8_t len);
 void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback);
 BleHidDeviceState_t ble_hid_device_helper_get_state(void);
 bool ble_hid_device_helper_is_ready(void);

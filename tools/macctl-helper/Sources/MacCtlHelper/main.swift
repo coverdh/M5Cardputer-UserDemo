@@ -1,4 +1,6 @@
 import AppKit
+import AudioToolbox
+import CoreAudio
 import Foundation
 import IOKit.hid
 import MacCtlCore
@@ -12,6 +14,7 @@ private let hidUsagePageGenericDesktop = 0x01
 private let hidUsageKeyboard = 0x06
 private let advCtlReportID: UInt32 = 4
 private let advCtlReportLength = 64
+private let advCtlPayloadLength = 63
 private let advCtlRequestConfigCommand: UInt8 = 0x80
 private let advCtlSetInputCommand: UInt8 = 0x81
 private let advCtlAudioTestCommand: UInt8 = 0x82
@@ -21,6 +24,7 @@ private let advCtlSetPowerCommand: UInt8 = 0x86
 private let advCtlNowPlayingCommand: UInt8 = 0x87
 private let advCtlNowPlayingTitleCommand: UInt8 = 0x88
 private let advCtlNowPlayingArtistCommand: UInt8 = 0x89
+private let advCtlAudioFrameReport: UInt8 = 0xA0
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
@@ -156,6 +160,174 @@ private struct NowPlayingSnapshot: Equatable {
     }
 }
 
+private let blackHoleAudioCallback: AudioQueueOutputCallback = { _, queue, buffer in
+    AudioQueueFreeBuffer(queue, buffer)
+}
+
+private final class BlackHoleAudioSink {
+    private var queue: AudioQueueRef?
+    private(set) var deviceUID: String?
+
+    var isRunning: Bool {
+        queue != nil
+    }
+
+    var statusText: String {
+        if isRunning {
+            return "Streaming to BlackHole 2ch"
+        }
+        if deviceUID != nil {
+            return "BlackHole 2ch installed"
+        }
+        return "BlackHole 2ch installed; restart required"
+    }
+
+    init() {
+        refreshDevice()
+    }
+
+    @discardableResult func refreshDevice() -> Bool {
+        deviceUID = Self.findBlackHoleDeviceUID()
+        return deviceUID != nil
+    }
+
+    @discardableResult func start() -> Bool {
+        if queue != nil {
+            return true
+        }
+        guard let deviceUID else {
+            refreshDevice()
+            return false
+        }
+
+        var format = AudioStreamBasicDescription(mSampleRate: 8000,
+                                                 mFormatID: kAudioFormatLinearPCM,
+                                                 mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+                                                 mBytesPerPacket: 2,
+                                                 mFramesPerPacket: 1,
+                                                 mBytesPerFrame: 2,
+                                                 mChannelsPerFrame: 1,
+                                                 mBitsPerChannel: 16,
+                                                 mReserved: 0)
+        var newQueue: AudioQueueRef?
+        var status = AudioQueueNewOutput(&format,
+                                         blackHoleAudioCallback,
+                                         nil,
+                                         CFRunLoopGetMain(),
+                                         CFRunLoopMode.commonModes.rawValue,
+                                         0,
+                                         &newQueue)
+        guard status == noErr, let newQueue else {
+            log("BlackHole AudioQueueNewOutput failed: \(status)")
+            return false
+        }
+
+        var uid = deviceUID as CFString
+        status = withUnsafePointer(to: &uid) { pointer in
+            AudioQueueSetProperty(newQueue,
+                                  kAudioQueueProperty_CurrentDevice,
+                                  pointer,
+                                  UInt32(MemoryLayout<CFString>.size))
+        }
+        guard status == noErr else {
+            log("BlackHole set current device failed: \(status)")
+            AudioQueueDispose(newQueue, true)
+            return false
+        }
+
+        status = AudioQueueStart(newQueue, nil)
+        guard status == noErr else {
+            log("BlackHole AudioQueueStart failed: \(status)")
+            AudioQueueDispose(newQueue, true)
+            return false
+        }
+        queue = newQueue
+        return true
+    }
+
+    func stop() {
+        guard let queue else {
+            return
+        }
+        AudioQueueStop(queue, true)
+        AudioQueueDispose(queue, true)
+        self.queue = nil
+    }
+
+    func enqueueULaw(_ data: Data) {
+        guard let queue, !data.isEmpty else {
+            return
+        }
+        var pcm = [Int16]()
+        pcm.reserveCapacity(data.count)
+        for byte in data {
+            pcm.append(Self.decodeULaw(byte))
+        }
+        let byteCount = pcm.count * MemoryLayout<Int16>.size
+        var buffer: AudioQueueBufferRef?
+        guard AudioQueueAllocateBuffer(queue, UInt32(byteCount), &buffer) == noErr, let buffer else {
+            return
+        }
+        pcm.withUnsafeBytes { raw in
+            if let baseAddress = raw.baseAddress {
+                memcpy(buffer.pointee.mAudioData, baseAddress, byteCount)
+            }
+        }
+        buffer.pointee.mAudioDataByteSize = UInt32(byteCount)
+        let status = AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        if status != noErr {
+            AudioQueueFreeBuffer(queue, buffer)
+            log("BlackHole enqueue failed: \(status)")
+        }
+    }
+
+    private static func decodeULaw(_ byte: UInt8) -> Int16 {
+        let value = ~byte
+        var sample = Int16(((Int(value & 0x0F) << 3) + 0x84) << Int((value & 0x70) >> 4))
+        sample -= 0x84
+        return (value & 0x80) != 0 ? -sample : sample
+    }
+
+    private static func findBlackHoleDeviceUID() -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize) == noErr else {
+            return nil
+        }
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var devices = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &devices) == noErr else {
+            return nil
+        }
+
+        for device in devices {
+            let name = stringProperty(device, kAudioObjectPropertyName) ?? ""
+            guard name.localizedCaseInsensitiveContains("BlackHole") else {
+                continue
+            }
+            return stringProperty(device, kAudioDevicePropertyDeviceUID)
+        }
+        return nil
+    }
+
+    private static func stringProperty(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var value: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, pointer)
+        }
+        guard status == noErr else {
+            return nil
+        }
+        return value as String
+    }
+}
+
 private final class JoystickSettings {
     private let defaults = UserDefaults.standard
 
@@ -253,6 +425,7 @@ private protocol ADVCtlBridgeDelegate: AnyObject {
     func bridgeDidReceiveKnobKey(_ keyCode: UInt8)
     func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8)
     func bridgeDidReceivePowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8)
+    func bridgeDidUpdateAudioStatus(_ message: String, active: Bool)
     func bridgeDidUpdateMessage(_ message: String)
 }
 
@@ -279,6 +452,7 @@ private final class HIDDeviceRegistration {
 private final class ADVCtlBridge {
     private let config: HelperConfig
     private let homeAssistant: HomeAssistantClient?
+    private let audioSink = BlackHoleAudioSink()
     private var handledCommands = 0
     private var hidManager: IOHIDManager?
     private var hidDevices: [HIDDeviceRegistration] = []
@@ -336,25 +510,12 @@ private final class ADVCtlBridge {
             devices.forEach(attach)
         }
         startNowPlayingSync()
+        delegate?.bridgeDidUpdateAudioStatus(audioSink.statusText, active: audioSink.isRunning)
     }
 
     func sendSettings(_ settings: JoystickSettings) {
-        var payload: [UInt8] = [advCtlSetInputCommand, settings.flags, UInt8(settings.sensitivity), UInt8(settings.knobMode)]
-        for registration in hidDevices {
-            guard registration.kind == .control else {
-                continue
-            }
-            let status = IOHIDDeviceSetReport(registration.device,
-                                              kIOHIDReportTypeOutput,
-                                              CFIndex(advCtlReportID),
-                                              &payload,
-                                              payload.count)
-            if status == kIOReturnSuccess {
-                updateMessage("Sent joystick settings to ADV")
-            } else if status != kIOReturnUnsupported {
-                updateMessage("Set joystick settings failed: \(status)")
-            }
-        }
+        sendControlPayload([advCtlSetInputCommand, settings.flags, UInt8(settings.sensitivity), UInt8(settings.knobMode)],
+                           successMessage: "Sent joystick settings to ADV")
     }
 
     func sendPowerSettings(_ settings: JoystickSettings) {
@@ -384,6 +545,16 @@ private final class ADVCtlBridge {
     }
 
     func sendAudioTest(active: Bool) {
+        if active {
+            guard audioSink.refreshDevice(), audioSink.start() else {
+                delegate?.bridgeDidUpdateAudioStatus(audioSink.statusText, active: false)
+                updateMessage("BlackHole 2ch is not available; restart macOS after installing")
+                return
+            }
+        } else {
+            audioSink.stop()
+        }
+        delegate?.bridgeDidUpdateAudioStatus(audioSink.statusText, active: active && audioSink.isRunning)
         sendControlPayload([advCtlAudioTestCommand, active ? 1 : 0, 0, 0],
                            successMessage: active ? "ADV recording test activated" : "ADV recording test stopped")
     }
@@ -447,7 +618,10 @@ private final class ADVCtlBridge {
     }
 
     private func sendControlPayload(_ bytes: [UInt8], successMessage: String, updateStatus: Bool = true) {
-        var payload = bytes
+        var payload = Array(bytes.prefix(advCtlPayloadLength))
+        if payload.count < advCtlPayloadLength {
+            payload.append(contentsOf: repeatElement(0, count: advCtlPayloadLength - payload.count))
+        }
         var sent = false
         for registration in hidDevices {
             guard registration.kind == .control else {
@@ -543,10 +717,18 @@ private final class ADVCtlBridge {
     private func handleControlReport(reportID: UInt32, report: UnsafeMutablePointer<UInt8>, length: CFIndex) {
         let payload: Data
         if length >= 4, report[0] == UInt8(advCtlReportID) {
-            payload = Data(bytes: report.advanced(by: 1), count: min(4, Int(length) - 1))
+            payload = Data(bytes: report.advanced(by: 1), count: min(advCtlPayloadLength, Int(length) - 1))
         } else if reportID == advCtlReportID, length >= 3 {
-            payload = Data(bytes: report, count: min(4, Int(length)))
+            payload = Data(bytes: report, count: min(advCtlPayloadLength, Int(length)))
         } else {
+            return
+        }
+
+        if payload.count >= 3, payload[0] == advCtlAudioFrameReport {
+            let byteCount = min(Int(payload[2]), payload.count - 3)
+            if byteCount > 0 {
+                audioSink.enqueueULaw(payload.subdata(in: 3..<(3 + byteCount)))
+            }
             return
         }
 
@@ -753,6 +935,16 @@ private final class WaveformView: NSView {
 }
 
 private final class SettingsWindowController: NSWindowController {
+    private struct SettingsSection {
+        let identifier: String
+        let sidebarTitle: String
+        let symbol: String
+        let accent: NSColor
+        let pageTitle: String
+        let pageSubtitle: String
+        let groups: [NSView]
+    }
+
     private let settings: JoystickSettings
     var onSettingsChanged: (() -> Void)?
     var onPowerSettingsChanged: (() -> Void)?
@@ -764,7 +956,7 @@ private final class SettingsWindowController: NSWindowController {
     private let knobValueLabel = NSTextField(labelWithString: "No input")
     private let messageValueLabel = NSTextField(labelWithString: "Starting")
     private let audioStateLabel = NSTextField(labelWithString: "Inactive")
-    private let microphoneStatusLabel = NSTextField(labelWithString: "Virtual microphone driver not installed")
+    private let microphoneStatusLabel = NSTextField(labelWithString: "Checking BlackHole 2ch")
     private let swapAxesButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let invertXButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let invertYButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
@@ -774,18 +966,19 @@ private final class SettingsWindowController: NSWindowController {
     private let resetButton = NSButton(title: "Reset Hardware Defaults", target: nil, action: nil)
     private let refreshButton = NSButton(title: "Refresh from ADV", target: nil, action: nil)
     private let waveformView = WaveformView(frame: .zero)
-    private let recordButton = NSButton(title: "Activate Recording Test", target: nil, action: nil)
+    private let recordButton = NSButton(title: "Activate ADV Microphone", target: nil, action: nil)
     private let screenTimeoutSlider = NSSlider()
     private let screenTimeoutValueLabel = NSTextField(labelWithString: "30s")
     private let powerSaveSlider = NSSlider()
     private let powerSaveValueLabel = NSTextField(labelWithString: "3m")
+    private let searchField = NSSearchField()
     private let tabView = NSTabView()
     private var sidebarButtons: [NSButton] = []
     private var audioTestActive = false
 
     init(settings: JoystickSettings) {
         self.settings = settings
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 768),
                               styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
                               backing: .buffered,
                               defer: false)
@@ -810,11 +1003,20 @@ private final class SettingsWindowController: NSWindowController {
 
     func updateMessage(_ message: String) {
         messageValueLabel.stringValue = message
-        microphoneStatusLabel.stringValue = "Virtual microphone requires the ADVCtl audio driver"
+    }
+
+    func updateAudioStatus(_ message: String, active: Bool) {
+        microphoneStatusLabel.stringValue = message
+        microphoneStatusLabel.textColor = active ? .systemGreen : .secondaryLabelColor
+        audioTestActive = active
+        refresh()
     }
 
     private func buildContent() {
         guard let contentView = window?.contentView else { return }
+
+        contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         let root = NSStackView()
         root.orientation = .horizontal
@@ -829,19 +1031,21 @@ private final class SettingsWindowController: NSWindowController {
 
         let sidebar = NSStackView()
         sidebar.orientation = .vertical
-        sidebar.alignment = .leading
-        sidebar.spacing = 4
-        sidebar.edgeInsets = NSEdgeInsets(top: 58, left: 12, bottom: 18, right: 12)
+        sidebar.alignment = .centerX
+        sidebar.spacing = 5
+        sidebar.edgeInsets = NSEdgeInsets(top: 70, left: 12, bottom: 18, right: 12)
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebarEffect.addSubview(sidebar)
 
-        let brand = NSTextField(labelWithString: "ADVCtl")
-        brand.font = .systemFont(ofSize: 20, weight: .semibold)
-        brand.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addArrangedSubview(brand)
-        sidebar.setCustomSpacing(14, after: brand)
-        for (index, title) in ["Status", "Pointer", "Knob", "Power", "Audio"].enumerated() {
-            let button = sidebarButton(title, selected: index == 0)
+        searchField.placeholderString = "搜索"
+        searchField.font = .systemFont(ofSize: 13)
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addArrangedSubview(searchField)
+        sidebar.setCustomSpacing(10, after: searchField)
+
+        let sections = makeSections()
+        for (index, section) in sections.enumerated() {
+            let button = sidebarButton(section, selected: index == 0)
             sidebarButtons.append(button)
             sidebar.addArrangedSubview(button)
         }
@@ -854,42 +1058,7 @@ private final class SettingsWindowController: NSWindowController {
 
         tabView.tabViewType = .noTabsNoBorder
         tabView.translatesAutoresizingMaskIntoConstraints = false
-        tabView.addTabViewItem(tabItem("Status", groups: [
-            group("Connection", rows: [
-                valueRow("ADV", connectionValueLabel),
-                valueRow("Knob", knobValueLabel),
-                valueRow("Last message", messageValueLabel),
-                controlRow("Hardware config", refreshButton),
-            ]),
-        ]))
-        tabView.addTabViewItem(tabItem("Pointer", groups: [
-            group("Pointer", rows: [
-                controlRow("Swap X/Y axes", swapAxesButton),
-                controlRow("Invert horizontal", invertXButton),
-                controlRow("Invert vertical", invertYButton),
-                sensitivityRow(),
-            ]),
-        ]))
-        tabView.addTabViewItem(tabItem("Knob", groups: [
-            group("Knob", rows: [
-                controlRow("Rotation", knobModePopup),
-                valueRow("Press", NSTextField(labelWithString: "Mute in system mode, F15 in HomePod mode")),
-                controlRow("Defaults", resetButton),
-            ]),
-        ]))
-        tabView.addTabViewItem(tabItem("Power", groups: [
-            group("Power Save", rows: [
-                screenTimeoutRow(),
-                powerSaveTimeoutRow(),
-            ]),
-        ]))
-        tabView.addTabViewItem(tabItem("Audio", groups: [
-            group("Audio", rows: [
-                valueRow("Recording test", audioStateLabel),
-                valueRow("System microphone", microphoneStatusLabel),
-                waveformRow(),
-            ]),
-        ]))
+        sections.forEach { tabView.addTabViewItem(tabItem($0)) }
         contentEffect.addSubview(tabView)
         root.addArrangedSubview(sidebarEffect)
         root.addArrangedSubview(contentEffect)
@@ -934,11 +1103,13 @@ private final class SettingsWindowController: NSWindowController {
             root.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             root.topAnchor.constraint(equalTo: contentView.topAnchor),
             root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            sidebarEffect.widthAnchor.constraint(equalToConstant: 190),
+            sidebarEffect.widthAnchor.constraint(equalToConstant: 260),
             sidebar.leadingAnchor.constraint(equalTo: sidebarEffect.leadingAnchor),
             sidebar.trailingAnchor.constraint(equalTo: sidebarEffect.trailingAnchor),
             sidebar.topAnchor.constraint(equalTo: sidebarEffect.topAnchor),
             sidebar.bottomAnchor.constraint(lessThanOrEqualTo: sidebarEffect.bottomAnchor),
+            searchField.widthAnchor.constraint(equalToConstant: 224),
+            searchField.heightAnchor.constraint(equalToConstant: 32),
             tabView.leadingAnchor.constraint(equalTo: contentEffect.leadingAnchor),
             tabView.trailingAnchor.constraint(equalTo: contentEffect.trailingAnchor),
             tabView.topAnchor.constraint(equalTo: contentEffect.topAnchor),
@@ -946,44 +1117,120 @@ private final class SettingsWindowController: NSWindowController {
         ])
     }
 
-    private func sidebarButton(_ title: String, selected: Bool) -> NSButton {
-        let button = NSButton(title: title, target: self, action: #selector(selectSettingsTab(_:)))
+    private func makeSections() -> [SettingsSection] {
+        [
+            SettingsSection(identifier: "status",
+                            sidebarTitle: "状态",
+                            symbol: "dot.radiowaves.left.and.right",
+                            accent: .systemBlue,
+                            pageTitle: "状态",
+                            pageSubtitle: "查看 ADV 蓝牙连接、旋钮输入和最近的硬件同步状态。",
+                            groups: [
+                                group("连接", rows: [
+                                    valueRow("ADV", connectionValueLabel),
+                                    valueRow("旋钮", knobValueLabel),
+                                    valueRow("最近消息", messageValueLabel),
+                                    controlRow("硬件配置", refreshButton),
+                                ]),
+                            ]),
+            SettingsSection(identifier: "pointer",
+                            sidebarTitle: "指针",
+                            symbol: "cursorarrow.motionlines",
+                            accent: .systemPurple,
+                            pageTitle: "指针",
+                            pageSubtitle: "调整摇杆方向、轴映射和鼠标移动速度。这些设置会写入 ADV 固件。",
+                            groups: [
+                                group("指针", rows: [
+                                    controlRow("交换 X/Y 轴", swapAxesButton),
+                                    controlRow("反转左右", invertXButton),
+                                    controlRow("反转上下", invertYButton),
+                                    sensitivityRow(),
+                                ]),
+                            ]),
+            SettingsSection(identifier: "knob",
+                            sidebarTitle: "旋钮",
+                            symbol: "dial.low",
+                            accent: .systemOrange,
+                            pageTitle: "旋钮",
+                            pageSubtitle: "设置旋转行为。HomePod 音量由 ADVCtl 通过 Home Assistant 执行。",
+                            groups: [
+                                group("旋钮", rows: [
+                                    controlRow("旋转", knobModePopup),
+                                    valueRow("按下", NSTextField(labelWithString: "系统模式静音，HomePod 模式发送 F15")),
+                                    controlRow("默认值", resetButton),
+                                ]),
+                            ]),
+            SettingsSection(identifier: "power",
+                            sidebarTitle: "省电",
+                            symbol: "battery.75percent",
+                            accent: .systemGreen,
+                            pageTitle: "省电",
+                            pageSubtitle: "配置屏幕关闭和深度省电时间。深度省电会关闭 BLE，按键后自动恢复连接。",
+                            groups: [
+                                group("省电", rows: [
+                                    screenTimeoutRow(),
+                                    powerSaveTimeoutRow(),
+                                ]),
+                            ]),
+            SettingsSection(identifier: "audio",
+                            sidebarTitle: "音频",
+                            symbol: "waveform",
+                            accent: .systemPink,
+                            pageTitle: "音频",
+                            pageSubtitle: "仅在需要语音输入时激活 ADV 麦克风，并把音频写入 BlackHole 2ch。",
+                            groups: [
+                                group("音频", rows: [
+                                    valueRow("录制测试", audioStateLabel),
+                                    valueRow("系统麦克风", microphoneStatusLabel),
+                                    waveformRow(),
+                                ]),
+                            ]),
+        ]
+    }
+
+    private func sidebarButton(_ section: SettingsSection, selected: Bool) -> NSButton {
+        let button = NSButton(title: section.sidebarTitle, target: self, action: #selector(selectSettingsTab(_:)))
+        if let image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.sidebarTitle) {
+            button.image = image
+            button.imagePosition = .imageLeft
+        }
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.alignment = .left
         button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-        button.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+        button.contentTintColor = selected ? section.accent : .labelColor
         button.setButtonType(.momentaryPushIn)
-        button.identifier = NSUserInterfaceItemIdentifier(title)
+        button.identifier = NSUserInterfaceItemIdentifier(section.identifier)
         button.translatesAutoresizingMaskIntoConstraints = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 8
+        button.layer?.backgroundColor = selected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.20).cgColor : NSColor.clear.cgColor
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 166),
-            button.heightAnchor.constraint(equalToConstant: 28),
+            button.widthAnchor.constraint(equalToConstant: 224),
+            button.heightAnchor.constraint(equalToConstant: 36),
         ])
         return button
     }
 
-    private func tabItem(_ title: String, groups: [NSView]) -> NSTabViewItem {
-        let item = NSTabViewItem(identifier: title)
-        item.label = title
-        item.view = tabPage(title: title, groups: groups)
+    private func tabItem(_ section: SettingsSection) -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: section.identifier)
+        item.label = section.sidebarTitle
+        item.view = tabPage(title: section.pageTitle, subtitle: section.pageSubtitle, groups: section.groups)
         return item
     }
 
-    private func tabPage(title: String, groups: [NSView]) -> NSView {
+    private func tabPage(title: String, subtitle: String, groups: [NSView]) -> NSView {
         let page = NSView()
         page.translatesAutoresizingMaskIntoConstraints = false
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 16
-        stack.edgeInsets = NSEdgeInsets(top: 54, left: 34, bottom: 28, right: 34)
+        stack.spacing = 14
+        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 28, right: 24)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 28, weight: .bold)
-        stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(pageHeader(title: title, subtitle: subtitle))
         groups.forEach { stack.addArrangedSubview($0) }
 
         page.addSubview(stack)
@@ -997,13 +1244,67 @@ private final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func selectSettingsTab(_ sender: NSButton) {
-        guard let title = sender.identifier?.rawValue else { return }
-        tabView.selectTabViewItem(withIdentifier: title)
+        guard let identifier = sender.identifier?.rawValue else { return }
+        tabView.selectTabViewItem(withIdentifier: identifier)
         for button in sidebarButtons {
             let selected = button === sender
             button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-            button.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+            button.contentTintColor = selected ? .controlAccentColor : .labelColor
+            button.layer?.backgroundColor = selected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.20).cgColor : NSColor.clear.cgColor
         }
+    }
+
+    private func pageHeader(title: String, subtitle: String) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let backButton = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back") ?? NSImage(),
+                                  target: nil,
+                                  action: nil)
+        let forwardButton = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Forward") ?? NSImage(),
+                                     target: nil,
+                                     action: nil)
+        [backButton, forwardButton].forEach { button in
+            button.isEnabled = false
+            button.isBordered = false
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 17
+            button.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.80).cgColor
+            button.contentTintColor = .tertiaryLabelColor
+            button.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(button)
+        }
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(titleLabel)
+
+        let subtitleLabel = NSTextField(wrappingLabelWithString: subtitle)
+        subtitleLabel.font = .systemFont(ofSize: 13)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(subtitleLabel)
+
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 520),
+            container.heightAnchor.constraint(equalToConstant: 86),
+            backButton.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            backButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            backButton.widthAnchor.constraint(equalToConstant: 34),
+            backButton.heightAnchor.constraint(equalToConstant: 34),
+            forwardButton.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 4),
+            forwardButton.topAnchor.constraint(equalTo: backButton.topAnchor),
+            forwardButton.widthAnchor.constraint(equalToConstant: 34),
+            forwardButton.heightAnchor.constraint(equalToConstant: 34),
+            titleLabel.leadingAnchor.constraint(equalTo: forwardButton.trailingAnchor, constant: 18),
+            titleLabel.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
+        ])
+        return container
     }
 
     private func group(_ title: String, rows: [NSView]) -> NSView {
@@ -1026,8 +1327,8 @@ private final class SettingsWindowController: NSWindowController {
 
         let card = NSView()
         card.wantsLayer = true
-        card.layer?.cornerRadius = 8
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.68).cgColor
+            card.layer?.cornerRadius = 12
+            card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72).cgColor
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(cardStack)
 
@@ -1040,7 +1341,7 @@ private final class SettingsWindowController: NSWindowController {
         wrapper.addArrangedSubview(card)
 
         NSLayoutConstraint.activate([
-            wrapper.widthAnchor.constraint(greaterThanOrEqualToConstant: 520),
+            wrapper.widthAnchor.constraint(equalToConstant: 532),
             card.widthAnchor.constraint(equalTo: wrapper.widthAnchor),
             cardStack.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             cardStack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
@@ -1119,7 +1420,7 @@ private final class SettingsWindowController: NSWindowController {
 
     private func row(_ title: String, trailing: NSView, minHeight: CGFloat = 44) -> NSView {
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13)
+        label.font = .systemFont(ofSize: 13.5)
         label.textColor = .labelColor
         label.translatesAutoresizingMaskIntoConstraints = false
         trailing.translatesAutoresizingMaskIntoConstraints = false
@@ -1131,7 +1432,7 @@ private final class SettingsWindowController: NSWindowController {
         NSLayoutConstraint.activate([
             container.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
             label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 13),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 14),
             trailing.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
             trailing.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             trailing.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 18),
@@ -1152,7 +1453,7 @@ private final class SettingsWindowController: NSWindowController {
         powerSaveValueLabel.stringValue = "\(settings.powerSaveTimeoutMinutes)m"
         audioStateLabel.stringValue = audioTestActive ? "Active" : "Inactive"
         audioStateLabel.textColor = audioTestActive ? .systemBlue : .secondaryLabelColor
-        recordButton.title = audioTestActive ? "Stop Recording Test" : "Activate Recording Test"
+        recordButton.title = audioTestActive ? "Stop ADV Microphone" : "Activate ADV Microphone"
         waveformView.isActive = audioTestActive
     }
 
@@ -1194,9 +1495,7 @@ private final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func toggleAudioTest() {
-        audioTestActive.toggle()
-        refresh()
-        onAudioTestChanged?(audioTestActive)
+        onAudioTestChanged?(!audioTestActive)
     }
 }
 
@@ -1281,6 +1580,11 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settingsWindow.applyPowerSettings(screenTimeoutSeconds: screenTimeoutSeconds,
                                           powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
         messageMenuItem.title = "Power settings received"
+    }
+
+    func bridgeDidUpdateAudioStatus(_ message: String, active: Bool) {
+        settingsWindow.updateAudioStatus(message, active: active)
+        messageMenuItem.title = message
     }
 
     func bridgeDidUpdateMessage(_ message: String) {

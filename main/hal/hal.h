@@ -140,6 +140,7 @@ public:
     bool bleMacCtlIsConnected() const;
     bool bleMacCtlTimeSynced() const;
     const MacCtlNowPlayingState& bleMacCtlNowPlaying() const;
+    bool bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len);
     bool bleConsumeAudioTestRequest(bool& active);
 
     /* ----------------------------------- USB ---------------------------------- */

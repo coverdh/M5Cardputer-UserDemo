@@ -479,6 +479,8 @@ void AppHomeControl::startAudioTest()
     GetHAL().mic.begin();
 
     _audio_test_buffer.assign(AUDIO_TEST_LENGTH, 0);
+    _audio_stream_buffer.clear();
+    _audio_frame_sequence = 0;
     _audio_test_active = true;
     _mode              = Mode::AudioTest;
     setStatus("Recording test active");
@@ -500,8 +502,51 @@ void AppHomeControl::stopAudioTest()
     GetHAL().speaker.setVolume(255);
     audio::set_keyboard_sfx_enable(true);
     _audio_test_buffer.clear();
+    _audio_stream_buffer.clear();
     _audio_test_active = false;
     setStatus("Recording test stopped");
+}
+
+uint8_t AppHomeControl::encodeULaw(int16_t sample) const
+{
+    constexpr int BIAS = 0x84;
+    constexpr int CLIP = 32635;
+    int pcm = sample;
+    int mask;
+    if (pcm < 0) {
+        pcm = -pcm;
+        mask = 0x7F;
+    } else {
+        mask = 0xFF;
+    }
+    if (pcm > CLIP) {
+        pcm = CLIP;
+    }
+    pcm += BIAS;
+
+    int segment = 7;
+    for (int threshold = 0x4000; (pcm & threshold) == 0 && segment > 0; threshold >>= 1) {
+        --segment;
+    }
+    const int mantissa = (pcm >> (segment + 3)) & 0x0F;
+    return static_cast<uint8_t>(mask & ((segment << 4) | mantissa));
+}
+
+void AppHomeControl::streamAudioFrame()
+{
+    if (!GetHAL().bleMacCtlIsConnected() || _audio_test_buffer.empty()) {
+        return;
+    }
+
+    for (size_t i = 0; i < _audio_test_buffer.size(); i += 2) {
+        _audio_stream_buffer.push_back(encodeULaw(_audio_test_buffer[i]));
+    }
+    while (_audio_stream_buffer.size() >= AUDIO_STREAM_PAYLOAD) {
+        GetHAL().bleMacCtlAudioFrame(_audio_frame_sequence++,
+                                     _audio_stream_buffer.data(),
+                                     static_cast<uint8_t>(AUDIO_STREAM_PAYLOAD));
+        _audio_stream_buffer.erase(_audio_stream_buffer.begin(), _audio_stream_buffer.begin() + AUDIO_STREAM_PAYLOAD);
+    }
 }
 
 int AppHomeControl::pointerStep()
@@ -800,7 +845,7 @@ void AppHomeControl::renderDashboard()
                   input.getSwapAxes() ? "swap" : "norm",
                   input.getFlipX() ? "inv" : "norm",
                   input.getFlipY() ? "inv" : "norm");
-    canvas.printf("Mic: %s  Fn+ESAD mouse\n", _audio_test_active ? "on" : "off");
+    canvas.println(_audio_test_active ? "Mic: streaming" : "Fn+ESAD mouse");
 
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -996,6 +1041,7 @@ void AppHomeControl::renderAudioWaveform()
     if (!GetHAL().mic.record(_audio_test_buffer.data(), AUDIO_TEST_LENGTH, AUDIO_TEST_RATE)) {
         return;
     }
+    streamAudioFrame();
 
     auto& canvas = GetHAL().canvas;
     const int32_t top = 28;

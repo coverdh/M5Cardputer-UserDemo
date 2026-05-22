@@ -966,6 +966,14 @@ const Hal::MacCtlNowPlayingState& Hal::bleMacCtlNowPlaying() const
     return s_advctl_now_playing;
 }
 
+bool Hal::bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len)
+{
+    if (!bleKeyboardIsConnected() || !s_advctl_control_ready) {
+        return false;
+    }
+    return ble_hid_device_helper_send_macctl_audio(sequence, data, len);
+}
+
 bool Hal::bleConsumeAudioTestRequest(bool& active)
 {
     if (!s_advctl_audio_test_pending) {

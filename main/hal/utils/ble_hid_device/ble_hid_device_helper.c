@@ -51,6 +51,8 @@
 
 static const char *TAG = "ble_hid";
 
+#define BLE_HID_MACCTL_REPORT_LEN 63
+
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 static TickType_t s_ble_hid_ready_after_tick        = 0;
 static bool s_ble_hid_notify_ready                  = false;
@@ -60,7 +62,7 @@ typedef struct {
     uint8_t map_index;
     uint8_t report_id;
     uint8_t len;
-    uint8_t data[8];
+    uint8_t data[BLE_HID_MACCTL_REPORT_LEN];
     uint16_t delay_after_ms;
 } BleHidQueuedReport_t;
 
@@ -156,7 +158,11 @@ static void ble_hid_device_helper_ensure_report_task(void)
 
 static bool ble_hid_device_helper_queue_macctl_report(const uint8_t *buffer, uint8_t len)
 {
-    return ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_MACCTL, BLE_HID_RPT_ID_MACCTL, buffer, len, 8);
+    uint8_t report[BLE_HID_MACCTL_REPORT_LEN] = {0};
+    if (buffer && len > 0) {
+        memcpy(report, buffer, len > sizeof(report) ? sizeof(report) : len);
+    }
+    return ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_MACCTL, BLE_HID_RPT_ID_MACCTL, report, sizeof(report), 4);
 }
 
 static bool ble_hid_device_helper_queue_macctl_command(uint8_t command, int8_t value)
@@ -229,10 +235,10 @@ const unsigned char macctlReportMap[] = {
     0x15, 0x00,                    //   Logical Minimum (0)
     0x26, 0xFF, 0x00,              //   Logical Maximum (255)
     0x75, 0x08,                    //   Report Size (8)
-    0x95, 0x04,                    //   Report Count (4)
+    0x95, BLE_HID_MACCTL_REPORT_LEN, //   Report Count (63)
     0x81, 0x02,                    //   Input (Data,Var,Abs)
     0x09, 0x03,                    //   Usage (0x03)
-    0x95, 0x04,                    //   Report Count (4)
+    0x95, BLE_HID_MACCTL_REPORT_LEN, //   Report Count (63)
     0x91, 0x02,                    //   Output (Data,Var,Abs)
     0xC0,                          // End Collection
 };
@@ -1141,6 +1147,19 @@ bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity
 bool ble_hid_device_helper_send_macctl_power_config(uint8_t screen_timeout_s, uint8_t power_save_timeout_min)
 {
     const uint8_t buffer[4] = {0x91, screen_timeout_s, power_save_timeout_min, 0};
+    return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
+}
+
+bool ble_hid_device_helper_send_macctl_audio(uint8_t sequence, const uint8_t* data, uint8_t len)
+{
+    uint8_t buffer[BLE_HID_MACCTL_REPORT_LEN] = {0};
+    buffer[0] = 0xA0;
+    buffer[1] = sequence;
+    if (data && len > 0) {
+        const uint8_t payload_len = len > (BLE_HID_MACCTL_REPORT_LEN - 3) ? (BLE_HID_MACCTL_REPORT_LEN - 3) : len;
+        buffer[2] = payload_len;
+        memcpy(&buffer[3], data, payload_len);
+    }
     return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
 }
 
