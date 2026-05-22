@@ -49,7 +49,7 @@
 static const char *TAG = "ble_hid";
 
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
-static bool s_ble_hid_input_notify_ready            = false;
+static TickType_t s_ble_hid_ready_after_tick        = 0;
 
 #define BLE_HID_MAP_INDEX_KEYBOARD 0
 #define BLE_HID_MAP_INDEX_MOUSE    1
@@ -1034,7 +1034,7 @@ void ble_hid_device_helper_send_consumer(uint16_t usage_id)
 static bool ble_hid_device_helper_send_keycode(uint8_t keycode)
 {
     if (!s_ble_hid_param.hid_dev || s_ble_hid_keyboard_state != BLE_HID_DEVICE_STATE_CONNECTED ||
-        !s_ble_hid_input_notify_ready) {
+        xTaskGetTickCount() < s_ble_hid_ready_after_tick) {
         return false;
     }
 
@@ -1089,13 +1089,13 @@ BleHidDeviceState_t ble_hid_device_helper_get_state(void)
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
     (void)conn_handle;
-    s_ble_hid_input_notify_ready = false;
+    s_ble_hid_ready_after_tick = xTaskGetTickCount() + pdMS_TO_TICKS(8000);
 }
 
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
 {
     (void)conn_handle;
-    s_ble_hid_input_notify_ready = false;
+    s_ble_hid_ready_after_tick = 0;
 }
 
 void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled)
@@ -1103,7 +1103,7 @@ void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_han
     (void)conn_handle;
     (void)attr_handle;
     if (notify_enabled) {
-        s_ble_hid_input_notify_ready = true;
+        s_ble_hid_ready_after_tick = xTaskGetTickCount();
         ESP_LOGI(TAG, "hid input notify ready");
     }
 }
