@@ -8,6 +8,7 @@ private let macCtlCommandUUID = CBUUID(string: "FFF1")
 private struct HelperConfig {
     var deviceName = "MacCtl"
     var homeAssistant: HomeAssistantConfig?
+    var expectedCommands: Int?
 
     static func load(arguments: [String] = CommandLine.arguments, environment: [String: String] = ProcessInfo.processInfo.environment) -> HelperConfig {
         var config = HelperConfig()
@@ -34,6 +35,7 @@ private struct HelperConfig {
 
         let urlString = values["MACCTL_HA_URL"] ?? "http://homeassistant.orb.local:8123"
         let entity = values["MACCTL_HA_ENTITY"] ?? "media_player.ke_ting"
+        config.expectedCommands = values["MACCTL_E2E_EXPECTED_COMMANDS"].flatMap(Int.init)
         if let url = URL(string: urlString), let token = values["MACCTL_HA_TOKEN"], !token.isEmpty {
             config.homeAssistant = HomeAssistantConfig(baseURL: url, token: token, entityID: entity)
         }
@@ -46,6 +48,7 @@ private final class MacCtlBridge: NSObject, CBCentralManagerDelegate, CBPeripher
     private let homeAssistant: HomeAssistantClient?
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
+    private var handledCommands = 0
 
     init(config: HelperConfig) {
         self.config = config
@@ -133,6 +136,12 @@ private final class MacCtlBridge: NSObject, CBCentralManagerDelegate, CBPeripher
                     print("Handled \(command)")
                 } else {
                     print("Received \(command); set MACCTL_HA_TOKEN to enable HA control")
+                }
+                self.handledCommands += 1
+                if let expectedCommands = self.config.expectedCommands, self.handledCommands >= expectedCommands {
+                    print("E2E complete; handled \(self.handledCommands) commands")
+                    fflush(stdout)
+                    exit(0)
                 }
             } catch {
                 print("HA request failed: \(error.localizedDescription)")
