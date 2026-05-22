@@ -18,14 +18,8 @@
 using namespace mooncake;
 
 const AppHomeControl::Action AppHomeControl::ACTIONS[AppHomeControl::ACTION_COUNT] = {
-    {"TV Power", "IR toggle"},
-    {"Pointer", "BLE mouse"},
-    {"Keyboard", "BLE keys"},
-    {"HP Vol-", "HA volume"},
-    {"HP Play", "HA media"},
-    {"HP Vol+", "HA volume"},
-    {"Volume", "device"},
-    {"Config", "type setup"},
+    {"TV Power", "IR toggle"}, {"Pointer", "BLE mouse"}, {"Keyboard", "BLE keys"}, {"HP Vol-", "HA volume"},
+    {"HP Play", "HA media"},   {"HP Vol+", "HA volume"}, {"Volume", "device"},     {"Config", "type setup"},
 };
 
 AppHomeControl::AppHomeControl()
@@ -42,11 +36,12 @@ AppHomeControl::~AppHomeControl()
 void AppHomeControl::onOpen()
 {
     mclog::tagInfo(getAppInfo().name, "on open");
-    _mode = Mode::Setup;
+    _mode            = Mode::Setup;
     _selected_action = 0;
     _input_buffer.clear();
-    _auto_wifi_attempted = false;
-    _ble_start_requested = false;
+    _pending_volume_delta = 0;
+    _auto_wifi_attempted  = false;
+    _ble_start_requested  = false;
     resetPointerHolds();
     setStatus("Enter starts BLE/WiFi");
 
@@ -76,7 +71,10 @@ void AppHomeControl::onRunning()
     }
 
     if (_mode == Mode::Dashboard) {
+        handleExternalInput();
         repeatPointerMove();
+    } else if (_mode == Mode::Pointer || _mode == Mode::Keyboard || _mode == Mode::Volume) {
+        handleExternalInput();
     }
 
     if (_mode == Mode::Dashboard && _ha.isConfigured() && GetHAL().isWifiConnected() &&
@@ -99,19 +97,19 @@ void AppHomeControl::onClose()
 
 void AppHomeControl::loadConfig()
 {
-    auto& settings = GetHAL().getSettings();
-    _ha_config.baseUrl = settings.GetString("ha_url", "");
-    _ha_config.token = settings.GetString("ha_token", "");
+    auto& settings           = GetHAL().getSettings();
+    _ha_config.baseUrl       = settings.GetString("ha_url", "");
+    _ha_config.token         = settings.GetString("ha_token", "");
     _ha_config.homepodEntity = settings.GetString("ha_homepod", "");
-    _tv_power_addr = static_cast<uint8_t>(settings.GetInt("tv_power_addr", 0x04));
-    _tv_power_cmd = static_cast<uint8_t>(settings.GetInt("tv_power_cmd", 0x08));
+    _tv_power_addr           = static_cast<uint8_t>(settings.GetInt("tv_power_addr", 0x04));
+    _tv_power_cmd            = static_cast<uint8_t>(settings.GetInt("tv_power_cmd", 0x08));
     _ha.setConfig(_ha_config);
 }
 
 void AppHomeControl::loadWifiConfig()
 {
     auto& settings = GetHAL().getSettings();
-    _wifi_ssid = settings.GetString("wifi_ssid", "");
+    _wifi_ssid     = settings.GetString("wifi_ssid", "");
     _wifi_password = settings.GetString("wifi_password", "");
 }
 
@@ -177,7 +175,7 @@ bool AppHomeControl::ensureHomeAssistantReady()
 
 bool AppHomeControl::isConnectionReady() const
 {
-    return GetHAL().bleKeyboardIsConnected() && GetHAL().isWifiConnected() && _ha.isConfigured();
+    return GetHAL().bleKeyboardIsConnected();
 }
 
 void AppHomeControl::enterControlIfReady()
@@ -197,10 +195,10 @@ void AppHomeControl::enterControlIfReady()
 
 void AppHomeControl::resetPointerHolds()
 {
-    _hold_left = false;
+    _hold_left  = false;
     _hold_right = false;
-    _hold_up = false;
-    _hold_down = false;
+    _hold_up    = false;
+    _hold_down  = false;
 }
 
 void AppHomeControl::updatePointerHold(const Keyboard::KeyEvent_t& keyEvent)
@@ -245,13 +243,123 @@ void AppHomeControl::repeatPointerMove()
     GetHAL().bleMouseMove(dx, dy);
 }
 
+void AppHomeControl::handleExternalInput()
+{
+    auto& input = GetHAL().externalInput;
+    if (!input.isConnected() && !input.isEncoderConnected()) {
+        return;
+    }
+
+    if (_mode == Mode::Dashboard || _mode == Mode::Pointer || _mode == Mode::Keyboard) {
+        handleExternalPointer(input.getButtons(), input.getPressed(), input.getReleased());
+    }
+    handleExternalEncoder();
+}
+
+void AppHomeControl::handleExternalPointer(uint8_t buttons, uint8_t pressed, uint8_t released)
+{
+    (void)released;
+    int8_t dx = 0;
+    int8_t dy = 0;
+    if (buttons & ExternalInput::PAD_LEFT) {
+        dx -= POINTER_STEP;
+    }
+    if (buttons & ExternalInput::PAD_RIGHT) {
+        dx += POINTER_STEP;
+    }
+    if (buttons & ExternalInput::PAD_UP) {
+        dy -= POINTER_STEP;
+    }
+    if (buttons & ExternalInput::PAD_DOWN) {
+        dy += POINTER_STEP;
+    }
+    if (dx != 0 || dy != 0) {
+        GetHAL().bleMouseMove(dx, dy);
+    }
+
+    if (pressed & ExternalInput::PAD_A) {
+        GetHAL().bleMouseClick(1);
+        setStatus("Joystick left click");
+    } else if (pressed & ExternalInput::PAD_B) {
+        GetHAL().bleMouseClick(2);
+        setStatus("External right click");
+    } else if (dx != 0 || dy != 0) {
+        setStatus("Joystick mouse");
+    }
+
+    if ((pressed != 0 || dx != 0 || dy != 0) && GetHAL().millis() - _last_external_render > EXTERNAL_RENDER_MS) {
+        _last_external_render = GetHAL().millis();
+        render();
+    }
+}
+
+void AppHomeControl::handleExternalEncoder()
+{
+    auto& input         = GetHAL().externalInput;
+    const int16_t delta = input.getEncoderDelta();
+    if (delta != 0) {
+        _pending_volume_delta = static_cast<int16_t>(
+            std::max<int32_t>(-50, std::min<int32_t>(50, static_cast<int32_t>(_pending_volume_delta) + delta)));
+    }
+    if (input.getEncoderPressed()) {
+        if (ensureHomeAssistantReady() && _ha.homePodPlayPause()) {
+            refreshHomePodState();
+        } else {
+            setStatus("HA request failed");
+        }
+        render();
+        return;
+    }
+    if (_pending_volume_delta == 0) {
+        return;
+    }
+
+    const uint32_t now = GetHAL().millis();
+    if (_last_volume_apply != 0 && now - _last_volume_apply < 220) {
+        return;
+    }
+
+    const int16_t applyDelta = _pending_volume_delta;
+    _pending_volume_delta    = 0;
+    _last_volume_apply       = now;
+
+    if (!ensureHomeAssistantReady()) {
+        setStatus("HA not ready");
+        render();
+        return;
+    }
+
+    bool ok = false;
+    if (_homepod_state.volumePercent >= 0) {
+        const int target = std::max(0, std::min(100, _homepod_state.volumePercent + static_cast<int>(applyDelta) * 2));
+        ok               = _ha.homePodSetVolume(target);
+    } else {
+        ok              = true;
+        const int steps = std::min(5, std::abs(static_cast<int>(applyDelta)));
+        for (int i = 0; i < steps; ++i) {
+            ok = applyDelta > 0 ? _ha.homePodVolumeUp() : _ha.homePodVolumeDown();
+            if (!ok) {
+                break;
+            }
+        }
+    }
+
+    if (ok) {
+        refreshHomePodState();
+        setStatus(applyDelta > 0 ? "HomePod volume up" : "HomePod volume down");
+    } else {
+        setStatus("HA request failed");
+    }
+    render();
+}
+
 void AppHomeControl::ensureWifi()
 {
     if (GetHAL().isWifiConnected()) {
         return;
     }
 
-    auto ssid = GetHAL().getSettings().GetString("wifi_ssid", "");
+    auto ssid     = GetHAL().getSettings().GetString("wifi_ssid", "");
     auto password = GetHAL().getSettings().GetString("wifi_password", "");
     if (ssid.empty()) {
         setStatus("WiFi not configured");
@@ -325,10 +433,10 @@ void AppHomeControl::renderSetup()
     canvas.println("MacCtl Setup");
 
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
-    canvas.printf("BLE:  %s\n", GetHAL().bleKeyboardIsConnected() ? "paired" :
-                                                     (_ble_start_requested ? "pair MacCtl" : "stopped"));
-    canvas.printf("WiFi: %s\n", GetHAL().isWifiConnected() ? "connected" :
-                                                     (_wifi_ssid.empty() ? "not set" : _wifi_ssid.c_str()));
+    canvas.printf("BLE:  %s\n",
+                  GetHAL().bleKeyboardIsConnected() ? "paired" : (_ble_start_requested ? "pair MacCtl" : "stopped"));
+    canvas.printf("WiFi: %s\n",
+                  GetHAL().isWifiConnected() ? "connected" : (_wifi_ssid.empty() ? "not set" : _wifi_ssid.c_str()));
     canvas.printf("HA:   %s\n", _ha.isConfigured() ? "configured" : "not set");
 
     canvas.setTextColor(TFT_CYAN, THEME_COLOR_BG);
@@ -462,9 +570,9 @@ void AppHomeControl::renderVolume()
     canvas.printf("%d%%", _target_volume_percent);
     canvas.setTextSize(1);
 
-    int bar_x = 0;
-    int bar_y = 92;
-    int bar_w = canvas.width() - 2;
+    int bar_x  = 0;
+    int bar_y  = 92;
+    int bar_w  = canvas.width() - 2;
     int fill_w = std::max(0, std::min(bar_w, bar_w * _target_volume_percent / 100));
     canvas.drawRect(bar_x, bar_y, bar_w, 10, TFT_DARKGREY);
     canvas.fillRect(bar_x + 1, bar_y + 1, std::max(0, fill_w - 2), 8, TFT_GREEN);
@@ -555,7 +663,7 @@ void AppHomeControl::handleSetupKey(const Keyboard::KeyEvent_t& keyEvent)
     }
 
     if (keyEvent.keyCode == KEY_W) {
-        _mode = Mode::WifiSsid;
+        _mode         = Mode::WifiSsid;
         _input_buffer = _wifi_ssid;
         setStatus("Set WiFi SSID");
     } else if (keyEvent.keyCode == KEY_C) {
@@ -590,14 +698,14 @@ void AppHomeControl::handleWifiKey(const Keyboard::KeyEvent_t& keyEvent)
                 _wifi_ssid = _input_buffer;
             }
             _input_buffer = _wifi_password;
-            _mode = Mode::WifiPassword;
+            _mode         = Mode::WifiPassword;
             setStatus("Set WiFi password");
         } else {
             _wifi_password = _input_buffer;
             saveWifiConfig();
             _input_buffer.clear();
             _auto_wifi_attempted = false;
-            _mode = Mode::Setup;
+            _mode                = Mode::Setup;
             setStatus("WiFi saved; Enter connects");
         }
         render();
@@ -736,7 +844,7 @@ void AppHomeControl::handleKeyboardKey(const Keyboard::KeyEvent_t& keyEvent)
     uint8_t modifier = GetHAL().keyboard.getModifierMask() | keyEvent.extraModifiers;
     KeScanCode_t key = keyEvent.isModifier ? KEY_NONE : keyEvent.keyCode;
     if (!keyEvent.state) {
-        key = KEY_NONE;
+        key      = KEY_NONE;
         modifier = GetHAL().keyboard.getModifierMask();
     }
     GetHAL().bleKeyboardSendReport(modifier, key);
@@ -854,7 +962,7 @@ void AppHomeControl::activateSelectedAction()
 void AppHomeControl::openVolumeSetter()
 {
     _target_volume_percent = GetHAL().getDeviceVolumePercent();
-    _mode = Mode::Volume;
+    _mode                  = Mode::Volume;
     setStatus("Set device volume");
 }
 
@@ -884,7 +992,7 @@ bool AppHomeControl::parseConfigLine(const std::string& line)
         return false;
     }
 
-    auto key = line.substr(0, pos);
+    auto key   = line.substr(0, pos);
     auto value = line.substr(pos + 1);
     if (key == "url") {
         _ha_config.baseUrl = value;
@@ -921,13 +1029,13 @@ bool AppHomeControl::parseTvPowerConfig(const std::string& value)
     }
 
     int addr = std::strtol(value.substr(0, comma).c_str(), nullptr, 0);
-    int cmd = std::strtol(value.substr(comma + 1).c_str(), nullptr, 0);
+    int cmd  = std::strtol(value.substr(comma + 1).c_str(), nullptr, 0);
     if (addr < 0 || addr > 255 || cmd < 0 || cmd > 255) {
         return false;
     }
 
     _tv_power_addr = static_cast<uint8_t>(addr);
-    _tv_power_cmd = static_cast<uint8_t>(cmd);
+    _tv_power_cmd  = static_cast<uint8_t>(cmd);
     return true;
 }
 

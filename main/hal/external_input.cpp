@@ -11,37 +11,43 @@
 #include <string>
 #include <algorithm>
 
-static constexpr uint32_t EXTERNAL_INPUT_I2C_FREQ = 100000;
-static constexpr uint32_t EXTERNAL_INPUT_POLL_INTERVAL_MS = 12;
-static constexpr uint32_t CHAIN_INPUT_POLL_INTERVAL_MS = 50;
-static constexpr uint32_t EXTERNAL_INPUT_PROBE_INTERVAL_MS = 1000;
+static constexpr uint32_t EXTERNAL_INPUT_I2C_FREQ             = 100000;
+static constexpr uint32_t EXTERNAL_INPUT_POLL_INTERVAL_MS     = 12;
+static constexpr uint32_t CHAIN_INPUT_POLL_INTERVAL_MS        = 50;
+static constexpr uint32_t EXTERNAL_INPUT_PROBE_INTERVAL_MS    = 1000;
 static constexpr uint32_t EXTERNAL_INPUT_SCAN_LOG_INTERVAL_MS = 5000;
-static constexpr uint32_t EXTERNAL_INPUT_RETRY_INTERVAL_MS = 5000;
-static constexpr uint8_t JOYSTICK_UNIT_ADDR = 0x52;
-static constexpr uint8_t JOYSTICK2_ADDR = 0x63;
+static constexpr uint32_t EXTERNAL_INPUT_RETRY_INTERVAL_MS    = 5000;
+static constexpr uint8_t JOYSTICK_UNIT_ADDR                   = 0x52;
+static constexpr uint8_t JOYSTICK2_ADDR                       = 0x63;
 static constexpr uint8_t JOYSTICK2_OFFSET_ADC_VALUE_8BITS_REG = 0x60;
-static constexpr uint8_t JOYSTICK2_BUTTON_REG = 0x20;
-static constexpr uint8_t BYTE_BUTTON_ADDR = 0x47;
-static constexpr uint8_t BYTE_BUTTON_STATUS_8BYTE_REG = 0x60;
-static constexpr int JOYSTICK_UNIT_CENTER = 128;
-static constexpr int JOYSTICK_UNIT_DEAD_ZONE = 38;
-static constexpr int JOYSTICK2_DEAD_ZONE = 24;
-static constexpr uart_port_t CHAIN_UART = UART_NUM_1;
-static constexpr int CHAIN_RX_A = 1;
-static constexpr int CHAIN_TX_A = 2;
-static constexpr int CHAIN_RX_B = 2;
-static constexpr int CHAIN_TX_B = 1;
-static constexpr uint8_t CHAIN_DEVICE_JOYSTICK = 0x04;
-static constexpr uint8_t CHAIN_DEVICE_UNIT_CHAINBUS = 0x06;
-static constexpr uint8_t CHAIN_GPIO_INPUT_INIT = 0x40;
-static constexpr uint8_t CHAIN_GPIO_READ_LEVEL = 0x41;
-static constexpr uint8_t CHAIN_GPIO_PIN_1 = 0x01;
-static constexpr uint8_t CHAIN_GPIO_PIN_2 = 0x02;
-static constexpr uint8_t CHAIN_GPIO_PULL_DOWN = 0x01;
-static constexpr uint8_t CHAIN_OPERATION_SUCCESS = 0x01;
-static constexpr gpio_num_t DUAL_BUTTON_RED_PIN = GPIO_NUM_1;
-static constexpr gpio_num_t DUAL_BUTTON_BLUE_PIN = GPIO_NUM_2;
-static const std::string TAG = "ExternalInput";
+static constexpr uint8_t JOYSTICK2_BUTTON_REG                 = 0x20;
+static constexpr uint8_t UNIT_ENCODER_ADDR                    = 0x40;
+static constexpr uint8_t UNIT_ENCODER_VALUE_REG               = 0x10;
+static constexpr uint8_t UNIT_ENCODER_BUTTON_REG              = 0x20;
+static constexpr uint8_t BYTE_BUTTON_ADDR                     = 0x47;
+static constexpr uint8_t BYTE_BUTTON_STATUS_8BYTE_REG         = 0x60;
+static constexpr int JOYSTICK_UNIT_CENTER                     = 128;
+static constexpr int JOYSTICK_UNIT_DEAD_ZONE                  = 38;
+static constexpr int JOYSTICK2_DEAD_ZONE                      = 24;
+static constexpr uart_port_t CHAIN_UART                       = UART_NUM_1;
+static constexpr int CHAIN_RX_A                               = 1;
+static constexpr int CHAIN_TX_A                               = 2;
+static constexpr int CHAIN_RX_B                               = 2;
+static constexpr int CHAIN_TX_B                               = 1;
+static constexpr uint8_t CHAIN_DEVICE_ENCODER                 = 0x01;
+static constexpr uint8_t CHAIN_DEVICE_JOYSTICK                = 0x04;
+static constexpr uint8_t CHAIN_DEVICE_UNIT_CHAINBUS           = 0x06;
+static constexpr uint8_t CHAIN_ENCODER_READ_DELTA             = 0x11;
+static constexpr uint8_t CHAIN_ENCODER_READ_BUTTON            = 0xE1;
+static constexpr uint8_t CHAIN_GPIO_INPUT_INIT                = 0x40;
+static constexpr uint8_t CHAIN_GPIO_READ_LEVEL                = 0x41;
+static constexpr uint8_t CHAIN_GPIO_PIN_1                     = 0x01;
+static constexpr uint8_t CHAIN_GPIO_PIN_2                     = 0x02;
+static constexpr uint8_t CHAIN_GPIO_PULL_DOWN                 = 0x01;
+static constexpr uint8_t CHAIN_OPERATION_SUCCESS              = 0x01;
+static constexpr gpio_num_t DUAL_BUTTON_RED_PIN               = GPIO_NUM_1;
+static constexpr gpio_num_t DUAL_BUTTON_BLUE_PIN              = GPIO_NUM_2;
+static const std::string TAG                                  = "ExternalInput";
 
 void ExternalInput::init()
 {
@@ -50,32 +56,37 @@ void ExternalInput::init()
 
 void ExternalInput::update(uint32_t now)
 {
-    _pressed = 0;
-    _released = 0;
+    _pressed          = 0;
+    _released         = 0;
+    _encoder_delta    = 0;
+    _encoder_pressed  = false;
+    _encoder_released = false;
     if (_paused) {
-        _buttons = 0;
-        _connected = false;
+        _buttons        = 0;
+        _encoder_button = false;
+        _connected      = false;
         return;
     }
-    const uint32_t pollInterval = _joystick_type == JoystickType::ChainJoystick
-                                      ? CHAIN_INPUT_POLL_INTERVAL_MS
-                                      : EXTERNAL_INPUT_POLL_INTERVAL_MS;
+    const uint32_t pollInterval =
+        _joystick_type == JoystickType::ChainJoystick || _encoder_type == EncoderType::ChainEncoder
+            ? CHAIN_INPUT_POLL_INTERVAL_MS
+            : EXTERNAL_INPUT_POLL_INTERVAL_MS;
     if (now - _last_poll < pollInterval) {
         return;
     }
     _last_poll = now;
 
-    uint8_t buttons = 0;
+    uint8_t buttons      = 0;
     const bool connected = read(buttons, now);
     if (!connected) {
         buttons = 0;
     }
 
     const uint8_t changed = buttons ^ _buttons;
-    _pressed = changed & buttons;
-    _released = changed & _buttons;
-    _buttons = buttons;
-    _connected = connected;
+    _pressed              = changed & buttons;
+    _released             = changed & _buttons;
+    _buttons              = buttons;
+    _connected            = connected;
 }
 
 void ExternalInput::probe(uint32_t now)
@@ -90,28 +101,29 @@ void ExternalInput::setPaused(bool paused)
 {
     _paused = paused;
     if (!paused) {
-        _last_probe = 0;
+        _last_probe  = 0;
         _scan_logged = false;
         return;
     }
 
-    _buttons = 0;
-    _pressed = 0;
-    _released = 0;
-    _connected = false;
+    _buttons          = 0;
+    _pressed          = 0;
+    _released         = 0;
+    _encoder_delta    = 0;
+    _encoder_button   = false;
+    _encoder_pressed  = false;
+    _encoder_released = false;
+    _connected        = false;
 }
 
 void ExternalInput::loadSettings(Settings& settings)
 {
-    _settings = &settings;
-    _flip_x = settings.GetBool("ext_flip_x", false);
-    _flip_y = settings.GetBool("ext_flip_y", false);
+    _settings  = &settings;
+    _flip_x    = settings.GetBool("ext_flip_x", false);
+    _flip_y    = settings.GetBool("ext_flip_y", false);
     _swap_axes = settings.GetBool("ext_swap_axes", false);
-    mclog::tagInfo(TAG,
-                   "direction transform: flip_x={} flip_y={} swap_axes={}",
-                   _flip_x ? "yes" : "no",
-                   _flip_y ? "yes" : "no",
-                   _swap_axes ? "yes" : "no");
+    mclog::tagInfo(TAG, "direction transform: flip_x={} flip_y={} swap_axes={}", _flip_x ? "yes" : "no",
+                   _flip_y ? "yes" : "no", _swap_axes ? "yes" : "no");
 }
 
 void ExternalInput::setDirectionTransform(bool flipX, bool flipY, bool swapAxes)
@@ -119,15 +131,12 @@ void ExternalInput::setDirectionTransform(bool flipX, bool flipY, bool swapAxes)
     if (_flip_x == flipX && _flip_y == flipY && _swap_axes == swapAxes) {
         return;
     }
-    _flip_x = flipX;
-    _flip_y = flipY;
+    _flip_x    = flipX;
+    _flip_y    = flipY;
     _swap_axes = swapAxes;
     saveDirectionSettings();
-    mclog::tagInfo(TAG,
-                   "direction transform set: flip_x={} flip_y={} swap_axes={}",
-                   _flip_x ? "yes" : "no",
-                   _flip_y ? "yes" : "no",
-                   _swap_axes ? "yes" : "no");
+    mclog::tagInfo(TAG, "direction transform set: flip_x={} flip_y={} swap_axes={}", _flip_x ? "yes" : "no",
+                   _flip_y ? "yes" : "no", _swap_axes ? "yes" : "no");
 }
 
 void ExternalInput::toggleFlipX()
@@ -148,12 +157,12 @@ void ExternalInput::toggleSwapAxes()
 bool ExternalInput::read(uint8_t& buttons, uint32_t now)
 {
     buttons = 0;
-    if (_joystick_type == JoystickType::None && !_byte_buttons_connected && !_dual_button_connected &&
-        now - _last_probe >= EXTERNAL_INPUT_PROBE_INTERVAL_MS) {
+    if (_joystick_type == JoystickType::None && _encoder_type == EncoderType::None && !_byte_buttons_connected &&
+        !_dual_button_connected && now - _last_probe >= EXTERNAL_INPUT_PROBE_INTERVAL_MS) {
         probeBus(now);
     }
 
-    bool connected = false;
+    bool connected          = false;
     uint8_t joystickButtons = 0;
     if (_joystick_type == JoystickType::JoystickUnit) {
         if (readJoystickUnit(joystickButtons)) {
@@ -177,9 +186,25 @@ bool ExternalInput::read(uint8_t& buttons, uint32_t now)
             connected = true;
         } else {
             mclog::tagWarn(TAG, "chain joystick read failed");
-            _joystick_type = JoystickType::None;
+            _joystick_type        = JoystickType::None;
             _chain_joystick_index = 0;
-            _chain_uart_ready = false;
+            if (_encoder_type != EncoderType::ChainEncoder && !_dual_button_connected) {
+                _chain_uart_ready = false;
+            }
+        }
+    }
+
+    if (_encoder_type != EncoderType::None) {
+        if (readEncoder()) {
+            connected = true;
+        } else {
+            mclog::tagWarn(TAG, "encoder read failed");
+            _encoder_type                = EncoderType::None;
+            _chain_encoder_index         = 0;
+            _unit_encoder_has_last_value = false;
+            if (_joystick_type != JoystickType::ChainJoystick && !_dual_button_connected) {
+                _chain_uart_ready = false;
+            }
         }
     }
 
@@ -202,7 +227,7 @@ bool ExternalInput::read(uint8_t& buttons, uint32_t now)
         } else {
             mclog::tagWarn(TAG, "dual buttons read failed");
             _dual_button_connected = false;
-            _chain_bus_index = 0;
+            _chain_bus_index       = 0;
         }
     }
 
@@ -216,25 +241,30 @@ bool ExternalInput::read(uint8_t& buttons, uint32_t now)
 
 void ExternalInput::probeBus(uint32_t now)
 {
-    const auto previousJoystick = _joystick_type;
-    const bool previousButtons = _byte_buttons_connected;
+    const auto previousJoystick    = _joystick_type;
+    const auto previousEncoder     = _encoder_type;
+    const bool previousButtons     = _byte_buttons_connected;
     const bool previousDualButtons = _dual_button_connected;
-    auto* previousBus = _i2c;
-    const int previousChainRx = _chain_rx_pin;
-    const int previousChainTx = _chain_tx_pin;
+    auto* previousBus              = _i2c;
+    const int previousChainRx      = _chain_rx_pin;
+    const int previousChainTx      = _chain_tx_pin;
 
-    _i2c = nullptr;
-    _joystick_type = JoystickType::None;
-    _byte_buttons_connected = false;
-    _dual_button_connected = false;
-    _chain_rx_pin = -1;
-    _chain_tx_pin = -1;
-    _chain_count = 0;
-    _chain_joystick_index = 0;
-    _chain_bus_index = 0;
-    _chain_uart_ready = false;
-    _chain_read_failures = 0;
-    _chain_bus_read_failures = 0;
+    _i2c                         = nullptr;
+    _joystick_type               = JoystickType::None;
+    _encoder_type                = EncoderType::None;
+    _byte_buttons_connected      = false;
+    _dual_button_connected       = false;
+    _chain_rx_pin                = -1;
+    _chain_tx_pin                = -1;
+    _chain_count                 = 0;
+    _chain_joystick_index        = 0;
+    _chain_encoder_index         = 0;
+    _chain_bus_index             = 0;
+    _chain_uart_ready            = false;
+    _chain_read_failures         = 0;
+    _encoder_read_failures       = 0;
+    _chain_bus_read_failures     = 0;
+    _unit_encoder_has_last_value = false;
     uart_driver_delete(CHAIN_UART);
 
     M5.Ex_I2C.begin();
@@ -249,20 +279,17 @@ void ExternalInput::probeBus(uint32_t now)
     }
     _last_probe = now;
 
-    const bool stateChanged = previousJoystick != _joystick_type ||
+    const bool stateChanged = previousJoystick != _joystick_type || previousEncoder != _encoder_type ||
                               previousButtons != _byte_buttons_connected ||
-                              previousDualButtons != _dual_button_connected ||
-                              previousBus != _i2c ||
-                              previousChainRx != _chain_rx_pin ||
-                              previousChainTx != _chain_tx_pin;
-    const bool shouldLogScan = stateChanged ||
-                               !_scan_logged ||
-                               now - _last_scan_log >= EXTERNAL_INPUT_SCAN_LOG_INTERVAL_MS;
+                              previousDualButtons != _dual_button_connected || previousBus != _i2c ||
+                              previousChainRx != _chain_rx_pin || previousChainTx != _chain_tx_pin;
+    const bool shouldLogScan =
+        stateChanged || !_scan_logged || now - _last_scan_log >= EXTERNAL_INPUT_SCAN_LOG_INTERVAL_MS;
     if (!shouldLogScan) {
         return;
     }
 
-    _scan_logged = true;
+    _scan_logged   = true;
     _last_scan_log = now;
 
     const char* joystickName = "none";
@@ -273,17 +300,28 @@ void ExternalInput::probeBus(uint32_t now)
     } else if (_joystick_type == JoystickType::ChainJoystick) {
         joystickName = "chain-joystick";
     }
+    const char* encoderName = "none";
+    if (_encoder_type == EncoderType::UnitEncoder) {
+        encoderName = "unit-encoder";
+    } else if (_encoder_type == EncoderType::ChainEncoder) {
+        encoderName = "chain-encoder";
+    }
 
-    mclog::tagInfo(TAG,
-                   "external i2c scan: ex=[{}] in=[{}]",
-                   _joystick_type == JoystickType::ChainJoystick ? "skip-uart" : scanBus(M5.Ex_I2C),
+    mclog::tagInfo(TAG, "external i2c scan: ex=[{}] in=[{}]",
+                   (_joystick_type == JoystickType::ChainJoystick || _encoder_type == EncoderType::ChainEncoder)
+                       ? "skip-uart"
+                       : scanBus(M5.Ex_I2C),
                    "skip");
-    mclog::tagInfo(TAG,
-                   "external input: bus={} joystick={} byte_buttons={} chain_count={}",
-                   _i2c == &M5.Ex_I2C ? "ex-i2c" : (_joystick_type == JoystickType::ChainJoystick ? "ex-uart" : "none"),
-                   joystickName,
-                   _byte_buttons_connected ? "yes" : (_dual_button_connected ? (_chain_bus_index ? "chainbus-dual" : "dual-gpio") : "no"),
-                   _chain_count);
+    mclog::tagInfo(
+        TAG, "external input: bus={} joystick={} encoder={} byte_buttons={} chain_count={}",
+        _i2c == &M5.Ex_I2C
+            ? "ex-i2c"
+            : ((_joystick_type == JoystickType::ChainJoystick || _encoder_type == EncoderType::ChainEncoder) ? "ex-uart"
+                                                                                                             : "none"),
+        joystickName, encoderName,
+        _byte_buttons_connected ? "yes"
+                                : (_dual_button_connected ? (_chain_bus_index ? "chainbus-dual" : "dual-gpio") : "no"),
+        _chain_count);
 }
 
 bool ExternalInput::tryBus(m5::I2C_Class& bus)
@@ -295,13 +333,15 @@ bool ExternalInput::tryBus(m5::I2C_Class& bus)
         joystick = JoystickType::JoystickUnit;
     }
 
+    const bool unitEncoder = bus.scanID(UNIT_ENCODER_ADDR, EXTERNAL_INPUT_I2C_FREQ);
     const bool byteButtons = bus.scanID(BYTE_BUTTON_ADDR, EXTERNAL_INPUT_I2C_FREQ);
-    if (joystick == JoystickType::None && !byteButtons) {
+    if (joystick == JoystickType::None && !unitEncoder && !byteButtons) {
         return false;
     }
 
-    _i2c = &bus;
-    _joystick_type = joystick;
+    _i2c                    = &bus;
+    _joystick_type          = joystick;
+    _encoder_type           = unitEncoder ? EncoderType::UnitEncoder : EncoderType::None;
     _byte_buttons_connected = byteButtons;
     return true;
 }
@@ -310,45 +350,48 @@ bool ExternalInput::tryChainBus(int rxPin, int txPin)
 {
     initChainUart(rxPin, txPin);
 
-    uint8_t sendNum = 0;
+    uint8_t sendNum      = 0;
     uint8_t response[64] = {};
-    size_t responseSize = sizeof(response);
+    size_t responseSize  = sizeof(response);
     if (!chainCommand(0xFF, 0xFE, &sendNum, 1, response, responseSize)) {
         return false;
     }
     const uint8_t* data = nullptr;
-    size_t dataSize = 0;
+    size_t dataSize     = 0;
     if (!parseChainValue(0xFE, response, responseSize, data, dataSize) || dataSize < 1 || data[0] == 0) {
         return false;
     }
 
     const uint8_t chainCount = data[0];
-    bool found = false;
-    _chain_count = chainCount;
-    _chain_rx_pin = rxPin;
-    _chain_tx_pin = txPin;
-    _chain_uart_ready = true;
+    bool found               = false;
+    _chain_count             = chainCount;
+    _chain_rx_pin            = rxPin;
+    _chain_tx_pin            = txPin;
+    _chain_uart_ready        = true;
 
     for (uint8_t id = 1; id <= chainCount; ++id) {
         responseSize = sizeof(response);
         if (!chainCommand(id, 0xFB, nullptr, 0, response, responseSize) ||
-            !parseChainValue(0xFB, response, responseSize, data, dataSize) ||
-            dataSize < 2) {
+            !parseChainValue(0xFB, response, responseSize, data, dataSize) || dataSize < 2) {
             mclog::tagWarn(TAG, "chain device {} type read failed", id);
             continue;
         }
 
         const uint16_t deviceType = static_cast<uint16_t>(data[0] | (data[1] << 8));
         mclog::tagInfo(TAG, "chain device {} type=0x{:04X}", id, deviceType);
-        if (deviceType == CHAIN_DEVICE_JOYSTICK && _chain_joystick_index == 0) {
-            _joystick_type = JoystickType::ChainJoystick;
+        if (deviceType == CHAIN_DEVICE_ENCODER && _chain_encoder_index == 0) {
+            _encoder_type        = EncoderType::ChainEncoder;
+            _chain_encoder_index = id;
+            found                = true;
+        } else if (deviceType == CHAIN_DEVICE_JOYSTICK && _chain_joystick_index == 0) {
+            _joystick_type        = JoystickType::ChainJoystick;
             _chain_joystick_index = id;
-            found = true;
+            found                 = true;
         } else if (deviceType == CHAIN_DEVICE_UNIT_CHAINBUS && _chain_bus_index == 0) {
             _chain_bus_index = id;
             if (initChainBusButtons()) {
                 _dual_button_connected = true;
-                found = true;
+                found                  = true;
             } else {
                 _chain_bus_index = 0;
             }
@@ -356,20 +399,17 @@ bool ExternalInput::tryChainBus(int rxPin, int txPin)
     }
 
     if (!found) {
-        _chain_count = 0;
-        _chain_rx_pin = -1;
-        _chain_tx_pin = -1;
-        _chain_uart_ready = false;
+        _chain_count         = 0;
+        _chain_rx_pin        = -1;
+        _chain_tx_pin        = -1;
+        _encoder_type        = EncoderType::None;
+        _chain_encoder_index = 0;
+        _chain_uart_ready    = false;
         return false;
     }
 
-    mclog::tagInfo(TAG,
-                   "chain input detected: count={} joystick_id={} chainbus_id={} rx={} tx={}",
-                   chainCount,
-                   _chain_joystick_index,
-                   _chain_bus_index,
-                   rxPin,
-                   txPin);
+    mclog::tagInfo(TAG, "chain input detected: count={} joystick_id={} encoder_id={} chainbus_id={} rx={} tx={}",
+                   chainCount, _chain_joystick_index, _chain_encoder_index, _chain_bus_index, rxPin, txPin);
     return true;
 }
 
@@ -377,13 +417,13 @@ void ExternalInput::initChainUart(int rxPin, int txPin)
 {
     uart_driver_delete(CHAIN_UART);
     uart_config_t config = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .baud_rate           = 115200,
+        .data_bits           = UART_DATA_8_BITS,
+        .parity              = UART_PARITY_DISABLE,
+        .stop_bits           = UART_STOP_BITS_1,
+        .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
         .rx_flow_ctrl_thresh = 0,
-        .source_clk = UART_SCLK_DEFAULT,
+        .source_clk          = UART_SCLK_DEFAULT,
     };
     uart_driver_install(CHAIN_UART, 1024, 0, 0, nullptr, 0);
     uart_param_config(CHAIN_UART, &config);
@@ -395,16 +435,14 @@ void ExternalInput::initDualButtons()
 {
     gpio_config_t config = {
         .pin_bit_mask = (1ULL << DUAL_BUTTON_RED_PIN) | (1ULL << DUAL_BUTTON_BLUE_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
     };
     gpio_config(&config);
     _dual_button_connected = true;
-    mclog::tagInfo(TAG,
-                   "dual button gpio enabled: red=GPIO{}->B blue=GPIO{}->A",
-                   static_cast<int>(DUAL_BUTTON_RED_PIN),
+    mclog::tagInfo(TAG, "dual button gpio enabled: red=GPIO{}->B blue=GPIO{}->A", static_cast<int>(DUAL_BUTTON_RED_PIN),
                    static_cast<int>(DUAL_BUTTON_BLUE_PIN));
 }
 
@@ -415,32 +453,30 @@ bool ExternalInput::initChainBusButtons()
     }
 
     uint8_t response[16] = {};
-    size_t responseSize = sizeof(response);
-    const uint8_t* data = nullptr;
-    size_t dataSize = 0;
+    size_t responseSize  = sizeof(response);
+    const uint8_t* data  = nullptr;
+    size_t dataSize      = 0;
 
     uint8_t gpio1Config[2] = {CHAIN_GPIO_PIN_1, CHAIN_GPIO_PULL_DOWN};
-    if (!chainCommand(_chain_bus_index, CHAIN_GPIO_INPUT_INIT, gpio1Config, sizeof(gpio1Config), response, responseSize) ||
-        !parseChainValue(CHAIN_GPIO_INPUT_INIT, response, responseSize, data, dataSize) ||
-        dataSize < 1 ||
+    if (!chainCommand(_chain_bus_index, CHAIN_GPIO_INPUT_INIT, gpio1Config, sizeof(gpio1Config), response,
+                      responseSize) ||
+        !parseChainValue(CHAIN_GPIO_INPUT_INIT, response, responseSize, data, dataSize) || dataSize < 1 ||
         data[0] != CHAIN_OPERATION_SUCCESS) {
         mclog::tagWarn(TAG, "chainbus {} gpio1 input init failed", _chain_bus_index);
         return false;
     }
 
-    responseSize = sizeof(response);
+    responseSize           = sizeof(response);
     uint8_t gpio2Config[2] = {CHAIN_GPIO_PIN_2, CHAIN_GPIO_PULL_DOWN};
-    if (!chainCommand(_chain_bus_index, CHAIN_GPIO_INPUT_INIT, gpio2Config, sizeof(gpio2Config), response, responseSize) ||
-        !parseChainValue(CHAIN_GPIO_INPUT_INIT, response, responseSize, data, dataSize) ||
-        dataSize < 1 ||
+    if (!chainCommand(_chain_bus_index, CHAIN_GPIO_INPUT_INIT, gpio2Config, sizeof(gpio2Config), response,
+                      responseSize) ||
+        !parseChainValue(CHAIN_GPIO_INPUT_INIT, response, responseSize, data, dataSize) || dataSize < 1 ||
         data[0] != CHAIN_OPERATION_SUCCESS) {
         mclog::tagWarn(TAG, "chainbus {} gpio2 input init failed", _chain_bus_index);
         return false;
     }
 
-    mclog::tagInfo(TAG,
-                   "chainbus dual button enabled: id={} gpio1->B gpio2->A",
-                   _chain_bus_index);
+    mclog::tagInfo(TAG, "chainbus dual button enabled: id={} gpio1->B gpio2->A", _chain_bus_index);
     return true;
 }
 
@@ -452,12 +488,11 @@ bool ExternalInput::chainBusReadInput(uint8_t gpio, uint8_t& level)
     }
 
     uint8_t response[16] = {};
-    size_t responseSize = sizeof(response);
-    const uint8_t* data = nullptr;
-    size_t dataSize = 0;
+    size_t responseSize  = sizeof(response);
+    const uint8_t* data  = nullptr;
+    size_t dataSize      = 0;
     if (!chainCommand(_chain_bus_index, CHAIN_GPIO_READ_LEVEL, &gpio, 1, response, responseSize) ||
-        !parseChainValue(CHAIN_GPIO_READ_LEVEL, response, responseSize, data, dataSize) ||
-        dataSize < 2 ||
+        !parseChainValue(CHAIN_GPIO_READ_LEVEL, response, responseSize, data, dataSize) || dataSize < 2 ||
         data[0] != CHAIN_OPERATION_SUCCESS) {
         return false;
     }
@@ -466,12 +501,8 @@ bool ExternalInput::chainBusReadInput(uint8_t gpio, uint8_t& level)
     return true;
 }
 
-bool ExternalInput::chainCommand(uint8_t index,
-                                 uint8_t command,
-                                 const uint8_t* data,
-                                 size_t dataSize,
-                                 uint8_t* response,
-                                 size_t& responseSize)
+bool ExternalInput::chainCommand(uint8_t index, uint8_t command, const uint8_t* data, size_t dataSize,
+                                 uint8_t* response, size_t& responseSize)
 {
     uart_flush(CHAIN_UART);
     chainWritePacket(index, command, data, dataSize);
@@ -485,9 +516,9 @@ bool ExternalInput::chainReadPacket(uint8_t* response, size_t& responseSize, uin
     }
 
     const auto start = M5.millis();
-    size_t pos = 0;
+    size_t pos       = 0;
     while (M5.millis() - start < timeoutMs) {
-        uint8_t byte = 0;
+        uint8_t byte  = 0;
         const int got = uart_read_bytes(CHAIN_UART, &byte, 1, pdMS_TO_TICKS(4));
         if (got <= 0) {
             continue;
@@ -508,7 +539,7 @@ bool ExternalInput::chainReadPacket(uint8_t* response, size_t& responseSize, uin
 
         if (pos >= 4) {
             const size_t length = response[2] | (response[3] << 8);
-            const size_t total = 2 + 2 + length + 2;
+            const size_t total  = 2 + 2 + length + 2;
             if (total > responseSize) {
                 pos = 0;
                 continue;
@@ -530,9 +561,9 @@ bool ExternalInput::chainReadPacket(uint8_t* response, size_t& responseSize, uin
 
 void ExternalInput::chainWritePacket(uint8_t index, uint8_t command, const uint8_t* data, size_t dataSize)
 {
-    uint8_t frame[64] = {};
+    uint8_t frame[64]   = {};
     const size_t length = 3 + dataSize;
-    const size_t total = 2 + 2 + length + 2;
+    const size_t total  = 2 + 2 + length + 2;
     if (total > sizeof(frame)) {
         return;
     }
@@ -553,13 +584,10 @@ void ExternalInput::chainWritePacket(uint8_t index, uint8_t command, const uint8
     uart_wait_tx_done(CHAIN_UART, pdMS_TO_TICKS(20));
 }
 
-bool ExternalInput::parseChainValue(uint8_t command,
-                                    const uint8_t* response,
-                                    size_t responseSize,
-                                    const uint8_t*& data,
+bool ExternalInput::parseChainValue(uint8_t command, const uint8_t* response, size_t responseSize, const uint8_t*& data,
                                     size_t& dataSize) const
 {
-    data = nullptr;
+    data     = nullptr;
     dataSize = 0;
     if (!response || responseSize < 9 || response[5] != command) {
         return false;
@@ -568,7 +596,7 @@ bool ExternalInput::parseChainValue(uint8_t command,
     if (length < 3 || 2 + 2 + length + 2 != responseSize) {
         return false;
     }
-    data = &response[6];
+    data     = &response[6];
     dataSize = length - 3;
     return true;
 }
@@ -643,10 +671,7 @@ bool ExternalInput::readJoystick2(uint8_t& buttons)
     }
 
     uint8_t offsets[2] = {};
-    if (!_i2c->readRegister(JOYSTICK2_ADDR,
-                            JOYSTICK2_OFFSET_ADC_VALUE_8BITS_REG,
-                            offsets,
-                            sizeof(offsets),
+    if (!_i2c->readRegister(JOYSTICK2_ADDR, JOYSTICK2_OFFSET_ADC_VALUE_8BITS_REG, offsets, sizeof(offsets),
                             EXTERNAL_INPUT_I2C_FREQ)) {
         return false;
     }
@@ -665,8 +690,7 @@ bool ExternalInput::readJoystick2(uint8_t& buttons)
     }
 
     uint8_t button = 1;
-    if (_i2c->readRegister(JOYSTICK2_ADDR, JOYSTICK2_BUTTON_REG, &button, 1, EXTERNAL_INPUT_I2C_FREQ) &&
-        button == 0) {
+    if (_i2c->readRegister(JOYSTICK2_ADDR, JOYSTICK2_BUTTON_REG, &button, 1, EXTERNAL_INPUT_I2C_FREQ) && button == 0) {
         buttons |= PAD_A;
     }
     return true;
@@ -680,12 +704,11 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
     }
 
     uint8_t response[64] = {};
-    size_t responseSize = sizeof(response);
-    const uint8_t* data = nullptr;
-    size_t dataSize = 0;
+    size_t responseSize  = sizeof(response);
+    const uint8_t* data  = nullptr;
+    size_t dataSize      = 0;
     if (!chainCommand(_chain_joystick_index, 0x35, nullptr, 0, response, responseSize) ||
-        !parseChainValue(0x35, response, responseSize, data, dataSize) ||
-        dataSize < 2) {
+        !parseChainValue(0x35, response, responseSize, data, dataSize) || dataSize < 2) {
         ++_chain_read_failures;
         if (_chain_read_failures < 3) {
             mclog::tagWarn(TAG, "chain joystick axis read miss {}/3", _chain_read_failures);
@@ -710,11 +733,91 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
 
     responseSize = sizeof(response);
     if (chainCommand(_chain_joystick_index, 0xE1, nullptr, 0, response, responseSize) &&
-        parseChainValue(0xE1, response, responseSize, data, dataSize) &&
-        dataSize >= 1 &&
-        data[0] != 0) {
+        parseChainValue(0xE1, response, responseSize, data, dataSize) && dataSize >= 1 && data[0] != 0) {
         buttons |= PAD_A;
     }
+    return true;
+}
+
+bool ExternalInput::readEncoder()
+{
+    if (_encoder_type == EncoderType::UnitEncoder) {
+        return readUnitEncoder();
+    }
+    if (_encoder_type == EncoderType::ChainEncoder) {
+        return readChainEncoder();
+    }
+    return false;
+}
+
+bool ExternalInput::readUnitEncoder()
+{
+    if (!_i2c) {
+        return false;
+    }
+
+    uint8_t valueBytes[2] = {};
+    if (!_i2c->readRegister(UNIT_ENCODER_ADDR, UNIT_ENCODER_VALUE_REG, valueBytes, sizeof(valueBytes),
+                            EXTERNAL_INPUT_I2C_FREQ)) {
+        return false;
+    }
+
+    const int16_t value = static_cast<int16_t>(valueBytes[0] | (valueBytes[1] << 8));
+    if (_unit_encoder_has_last_value) {
+        const int32_t delta = static_cast<int32_t>(value) - static_cast<int32_t>(_encoder_value);
+        _encoder_delta      = static_cast<int16_t>(std::max<int32_t>(-32768, std::min<int32_t>(32767, delta)));
+    } else {
+        _unit_encoder_has_last_value = true;
+        _encoder_delta               = 0;
+    }
+    _encoder_value = value;
+
+    uint8_t button = 0;
+    if (!_i2c->readRegister(UNIT_ENCODER_ADDR, UNIT_ENCODER_BUTTON_REG, &button, 1, EXTERNAL_INPUT_I2C_FREQ)) {
+        return false;
+    }
+
+    const bool pressed = button != 0;
+    _encoder_pressed   = pressed && !_encoder_button;
+    _encoder_released  = !pressed && _encoder_button;
+    _encoder_button    = pressed;
+    return true;
+}
+
+bool ExternalInput::readChainEncoder()
+{
+    if (!_chain_uart_ready || _chain_encoder_index == 0) {
+        return false;
+    }
+
+    uint8_t response[64] = {};
+    size_t responseSize  = sizeof(response);
+    const uint8_t* data  = nullptr;
+    size_t dataSize      = 0;
+    if (!chainCommand(_chain_encoder_index, CHAIN_ENCODER_READ_DELTA, nullptr, 0, response, responseSize) ||
+        !parseChainValue(CHAIN_ENCODER_READ_DELTA, response, responseSize, data, dataSize) || dataSize < 2) {
+        ++_encoder_read_failures;
+        if (_encoder_read_failures < 3) {
+            mclog::tagWarn(TAG, "chain encoder delta read miss {}/3", _encoder_read_failures);
+            return true;
+        }
+        return false;
+    }
+    _encoder_read_failures = 0;
+
+    _encoder_delta = static_cast<int16_t>(data[0] | (data[1] << 8));
+    _encoder_value = static_cast<int16_t>(_encoder_value + _encoder_delta);
+
+    responseSize = sizeof(response);
+    if (!chainCommand(_chain_encoder_index, CHAIN_ENCODER_READ_BUTTON, nullptr, 0, response, responseSize) ||
+        !parseChainValue(CHAIN_ENCODER_READ_BUTTON, response, responseSize, data, dataSize) || dataSize < 1) {
+        return true;
+    }
+
+    const bool pressed = data[0] != 0;
+    _encoder_pressed   = pressed && !_encoder_button;
+    _encoder_released  = !pressed && _encoder_button;
+    _encoder_button    = pressed;
     return true;
 }
 
@@ -722,10 +825,9 @@ bool ExternalInput::readDualButtons(uint8_t& buttons)
 {
     buttons = 0;
     if (_chain_bus_index != 0) {
-        uint8_t red = 0;
+        uint8_t red  = 0;
         uint8_t blue = 0;
-        if (!chainBusReadInput(CHAIN_GPIO_PIN_1, red) ||
-            !chainBusReadInput(CHAIN_GPIO_PIN_2, blue)) {
+        if (!chainBusReadInput(CHAIN_GPIO_PIN_1, red) || !chainBusReadInput(CHAIN_GPIO_PIN_2, blue)) {
             ++_chain_bus_read_failures;
             if (_chain_bus_read_failures < 3) {
                 mclog::tagWarn(TAG, "chainbus dual button read miss {}/3", _chain_bus_read_failures);
@@ -809,10 +911,7 @@ bool ExternalInput::readByteButtons(uint8_t& buttons)
     }
 
     uint8_t status[8] = {};
-    if (!_i2c->readRegister(BYTE_BUTTON_ADDR,
-                            BYTE_BUTTON_STATUS_8BYTE_REG,
-                            status,
-                            sizeof(status),
+    if (!_i2c->readRegister(BYTE_BUTTON_ADDR, BYTE_BUTTON_STATUS_8BYTE_REG, status, sizeof(status),
                             EXTERNAL_INPUT_I2C_FREQ)) {
         return false;
     }
