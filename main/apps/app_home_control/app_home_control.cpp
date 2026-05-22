@@ -123,6 +123,9 @@ void AppHomeControl::startConnections()
         setStatus("Starting BLE");
         render();
         GetHAL().bleControlInit();
+        if (!GetHAL().bleKeyboardIsConnected()) {
+            setStatus("Pair MacCtl");
+        }
     }
     enterControlIfReady();
 }
