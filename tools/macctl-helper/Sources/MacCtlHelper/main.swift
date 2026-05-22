@@ -17,7 +17,9 @@ private let advCtlSetInputCommand: UInt8 = 0x81
 private let advCtlAudioTestCommand: UInt8 = 0x82
 private let advCtlResetConfigCommand: UInt8 = 0x83
 private let advCtlTimeSyncCommand: UInt8 = 0x84
+private let advCtlSetPowerCommand: UInt8 = 0x86
 private let advCtlConfigReport: UInt8 = 0x90
+private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
 private let hidKeyF13: UInt8 = 0x68
 private let hidKeyF14: UInt8 = 0x69
@@ -158,12 +160,34 @@ private final class JoystickSettings {
         }
     }
 
+    var screenTimeoutSeconds: Int {
+        get {
+            let saved = defaults.integer(forKey: "advctl.screenTimeoutSeconds")
+            return saved == 0 ? 30 : min(255, max(5, saved))
+        }
+        set { defaults.set(min(255, max(5, newValue)), forKey: "advctl.screenTimeoutSeconds") }
+    }
+
+    var powerSaveTimeoutMinutes: Int {
+        get {
+            let saved = defaults.integer(forKey: "advctl.powerSaveTimeoutMinutes")
+            return saved == 0 ? 3 : min(255, max(1, saved))
+        }
+        set { defaults.set(min(255, max(1, newValue)), forKey: "advctl.powerSaveTimeoutMinutes") }
+    }
+
     func applyHardware(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
         swapAxes = (flags & 0x01) != 0
         invertX = (flags & 0x02) != 0
         invertY = (flags & 0x04) != 0
         self.sensitivity = Int(sensitivity)
         self.knobMode = Int(knobMode)
+        synchronize()
+    }
+
+    func applyPower(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8) {
+        self.screenTimeoutSeconds = Int(screenTimeoutSeconds)
+        self.powerSaveTimeoutMinutes = Int(powerSaveTimeoutMinutes)
         synchronize()
     }
 
@@ -177,6 +201,7 @@ private protocol ADVCtlBridgeDelegate: AnyObject {
     func bridgeDidReceive(command: MacCtlCommand)
     func bridgeDidReceiveKnobKey(_ keyCode: UInt8)
     func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8)
+    func bridgeDidReceivePowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8)
     func bridgeDidUpdateMessage(_ message: String)
 }
 
@@ -275,6 +300,14 @@ private final class ADVCtlBridge {
                 updateMessage("Set joystick settings failed: \(status)")
             }
         }
+    }
+
+    func sendPowerSettings(_ settings: JoystickSettings) {
+        sendControlPayload([advCtlSetPowerCommand,
+                            UInt8(settings.screenTimeoutSeconds),
+                            UInt8(settings.powerSaveTimeoutMinutes),
+                            0],
+                           successMessage: "Sent power settings to ADV")
     }
 
     func requestSettings() {
@@ -410,6 +443,14 @@ private final class ADVCtlBridge {
                                                                     knobMode: payload[3])
                 }
                 updateMessage("Hardware settings received")
+                return
+            }
+            if payload.count >= 4, payload[0] == advCtlPowerReport {
+                DispatchQueue.main.async {
+                    self.delegate?.bridgeDidReceivePowerSettings(screenTimeoutSeconds: payload[1],
+                                                                 powerSaveTimeoutMinutes: payload[2])
+                }
+                updateMessage("Power settings received")
                 return
             }
             updateMessage("Ignored unknown report: \(payload as NSData)")
@@ -599,6 +640,7 @@ private final class WaveformView: NSView {
 private final class SettingsWindowController: NSWindowController {
     private let settings: JoystickSettings
     var onSettingsChanged: (() -> Void)?
+    var onPowerSettingsChanged: (() -> Void)?
     var onAudioTestChanged: ((Bool) -> Void)?
     var onRefreshSettings: (() -> Void)?
     var onResetHardwareSettings: (() -> Void)?
@@ -618,6 +660,10 @@ private final class SettingsWindowController: NSWindowController {
     private let refreshButton = NSButton(title: "Refresh from ADV", target: nil, action: nil)
     private let waveformView = WaveformView(frame: .zero)
     private let recordButton = NSButton(title: "Activate Recording Test", target: nil, action: nil)
+    private let screenTimeoutSlider = NSSlider()
+    private let screenTimeoutValueLabel = NSTextField(labelWithString: "30s")
+    private let powerSaveSlider = NSSlider()
+    private let powerSaveValueLabel = NSTextField(labelWithString: "3m")
     private let tabView = NSTabView()
     private var sidebarButtons: [NSButton] = []
     private var audioTestActive = false
@@ -679,7 +725,7 @@ private final class SettingsWindowController: NSWindowController {
         brand.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addArrangedSubview(brand)
         sidebar.setCustomSpacing(14, after: brand)
-        for (index, title) in ["Status", "Pointer", "Knob", "Audio"].enumerated() {
+        for (index, title) in ["Status", "Pointer", "Knob", "Power", "Audio"].enumerated() {
             let button = sidebarButton(title, selected: index == 0)
             sidebarButtons.append(button)
             sidebar.addArrangedSubview(button)
@@ -716,6 +762,12 @@ private final class SettingsWindowController: NSWindowController {
                 controlRow("Defaults", resetButton),
             ]),
         ]))
+        tabView.addTabViewItem(tabItem("Power", groups: [
+            group("Power Save", rows: [
+                screenTimeoutRow(),
+                powerSaveTimeoutRow(),
+            ]),
+        ]))
         tabView.addTabViewItem(tabItem("Audio", groups: [
             group("Audio", rows: [
                 valueRow("Recording test", audioStateLabel),
@@ -747,6 +799,18 @@ private final class SettingsWindowController: NSWindowController {
         sensitivitySlider.allowsTickMarkValuesOnly = true
         sensitivitySlider.target = self
         sensitivitySlider.action = #selector(settingsChanged)
+        screenTimeoutSlider.minValue = 5
+        screenTimeoutSlider.maxValue = 120
+        screenTimeoutSlider.numberOfTickMarks = 24
+        screenTimeoutSlider.allowsTickMarkValuesOnly = true
+        screenTimeoutSlider.target = self
+        screenTimeoutSlider.action = #selector(powerSettingsChanged)
+        powerSaveSlider.minValue = 1
+        powerSaveSlider.maxValue = 30
+        powerSaveSlider.numberOfTickMarks = 30
+        powerSaveSlider.allowsTickMarkValuesOnly = true
+        powerSaveSlider.target = self
+        powerSaveSlider.action = #selector(powerSettingsChanged)
         recordButton.target = self
         recordButton.action = #selector(toggleAudioTest)
 
@@ -902,6 +966,30 @@ private final class SettingsWindowController: NSWindowController {
         return row("Pointer speed", trailing: stack)
     }
 
+    private func screenTimeoutRow() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.addArrangedSubview(screenTimeoutSlider)
+        stack.addArrangedSubview(screenTimeoutValueLabel)
+        screenTimeoutSlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        screenTimeoutValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        return row("Turn display off", trailing: stack)
+    }
+
+    private func powerSaveTimeoutRow() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.addArrangedSubview(powerSaveSlider)
+        stack.addArrangedSubview(powerSaveValueLabel)
+        powerSaveSlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        powerSaveValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        return row("Power save", trailing: stack)
+    }
+
     private func waveformRow() -> NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -943,6 +1031,10 @@ private final class SettingsWindowController: NSWindowController {
         sensitivitySlider.integerValue = settings.sensitivity
         sensitivityValueLabel.stringValue = settings.sensitivityLabel
         knobModePopup.selectItem(at: settings.knobMode)
+        screenTimeoutSlider.integerValue = settings.screenTimeoutSeconds
+        screenTimeoutValueLabel.stringValue = "\(settings.screenTimeoutSeconds)s"
+        powerSaveSlider.integerValue = settings.powerSaveTimeoutMinutes
+        powerSaveValueLabel.stringValue = "\(settings.powerSaveTimeoutMinutes)m"
         audioStateLabel.stringValue = audioTestActive ? "Active" : "Inactive"
         audioStateLabel.textColor = audioTestActive ? .systemBlue : .secondaryLabelColor
         recordButton.title = audioTestActive ? "Stop Recording Test" : "Activate Recording Test"
@@ -960,8 +1052,21 @@ private final class SettingsWindowController: NSWindowController {
         onSettingsChanged?()
     }
 
+    @objc private func powerSettingsChanged() {
+        settings.screenTimeoutSeconds = Int(round(screenTimeoutSlider.doubleValue))
+        settings.powerSaveTimeoutMinutes = Int(round(powerSaveSlider.doubleValue))
+        settings.synchronize()
+        refresh()
+        onPowerSettingsChanged?()
+    }
+
     func applyHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
         settings.applyHardware(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
+        refresh()
+    }
+
+    func applyPowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8) {
+        settings.applyPower(screenTimeoutSeconds: screenTimeoutSeconds, powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
         refresh()
     }
 
@@ -998,6 +1103,10 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settingsWindow.onSettingsChanged = { [weak self] in
             guard let self else { return }
             self.bridge.sendSettings(self.settings)
+        }
+        settingsWindow.onPowerSettingsChanged = { [weak self] in
+            guard let self else { return }
+            self.bridge.sendPowerSettings(self.settings)
         }
         settingsWindow.onAudioTestChanged = { [weak self] active in
             self?.bridge.sendAudioTest(active: active)
@@ -1050,6 +1159,13 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settings.applyHardware(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
         settingsWindow.applyHardwareSettings(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
         messageMenuItem.title = "Hardware settings received"
+    }
+
+    func bridgeDidReceivePowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8) {
+        settings.applyPower(screenTimeoutSeconds: screenTimeoutSeconds, powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
+        settingsWindow.applyPowerSettings(screenTimeoutSeconds: screenTimeoutSeconds,
+                                          powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
+        messageMenuItem.title = "Power settings received"
     }
 
     func bridgeDidUpdateMessage(_ message: String) {

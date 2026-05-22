@@ -47,6 +47,8 @@ private:
     int _selected_action           = 0;
     int _target_volume_percent     = 30;
     int _pointer_sensitivity       = 2;
+    uint32_t _screen_timeout_ms    = 30000;
+    uint32_t _power_save_timeout_ms = 180000;
     uint8_t _tv_power_addr         = 0x04;
     uint8_t _tv_power_cmd          = 0x08;
     uint32_t _last_status_refresh  = 0;
@@ -60,6 +62,7 @@ private:
     bool _auto_wifi_attempted      = false;
     bool _ble_start_requested      = false;
     bool _screen_off               = false;
+    bool _power_save_active        = false;
     bool _knob_scroll_mode         = false;
     bool _hold_left                = false;
     bool _hold_right               = false;
@@ -80,7 +83,8 @@ private:
     static constexpr uint32_t EXTERNAL_RENDER_MS = 250;
     static constexpr uint32_t SETUP_RENDER_MS    = 1000;
     static constexpr uint32_t DASHBOARD_RENDER_MS = 1000;
-    static constexpr uint32_t POWER_SAVE_MS      = 180000;
+    static constexpr uint32_t DEFAULT_SCREEN_TIMEOUT_MS = 30000;
+    static constexpr uint32_t DEFAULT_POWER_SAVE_TIMEOUT_MS = 180000;
     static constexpr int ACTION_COUNT            = 8;
     static constexpr size_t AUDIO_TEST_LENGTH    = 200;
     static constexpr size_t AUDIO_TEST_RATE      = 16000;
@@ -113,10 +117,13 @@ private:
     int pointerStep();
     std::string pointerSensitivityLabel() const;
     void adjustPointerSensitivity(int delta);
+    void loadPowerSettings();
     void markUserActivity();
     void updatePowerSave();
     void sleepDisplay();
     void wakeDisplay();
+    void enterPowerSave();
+    void exitPowerSave();
     void refreshHomePodState();
     void render();
     void renderSetup();

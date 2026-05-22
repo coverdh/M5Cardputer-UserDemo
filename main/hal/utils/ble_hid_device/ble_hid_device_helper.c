@@ -54,6 +54,7 @@ static const char *TAG = "ble_hid";
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 static TickType_t s_ble_hid_ready_after_tick        = 0;
 static bool s_ble_hid_notify_ready                  = false;
+static bool s_ble_hid_stack_ready                   = false;
 
 typedef struct {
     uint8_t map_index;
@@ -993,32 +994,42 @@ void _demo_app_main(void)
     ESP_LOGE(TAG, "Please turn on BT HID device or BLE!");
     return;
 #endif
-    ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
+    if (!s_ble_hid_stack_ready) {
         ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            ret = nvs_flash_init();
+        }
+        ESP_ERROR_CHECK(ret);
 
-    ESP_LOGI(TAG, "setting hid gap, mode:%d", HID_DEV_MODE);
-    ret = esp_hid_gap_init(HID_DEV_MODE);
-    ESP_ERROR_CHECK(ret);
+        ESP_LOGI(TAG, "setting hid gap, mode:%d", HID_DEV_MODE);
+        ret = esp_hid_gap_init(HID_DEV_MODE);
+        ESP_ERROR_CHECK(ret);
 
 #if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
 #if CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
-    ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_KEYBOARD, ble_hid_config.device_name);
+        ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_KEYBOARD, ble_hid_config.device_name);
 #elif CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
-    ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_MOUSE, ble_hid_config.device_name);
+        ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_MOUSE, ble_hid_config.device_name);
 #else
-    ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_GENERIC, ble_hid_config.device_name);
+        ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_GENERIC, ble_hid_config.device_name);
 #endif
-    ESP_ERROR_CHECK(ret);
+        ESP_ERROR_CHECK(ret);
 #if CONFIG_BT_BLE_ENABLED
-    if ((ret = esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler)) != ESP_OK) {
-        ESP_LOGE(TAG, "GATTS register callback failed: %d", ret);
+        if ((ret = esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler)) != ESP_OK) {
+            ESP_LOGE(TAG, "GATTS register callback failed: %d", ret);
+            return;
+        }
+#endif
+#endif
+        s_ble_hid_stack_ready = true;
+    }
+
+#if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
+    if (s_ble_hid_param.hid_dev) {
+        ESP_LOGI(TAG, "ble hid device already initialized");
         return;
     }
-#endif
     ESP_LOGI(TAG, "setting ble device");
     ESP_ERROR_CHECK(
         esp_hidd_dev_init(&ble_hid_config, ESP_HID_TRANSPORT_BLE, ble_hidd_event_callback, &s_ble_hid_param.hid_dev));
@@ -1066,6 +1077,29 @@ void ble_hid_device_helper_init(void)
     _demo_app_main();
 }
 
+void ble_hid_device_helper_stop(void)
+{
+#if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
+    if (!s_ble_hid_param.hid_dev) {
+        return;
+    }
+    ESP_LOGI(TAG, "stopping ble hid device");
+    ble_hid_task_shut_down();
+    esp_err_t ret = esp_hidd_dev_deinit(s_ble_hid_param.hid_dev);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ble hid deinit failed: %d", ret);
+        return;
+    }
+    s_ble_hid_param.hid_dev   = NULL;
+    s_ble_hid_keyboard_state  = BLE_HID_DEVICE_STATE_IDLE;
+    s_ble_hid_notify_ready    = false;
+    s_ble_hid_ready_after_tick = 0;
+    if (s_ble_hid_report_queue) {
+        xQueueReset(s_ble_hid_report_queue);
+    }
+#endif
+}
+
 void ble_hid_device_helper_send(uint8_t *buffer)
 {
     ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_KEYBOARD, BLE_HID_RPT_ID_KEYBOARD, buffer, 8, 8);
@@ -1101,6 +1135,12 @@ bool ble_hid_device_helper_send_macctl_play_pause(void)
 bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity, uint8_t knob_mode)
 {
     const uint8_t buffer[4] = {0x90, flags, sensitivity, knob_mode};
+    return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
+}
+
+bool ble_hid_device_helper_send_macctl_power_config(uint8_t screen_timeout_s, uint8_t power_save_timeout_min)
+{
+    const uint8_t buffer[4] = {0x91, screen_timeout_s, power_save_timeout_min, 0};
     return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
 }
 

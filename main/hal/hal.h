@@ -114,6 +114,7 @@ public:
 
     /* ----------------------------------- BLE ---------------------------------- */
     void bleControlInit();
+    void bleControlStop();
     void bleKeyboardInit();
     bool bleKeyboardIsConnected() const;
     void bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode);
@@ -125,6 +126,7 @@ public:
     bool bleMacCtlVolumeDelta(int8_t delta);
     bool bleMacCtlPlayPause();
     bool bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode);
+    bool bleMacCtlPowerConfig(uint8_t screenTimeoutSeconds, uint8_t powerSaveTimeoutMinutes);
     bool bleMacCtlIsConnected() const;
     bool bleMacCtlTimeSynced() const;
     bool bleConsumeAudioTestRequest(bool& active);

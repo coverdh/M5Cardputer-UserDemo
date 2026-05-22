@@ -43,6 +43,7 @@ void AppHomeControl::onOpen()
     _auto_wifi_attempted  = false;
     _ble_start_requested  = false;
     _screen_off           = false;
+    _power_save_active    = false;
     _last_user_activity   = GetHAL().millis();
     resetPointerHolds();
     setStatus("Enter starts BLE");
@@ -66,6 +67,12 @@ void AppHomeControl::onRunning()
         return;
     }
     updatePowerSave();
+    if (_screen_off) {
+        if (!_power_save_active) {
+            handleExternalInput();
+        }
+        return;
+    }
 
     if (_mode == Mode::Setup) {
         enterControlIfReady();
@@ -97,6 +104,7 @@ void AppHomeControl::onRunning()
 void AppHomeControl::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
+    exitPowerSave();
     if (_screen_off) {
         GetHAL().display.setBrightness(static_cast<uint8_t>(_display_brightness_before_sleep * 255 / 100));
         _screen_off = false;
@@ -123,6 +131,7 @@ void AppHomeControl::loadConfig()
     _pointer_sensitivity     = savedHalfStep >= 2 ? savedHalfStep : savedWholeStep * 2;
     _pointer_sensitivity     = std::max(2, std::min(6, _pointer_sensitivity));
     _knob_mode               = static_cast<uint8_t>(std::max<int32_t>(0, std::min<int32_t>(2, settings.GetInt("adv_knob_mode", 0))));
+    loadPowerSettings();
     _ha.setConfig(_ha_config);
 }
 
@@ -521,6 +530,17 @@ void AppHomeControl::adjustPointerSensitivity(int delta)
     setStatus("Pointer sensitivity " + pointerSensitivityLabel());
 }
 
+void AppHomeControl::loadPowerSettings()
+{
+    auto& settings = GetHAL().getSettings();
+    const int screenTimeoutS = std::max<int32_t>(
+        5, std::min<int32_t>(255, settings.GetInt("adv_scr_s", DEFAULT_SCREEN_TIMEOUT_MS / 1000)));
+    const int powerSaveMin = std::max<int32_t>(
+        1, std::min<int32_t>(255, settings.GetInt("adv_pwr_m", DEFAULT_POWER_SAVE_TIMEOUT_MS / 60000)));
+    _screen_timeout_ms     = static_cast<uint32_t>(screenTimeoutS) * 1000;
+    _power_save_timeout_ms = static_cast<uint32_t>(powerSaveMin) * 60000;
+}
+
 void AppHomeControl::markUserActivity()
 {
     _last_user_activity = GetHAL().millis();
@@ -528,10 +548,47 @@ void AppHomeControl::markUserActivity()
 
 void AppHomeControl::updatePowerSave()
 {
-    if (_screen_off || GetHAL().millis() - _last_user_activity < POWER_SAVE_MS) {
+    loadPowerSettings();
+    const uint32_t idleMs = GetHAL().millis() - _last_user_activity;
+    if (!_screen_off && idleMs >= _screen_timeout_ms) {
+        sleepDisplay();
+    }
+    if (!_power_save_active && idleMs >= _power_save_timeout_ms) {
+        enterPowerSave();
+    }
+}
+
+void AppHomeControl::enterPowerSave()
+{
+    if (_power_save_active) {
         return;
     }
+
+    mclog::tagInfo(getAppInfo().name, "enter power save");
+    if (_audio_test_active) {
+        stopAudioTest();
+    }
     sleepDisplay();
+    _power_save_active = true;
+    resetPointerHolds();
+    GetHAL().externalInput.setPaused(true);
+    GetHAL().bleKeyboardSendReport(0, KEY_NONE);
+    GetHAL().bleControlStop();
+    _ble_start_requested = false;
+    GetHAL().speaker.end();
+}
+
+void AppHomeControl::exitPowerSave()
+{
+    if (!_power_save_active) {
+        return;
+    }
+
+    mclog::tagInfo(getAppInfo().name, "exit power save");
+    _power_save_active = false;
+    GetHAL().externalInput.setPaused(false);
+    GetHAL().speaker.begin();
+    GetHAL().setDeviceVolumePercent(GetHAL().getSettings().GetInt("device_volume", 35));
 }
 
 void AppHomeControl::sleepDisplay()
@@ -554,6 +611,7 @@ void AppHomeControl::wakeDisplay()
         return;
     }
 
+    exitPowerSave();
     _screen_off = false;
     markUserActivity();
     GetHAL().display.setBrightness(static_cast<uint8_t>(_display_brightness_before_sleep * 255 / 100));

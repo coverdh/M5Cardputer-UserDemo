@@ -673,6 +673,15 @@ static void send_advctl_config_report()
     GetHAL().bleMacCtlConfig(advctl_config_flags(), sensitivity, knob_mode);
 }
 
+static void send_advctl_power_report()
+{
+    const uint8_t screen_timeout_s = static_cast<uint8_t>(
+        std::max<int32_t>(5, std::min<int32_t>(255, GetHAL().getSettings().GetInt("adv_scr_s", 30))));
+    const uint8_t power_save_timeout_min = static_cast<uint8_t>(
+        std::max<int32_t>(1, std::min<int32_t>(255, GetHAL().getSettings().GetInt("adv_pwr_m", 3))));
+    GetHAL().bleMacCtlPowerConfig(screen_timeout_s, power_save_timeout_min);
+}
+
 static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
 {
     if (!data || len < 2) {
@@ -682,6 +691,7 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
     s_advctl_control_ready = true;
     if (data[0] == 0x80) {
         send_advctl_config_report();
+        send_advctl_power_report();
         return;
     }
 
@@ -717,6 +727,16 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
         return;
     }
 
+    if (data[0] == 0x86 && len >= 3) {
+        const int screen_timeout_s = std::max(5, std::min(255, static_cast<int>(data[1])));
+        const int power_save_min   = std::max(1, std::min(255, static_cast<int>(data[2])));
+        GetHAL().getSettings().SetInt("adv_scr_s", screen_timeout_s);
+        GetHAL().getSettings().SetInt("adv_pwr_m", power_save_min);
+        send_advctl_power_report();
+        mclog::tagInfo("hal", "advctl power settings: screen={}s power={}m", screen_timeout_s, power_save_min);
+        return;
+    }
+
     if (len < 3 || data[0] != 0x81) {
         return;
     }
@@ -747,6 +767,19 @@ void Hal::bleControlInit()
     ble_hid_device_helper_set_output_callback(handle_advctl_output_report);
     ble_hid_device_helper_init();
     _is_ble_keyboard_inited = true;
+}
+
+void Hal::bleControlStop()
+{
+    if (!_is_ble_keyboard_inited) {
+        return;
+    }
+
+    mclog::tagInfo(_tag, "ble control hid stop");
+    ble_hid_device_helper_stop();
+    _is_ble_keyboard_inited = false;
+    s_advctl_control_ready  = false;
+    s_advctl_time_synced    = false;
 }
 
 void Hal::bleKeyboardInit()
@@ -860,6 +893,15 @@ bool Hal::bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)
     }
 
     return ble_hid_device_helper_send_macctl_config(flags, sensitivity, knobMode);
+}
+
+bool Hal::bleMacCtlPowerConfig(uint8_t screenTimeoutSeconds, uint8_t powerSaveTimeoutMinutes)
+{
+    if (!bleKeyboardIsConnected()) {
+        return false;
+    }
+
+    return ble_hid_device_helper_send_macctl_power_config(screenTimeoutSeconds, powerSaveTimeoutMinutes);
 }
 
 bool Hal::bleMacCtlIsConnected() const
