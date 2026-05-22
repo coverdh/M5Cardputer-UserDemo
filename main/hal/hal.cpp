@@ -649,6 +649,39 @@ void Hal::irSend(uint8_t addr, uint8_t cmd)
 /* -------------------------------------------------------------------------- */
 #include "utils/ble_hid_device/ble_hid_device_helper.h"
 
+static bool s_advctl_control_ready = false;
+static bool s_advctl_audio_test_pending = false;
+static bool s_advctl_audio_test_active = false;
+
+static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
+{
+    if (!data || len < 2) {
+        return;
+    }
+
+    s_advctl_control_ready = true;
+    if (data[0] == 0x82) {
+        s_advctl_audio_test_active = data[1] != 0;
+        s_advctl_audio_test_pending = true;
+        mclog::tagInfo("hal", "advctl audio test request: {}", s_advctl_audio_test_active ? "start" : "stop");
+        return;
+    }
+
+    if (len < 3 || data[0] != 0x81) {
+        return;
+    }
+
+    const uint8_t flags = data[1];
+    GetHAL().externalInput.setDirectionTransform((flags & 0x02) != 0, (flags & 0x04) != 0, (flags & 0x01) != 0);
+    if (len >= 3) {
+        if (data[2] >= 2 && data[2] <= 6) {
+            GetHAL().getSettings().SetInt("ptr_sens2", data[2]);
+        } else if (data[2] >= 1 && data[2] <= 3) {
+            GetHAL().getSettings().SetInt("ptr_sens2", data[2] * 2);
+        }
+    }
+}
+
 void Hal::bleControlInit()
 {
     if (_is_ble_keyboard_inited) {
@@ -657,6 +690,7 @@ void Hal::bleControlInit()
     }
 
     mclog::tagInfo(_tag, "ble control hid init");
+    ble_hid_device_helper_set_output_callback(handle_advctl_output_report);
     ble_hid_device_helper_init();
     _is_ble_keyboard_inited = true;
 }
@@ -685,8 +719,7 @@ bool Hal::bleKeyboardIsConnected() const
         return false;
     }
 
-    auto state = ble_hid_device_helper_get_state();
-    return (state == BLE_HID_DEVICE_STATE_CONNECTED);
+    return ble_hid_device_helper_is_ready();
 }
 
 void Hal::bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode)
@@ -708,13 +741,18 @@ void Hal::bleKeyboardTap(uint8_t modifier, KeScanCode_t keyCode)
     bleKeyboardSendReport(0, KEY_NONE);
 }
 
-void Hal::bleMouseMove(int8_t dx, int8_t dy, int8_t wheel)
+void Hal::bleMouseReport(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
 {
     if (!bleKeyboardIsConnected()) {
         return;
     }
 
-    ble_hid_device_helper_send_mouse(0, dx, dy, wheel);
+    ble_hid_device_helper_send_mouse(buttons, dx, dy, wheel);
+}
+
+void Hal::bleMouseMove(int8_t dx, int8_t dy, int8_t wheel)
+{
+    bleMouseReport(0, dx, dy, wheel);
 }
 
 void Hal::bleMouseClick(uint8_t buttons)
@@ -742,6 +780,9 @@ bool Hal::bleMacCtlVolumeDelta(int8_t delta)
     if (!bleKeyboardIsConnected()) {
         return false;
     }
+    if (!s_advctl_control_ready) {
+        return false;
+    }
 
     return ble_hid_device_helper_send_macctl_volume_delta(delta);
 }
@@ -751,8 +792,22 @@ bool Hal::bleMacCtlPlayPause()
     if (!bleKeyboardIsConnected()) {
         return false;
     }
+    if (!s_advctl_control_ready) {
+        return false;
+    }
 
     return ble_hid_device_helper_send_macctl_play_pause();
+}
+
+bool Hal::bleConsumeAudioTestRequest(bool& active)
+{
+    if (!s_advctl_audio_test_pending) {
+        return false;
+    }
+
+    active = s_advctl_audio_test_active;
+    s_advctl_audio_test_pending = false;
+    return true;
 }
 
 void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)

@@ -13,6 +13,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -52,16 +53,37 @@ static const char *TAG = "ble_hid";
 
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 static TickType_t s_ble_hid_ready_after_tick        = 0;
+static bool s_ble_hid_notify_ready                  = false;
+
+typedef struct {
+    uint8_t map_index;
+    uint8_t report_id;
+    uint8_t len;
+    uint8_t data[8];
+    uint16_t delay_after_ms;
+} BleHidQueuedReport_t;
+
+static QueueHandle_t s_ble_hid_report_queue = NULL;
+static TaskHandle_t s_ble_hid_report_task   = NULL;
+static ble_hid_device_helper_output_callback_t s_ble_hid_output_callback = NULL;
+#if CONFIG_BT_NIMBLE_ENABLED
+static TickType_t s_ble_hid_last_drop_log    = 0;
+#endif
 
 #define MACCTL_BLE_STORE_SCHEMA_VERSION 2
 
 #define BLE_HID_MAP_INDEX_KEYBOARD 0
 #define BLE_HID_MAP_INDEX_MOUSE    1
 #define BLE_HID_MAP_INDEX_MEDIA    2
+#define BLE_HID_MAP_INDEX_MACCTL   3
 
 #define BLE_HID_RPT_ID_KEYBOARD 1
 #define BLE_HID_RPT_ID_MOUSE    2
 #define BLE_HID_RPT_ID_MEDIA    3
+#define BLE_HID_RPT_ID_MACCTL   4
+
+#define MACCTL_CMD_VOLUME_DELTA 1
+#define MACCTL_CMD_PLAY_PAUSE   2
 
 typedef struct {
     TaskHandle_t task_hdl;
@@ -72,6 +94,81 @@ typedef struct {
 
 #if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
 static local_param_t s_ble_hid_param = {0};
+
+static bool ble_hid_device_helper_queue_report(uint8_t map_index, uint8_t report_id, const uint8_t *data, uint8_t len,
+                                               uint16_t delay_after_ms)
+{
+    if (!ble_hid_device_helper_is_ready() || !s_ble_hid_report_queue || !data || len > sizeof(((BleHidQueuedReport_t *)0)->data)) {
+        return false;
+    }
+
+    BleHidQueuedReport_t report = {
+        .map_index      = map_index,
+        .report_id      = report_id,
+        .len            = len,
+        .delay_after_ms = delay_after_ms,
+    };
+    memcpy(report.data, data, len);
+    if (xQueueSend(s_ble_hid_report_queue, &report, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "hid report queue full; drop report=%u", report_id);
+        return false;
+    }
+    return true;
+}
+
+static void ble_hid_device_helper_report_task(void *pvParameters)
+{
+    (void)pvParameters;
+    BleHidQueuedReport_t report;
+    while (true) {
+        if (xQueueReceive(s_ble_hid_report_queue, &report, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (ble_hid_device_helper_is_ready()) {
+#if CONFIG_BT_NIMBLE_ENABLED
+            if (!esp_vhci_host_check_send_available()) {
+                TickType_t now = xTaskGetTickCount();
+                if (now - s_ble_hid_last_drop_log > pdMS_TO_TICKS(2000)) {
+                    s_ble_hid_last_drop_log = now;
+                    ESP_LOGW(TAG, "VHCI not ready; drop hid report=%u", report.report_id);
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+#endif
+            esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, report.map_index, report.report_id, report.data, report.len);
+        }
+        vTaskDelay(pdMS_TO_TICKS(report.delay_after_ms > 0 ? report.delay_after_ms : 50));
+    }
+}
+
+static void ble_hid_device_helper_ensure_report_task(void)
+{
+    if (!s_ble_hid_report_queue) {
+        s_ble_hid_report_queue = xQueueCreate(32, sizeof(BleHidQueuedReport_t));
+    }
+    if (s_ble_hid_report_queue && !s_ble_hid_report_task) {
+        xTaskCreatePinnedToCore(ble_hid_device_helper_report_task, "ble_hid_tx", 4096, NULL, 4,
+                                &s_ble_hid_report_task, 1);
+    }
+}
+
+static bool ble_hid_device_helper_queue_macctl_report(const uint8_t *buffer, uint8_t len)
+{
+    return ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_MACCTL, BLE_HID_RPT_ID_MACCTL, buffer, len, 8);
+}
+
+static bool ble_hid_device_helper_queue_macctl_command(uint8_t command, int8_t value)
+{
+    uint8_t buffer[4] = {command, (uint8_t)value, 0, 0};
+    const bool queued = ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
+    if (queued) {
+        ESP_LOGI(TAG, "macctl command queued: command=%u value=%d", command, value);
+    } else {
+        ESP_LOGW(TAG, "macctl command dropped: command=%u value=%d", command, value);
+    }
+    return queued;
+}
 
 const unsigned char mediaReportMap[] = {
     0x05, 0x0C,  // Usage Page (Consumer)
@@ -165,6 +262,23 @@ const unsigned char bleMouseReportMap[] = {
 
     0xc0,  //   END_COLLECTION
     0xc0   // END_COLLECTION
+};
+
+const unsigned char macctlReportMap[] = {
+    0x06, 0x00, 0xFF,              // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01,                    // Usage (0x01)
+    0xA1, 0x01,                    // Collection (Application)
+    0x85, BLE_HID_RPT_ID_MACCTL,   //   Report ID (4)
+    0x09, 0x02,                    //   Usage (0x02)
+    0x15, 0x00,                    //   Logical Minimum (0)
+    0x26, 0xFF, 0x00,              //   Logical Maximum (255)
+    0x75, 0x08,                    //   Report Size (8)
+    0x95, 0x04,                    //   Report Count (4)
+    0x81, 0x02,                    //   Input (Data,Var,Abs)
+    0x09, 0x03,                    //   Usage (0x03)
+    0x95, 0x04,                    //   Report Count (4)
+    0x91, 0x02,                    //   Output (Data,Var,Abs)
+    0xC0,                          // End Collection
 };
 
 #if CONFIG_EXAMPLE_HID_DEVICE_ROLE && CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
@@ -285,8 +399,6 @@ const unsigned char keyboardReportMap[] = {
     0x29, 0x65,  //   Usage Maximum (0x65)
     0x81, 0x00,  //   Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
     0xC0,        // End Collection
-
-    // 65 bytes
 };
 
 static void char_to_code(uint8_t *buffer, char ch)
@@ -382,10 +494,11 @@ void ble_hid_demo_task_kbd(void *pvParameters)
 }
 #endif
 static esp_hid_raw_report_map_t ble_report_maps[] = {
-#if CONFIG_BT_NIMBLE_ENABLED && CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
+#if CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
     {.data = keyboardReportMap, .len = sizeof(keyboardReportMap)},
     {.data = bleMouseReportMap, .len = sizeof(bleMouseReportMap)},
     {.data = mediaReportMap, .len = sizeof(mediaReportMap)},
+    {.data = macctlReportMap, .len = sizeof(macctlReportMap)},
 #elif !CONFIG_BT_NIMBLE_ENABLED || CONFIG_EXAMPLE_HID_DEVICE_ROLE == 1
     /* This block is compiled for bluedroid as well */
     {.data = mediaReportMap, .len = sizeof(mediaReportMap)}
@@ -397,9 +510,9 @@ static esp_hid_raw_report_map_t ble_report_maps[] = {
 static esp_hid_device_config_t ble_hid_config = {
     .vendor_id  = 0x16C0,
     .product_id = 0x05DF,
-    .version    = 0x0100,
+    .version    = 0x0105,
 #if CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
-    .device_name = "MacCtl",
+    .device_name = "ADVCtl",
 #elif CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
     .device_name = "ESP Mouse",
 #else
@@ -569,8 +682,8 @@ void esp_hidd_send_consumer_value(uint8_t key_cmd, bool key_pressed)
                 break;
         }
     }
-    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_MEDIA, HID_RPT_ID_CC_IN, buffer,
-                           HID_CC_IN_RPT_LEN);
+    ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_MEDIA, HID_RPT_ID_CC_IN, buffer, HID_CC_IN_RPT_LEN,
+                                       key_pressed ? 40 : 8);
     return;
 }
 
@@ -597,27 +710,10 @@ void ble_hid_demo_task(void *pvParameters)
 
 void ble_hid_task_start_up(void)
 {
-    if (s_ble_hid_param.task_hdl) {
-        // Task already exists
-        return;
-    }
-#if !CONFIG_BT_NIMBLE_ENABLED
-    /* Executed for bluedroid */
-    xTaskCreate(ble_hid_demo_task, "ble_hid_demo_task", 2 * 1024, NULL, configMAX_PRIORITIES - 3,
-                &s_ble_hid_param.task_hdl);
-#elif CONFIG_EXAMPLE_HID_DEVICE_ROLE == 1
-    xTaskCreate(ble_hid_demo_task, "ble_hid_demo_task", 3 * 1024, NULL, configMAX_PRIORITIES - 3,
-                &s_ble_hid_param.task_hdl);
-
-#elif CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2
-    /* Nimble Specific */
-    xTaskCreate(ble_hid_demo_task_kbd, "ble_hid_demo_task_kbd", 3 * 1024, NULL, configMAX_PRIORITIES - 3,
-                &s_ble_hid_param.task_hdl);
-#elif CONFIG_EXAMPLE_HID_DEVICE_ROLE == 3
-    /* Nimble Specific */
-    xTaskCreate(ble_hid_demo_task_mouse, "ble_hid_demo_task_mouse", 3 * 1024, NULL, configMAX_PRIORITIES - 3,
-                &s_ble_hid_param.task_hdl);
-#endif
+    // ADVCtl sends reports from the application layer only.  The ESP-IDF demo
+    // task emits periodic test reports after bonding, which interferes with
+    // normal keyboard use and can overflow its small stack on this build.
+    s_ble_hid_param.task_hdl = NULL;
 }
 
 void ble_hid_task_shut_down(void)
@@ -643,6 +739,10 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
         case ESP_HIDD_CONNECT_EVENT: {
             ESP_LOGI(TAG, "CONNECT");
             s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_CONNECTED;
+#if !CONFIG_BT_NIMBLE_ENABLED
+            s_ble_hid_notify_ready     = true;
+            s_ble_hid_ready_after_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
+#endif
             break;
         }
         case ESP_HIDD_PROTOCOL_MODE_EVENT: {
@@ -665,6 +765,9 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
             ESP_LOGI(TAG, "OUTPUT[%u]: %8s ID: %2u, Len: %d, Data:", param->output.map_index,
                      esp_hid_usage_str(param->output.usage), param->output.report_id, param->output.length);
             ESP_LOG_BUFFER_HEX(TAG, param->output.data, param->output.length);
+            if (param->output.report_id == BLE_HID_RPT_ID_MACCTL && s_ble_hid_output_callback) {
+                s_ble_hid_output_callback(param->output.data, param->output.length);
+            }
             break;
         }
         case ESP_HIDD_FEATURE_EVENT: {
@@ -679,6 +782,8 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
                                                    param->disconnect.reason));
             ble_hid_task_shut_down();
             esp_hid_ble_gap_adv_start();
+            s_ble_hid_notify_ready     = false;
+            s_ble_hid_ready_after_tick = 0;
             s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
             break;
         }
@@ -964,6 +1069,32 @@ static void ble_hid_device_helper_migrate_store(void)
 
     nvs_close(handle);
 }
+
+static void ble_hid_device_helper_clear_stored_cccds(void)
+{
+    union ble_store_key key;
+    int count = 0;
+    int rc;
+
+    rc = ble_store_util_count(BLE_STORE_OBJ_TYPE_CCCD, &count);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "count stored BLE CCCDs failed: %d", rc);
+        return;
+    }
+
+    if (count == 0) {
+        return;
+    }
+
+    memset(&key, 0, sizeof(key));
+    key.cccd.peer_addr = *BLE_ADDR_ANY;
+    rc = ble_store_util_delete_all(BLE_STORE_OBJ_TYPE_CCCD, &key);
+    if (rc == 0) {
+        ESP_LOGW(TAG, "cleared %d stored BLE CCCDs to avoid restore notify deadlock", count);
+    } else {
+        ESP_LOGW(TAG, "clear stored BLE CCCDs failed: %d", rc);
+    }
+}
 #endif
 
 void _demo_app_main(void)
@@ -1025,6 +1156,7 @@ void _demo_app_main(void)
     /* XXX Need to have template for store */
     ble_store_config_init();
     ble_hid_device_helper_migrate_store();
+    ble_hid_device_helper_clear_stored_cccds();
 
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
@@ -1041,19 +1173,19 @@ void _demo_app_main(void)
 
 void ble_hid_device_helper_init(void)
 {
+    ble_hid_device_helper_ensure_report_task();
     _demo_app_main();
 }
 
 void ble_hid_device_helper_send(uint8_t *buffer)
 {
-    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_KEYBOARD, BLE_HID_RPT_ID_KEYBOARD, buffer, 8);
+    ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_KEYBOARD, BLE_HID_RPT_ID_KEYBOARD, buffer, 8, 8);
 }
 
 void ble_hid_device_helper_send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
 {
     uint8_t buffer[4] = {buttons, (uint8_t)dx, (uint8_t)dy, (uint8_t)wheel};
-    esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_MOUSE, BLE_HID_RPT_ID_MOUSE, buffer,
-                           sizeof(buffer));
+    ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_MOUSE, BLE_HID_RPT_ID_MOUSE, buffer, sizeof(buffer), 8);
 }
 
 void ble_hid_device_helper_send_consumer(uint16_t usage_id)
@@ -1063,39 +1195,23 @@ void ble_hid_device_helper_send_consumer(uint16_t usage_id)
     esp_hidd_send_consumer_value((uint8_t)usage_id, false);
 }
 
-static bool ble_hid_device_helper_send_consumer_usage(uint8_t usage_id)
-{
-    if (!s_ble_hid_param.hid_dev || s_ble_hid_keyboard_state != BLE_HID_DEVICE_STATE_CONNECTED ||
-        xTaskGetTickCount() < s_ble_hid_ready_after_tick) {
-        return false;
-    }
-
-    esp_hidd_send_consumer_value(usage_id, true);
-    vTaskDelay(40 / portTICK_PERIOD_MS);
-    esp_hidd_send_consumer_value(usage_id, false);
-    return true;
-}
-
 bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta)
 {
-    uint8_t usage_id = delta > 0 ? HID_CONSUMER_VOLUME_UP : HID_CONSUMER_VOLUME_DOWN;
-    uint8_t count   = (uint8_t)abs(delta);
-    if (count == 0) {
+    if (delta == 0) {
         return true;
     }
 
-    for (uint8_t i = 0; i < count; ++i) {
-        if (!ble_hid_device_helper_send_consumer_usage(usage_id)) {
-            return false;
-        }
-        vTaskDelay(20 / portTICK_PERIOD_MS);
-    }
-    return true;
+    return ble_hid_device_helper_queue_macctl_command(MACCTL_CMD_VOLUME_DELTA, delta);
 }
 
 bool ble_hid_device_helper_send_macctl_play_pause(void)
 {
-    return ble_hid_device_helper_send_consumer_usage(HID_CONSUMER_MUTE);
+    return ble_hid_device_helper_queue_macctl_command(MACCTL_CMD_PLAY_PAUSE, 0);
+}
+
+void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback)
+{
+    s_ble_hid_output_callback = callback;
 }
 
 BleHidDeviceState_t ble_hid_device_helper_get_state(void)
@@ -1103,15 +1219,26 @@ BleHidDeviceState_t ble_hid_device_helper_get_state(void)
     return s_ble_hid_keyboard_state;
 }
 
+bool ble_hid_device_helper_is_ready(void)
+{
+    return s_ble_hid_param.hid_dev && s_ble_hid_keyboard_state == BLE_HID_DEVICE_STATE_CONNECTED &&
+           s_ble_hid_notify_ready && xTaskGetTickCount() >= s_ble_hid_ready_after_tick;
+}
+
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
     (void)conn_handle;
-    s_ble_hid_ready_after_tick = xTaskGetTickCount() + pdMS_TO_TICKS(8000);
+    if (s_ble_hid_notify_ready) {
+        s_ble_hid_ready_after_tick = xTaskGetTickCount();
+    } else {
+        s_ble_hid_ready_after_tick = 0;
+    }
 }
 
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
 {
     (void)conn_handle;
+    s_ble_hid_notify_ready     = false;
     s_ble_hid_ready_after_tick = 0;
 }
 
@@ -1120,6 +1247,7 @@ void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_han
     (void)conn_handle;
     (void)attr_handle;
     if (notify_enabled) {
+        s_ble_hid_notify_ready     = true;
         s_ble_hid_ready_after_tick = xTaskGetTickCount();
         ESP_LOGI(TAG, "hid input notify ready");
     }

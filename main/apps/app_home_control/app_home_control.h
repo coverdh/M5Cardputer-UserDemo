@@ -31,6 +31,7 @@ private:
         Config,
         WifiSsid,
         WifiPassword,
+        AudioTest,
     };
 
     struct Action {
@@ -45,6 +46,7 @@ private:
     int _key_event_slot_id         = -1;
     int _selected_action           = 0;
     int _target_volume_percent     = 30;
+    int _pointer_sensitivity       = 2;
     uint8_t _tv_power_addr         = 0x04;
     uint8_t _tv_power_cmd          = 0x08;
     uint32_t _last_status_refresh  = 0;
@@ -52,23 +54,31 @@ private:
     uint32_t _last_external_render = 0;
     uint32_t _last_volume_apply    = 0;
     uint32_t _last_setup_render    = 0;
+    uint32_t _last_user_activity   = 0;
     int16_t _pending_volume_delta  = 0;
+    int _display_brightness_before_sleep = 100;
     bool _auto_wifi_attempted      = false;
     bool _ble_start_requested      = false;
+    bool _screen_off               = false;
     bool _hold_left                = false;
     bool _hold_right               = false;
     bool _hold_up                  = false;
     bool _hold_down                = false;
+    bool _audio_test_active        = false;
     std::string _wifi_ssid;
     std::string _wifi_password;
     std::string _input_buffer;
     std::string _status_line;
+    std::vector<int16_t> _audio_test_buffer;
 
     static constexpr int POINTER_STEP            = 12;
     static constexpr uint32_t POINTER_REPEAT_MS  = 55;
     static constexpr uint32_t EXTERNAL_RENDER_MS = 250;
     static constexpr uint32_t SETUP_RENDER_MS    = 1000;
+    static constexpr uint32_t POWER_SAVE_MS      = 180000;
     static constexpr int ACTION_COUNT            = 8;
+    static constexpr size_t AUDIO_TEST_LENGTH    = 200;
+    static constexpr size_t AUDIO_TEST_RATE      = 16000;
     static const Action ACTIONS[ACTION_COUNT];
 
     void loadConfig();
@@ -87,6 +97,16 @@ private:
     void handleExternalInput();
     void handleExternalPointer(uint8_t buttons, uint8_t pressed, uint8_t released);
     void handleExternalEncoder();
+    void handleBleControlRequests();
+    void startAudioTest();
+    void stopAudioTest();
+    int pointerStep();
+    std::string pointerSensitivityLabel() const;
+    void adjustPointerSensitivity(int delta);
+    void markUserActivity();
+    void updatePowerSave();
+    void sleepDisplay();
+    void wakeDisplay();
     void refreshHomePodState();
     void render();
     void renderSetup();
@@ -96,11 +116,15 @@ private:
     void renderKeyboard();
     void renderVolume();
     void renderConfig();
+    void renderAudioTest();
+    void renderAudioWaveform();
     void renderStatusBar();
     void handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent);
     void handleSetupKey(const Keyboard::KeyEvent_t& keyEvent);
     void handleWifiKey(const Keyboard::KeyEvent_t& keyEvent);
     void handleDashboardKey(const Keyboard::KeyEvent_t& keyEvent);
+    bool handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEvent);
+    void forwardKeyboardEvent(const Keyboard::KeyEvent_t& keyEvent);
     void handlePointerKey(const Keyboard::KeyEvent_t& keyEvent);
     void handleKeyboardKey(const Keyboard::KeyEvent_t& keyEvent);
     void handleVolumeKey(const Keyboard::KeyEvent_t& keyEvent);

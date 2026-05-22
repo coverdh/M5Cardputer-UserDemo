@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "MacCtlHelper",
+    name: "ADVCtl",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "macctl-helper", targets: ["MacCtlHelper"])
+        .executable(name: "ADVCtl", targets: ["MacCtlHelper"])
     ],
     targets: [
         .target(name: "MacCtlCore"),
@@ -16,6 +16,8 @@ let package = Package(
             dependencies: ["MacCtlCore"],
             exclude: ["Info.plist"],
             linkerSettings: [
+                .linkedFramework("IOKit"),
+                .linkedFramework("AppKit"),
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",

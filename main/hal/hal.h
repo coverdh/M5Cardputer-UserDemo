@@ -118,11 +118,13 @@ public:
     bool bleKeyboardIsConnected() const;
     void bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode);
     void bleKeyboardTap(uint8_t modifier, KeScanCode_t keyCode);
+    void bleMouseReport(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel = 0);
     void bleMouseMove(int8_t dx, int8_t dy, int8_t wheel = 0);
     void bleMouseClick(uint8_t buttons);
     void bleConsumerSend(uint16_t usageId);
     bool bleMacCtlVolumeDelta(int8_t delta);
     bool bleMacCtlPlayPause();
+    bool bleConsumeAudioTestRequest(bool& active);
 
     /* ----------------------------------- USB ---------------------------------- */
     void usbKeyboardInit();

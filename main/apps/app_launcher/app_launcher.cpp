@@ -24,7 +24,7 @@ void Launcher::onCreate()
     start_keyboard_bar();
 
     open();
-    open_boot_app("MacCtl");
+    open_boot_app("ADVCtl");
 }
 
 void Launcher::onRunning()

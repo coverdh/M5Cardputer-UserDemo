@@ -9,7 +9,6 @@
 #include <apps/utils/audio/audio.h>
 #include <apps/utils/common.h>
 #include <apps/utils/theme.h>
-#include <hal/utils/ble_hid_device/ble_hid_device_helper.h>
 #include <mooncake_log.h>
 #include <algorithm>
 #include <cstring>
@@ -18,13 +17,13 @@
 using namespace mooncake;
 
 const AppHomeControl::Action AppHomeControl::ACTIONS[AppHomeControl::ACTION_COUNT] = {
-    {"TV Power", "IR toggle"}, {"Pointer", "BLE mouse"}, {"Keyboard", "BLE keys"}, {"HP Vol-", "HA volume"},
+    {"TV Power", "IR toggle"}, {"Pointer", "ADVCtl mouse"}, {"Keyboard", "BLE keys"}, {"HP Vol-", "HA volume"},
     {"HP Play", "HA media"},   {"HP Vol+", "HA volume"}, {"Volume", "device"},     {"Config", "type setup"},
 };
 
 AppHomeControl::AppHomeControl()
 {
-    setAppInfo().name     = "MacCtl";
+    setAppInfo().name     = "ADVCtl";
     setAppInfo().userData = new AppIcon_t(image_data_macctl_big, image_data_macctl_small);
 }
 
@@ -42,6 +41,8 @@ void AppHomeControl::onOpen()
     _pending_volume_delta = 0;
     _auto_wifi_attempted  = false;
     _ble_start_requested  = false;
+    _screen_off           = false;
+    _last_user_activity   = GetHAL().millis();
     resetPointerHolds();
     setStatus("Enter starts BLE");
 
@@ -55,11 +56,15 @@ void AppHomeControl::onOpen()
 
 void AppHomeControl::onRunning()
 {
+    handleBleControlRequests();
+
     if (GetHAL().homeButton.wasClicked()) {
+        markUserActivity();
         audio::play_random_tone();
         close();
         return;
     }
+    updatePowerSave();
 
     if (_mode == Mode::Setup) {
         enterControlIfReady();
@@ -67,6 +72,11 @@ void AppHomeControl::onRunning()
             _last_setup_render = GetHAL().millis();
             render();
         }
+        return;
+    }
+
+    if (_mode == Mode::AudioTest) {
+        renderAudioWaveform();
         return;
     }
 
@@ -83,12 +93,17 @@ void AppHomeControl::onRunning()
 void AppHomeControl::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
+    if (_screen_off) {
+        GetHAL().display.setBrightness(static_cast<uint8_t>(_display_brightness_before_sleep * 255 / 100));
+        _screen_off = false;
+    }
     if (_key_event_slot_id >= 0) {
         GetHAL().keyboard.onKeyEvent.disconnect(_key_event_slot_id);
         _key_event_slot_id = -1;
     }
     resetPointerHolds();
     GetHAL().bleKeyboardSendReport(0, KEY_NONE);
+    stopAudioTest();
 }
 
 void AppHomeControl::loadConfig()
@@ -99,6 +114,10 @@ void AppHomeControl::loadConfig()
     _ha_config.homepodEntity = settings.GetString("ha_homepod", "");
     _tv_power_addr           = static_cast<uint8_t>(settings.GetInt("tv_power_addr", 0x04));
     _tv_power_cmd            = static_cast<uint8_t>(settings.GetInt("tv_power_cmd", 0x08));
+    const int savedHalfStep  = settings.GetInt("ptr_sens2", 0);
+    const int savedWholeStep = settings.GetInt("macctl_ptr_sens", 1);
+    _pointer_sensitivity     = savedHalfStep >= 2 ? savedHalfStep : savedWholeStep * 2;
+    _pointer_sensitivity     = std::max(2, std::min(6, _pointer_sensitivity));
     _ha.setConfig(_ha_config);
 }
 
@@ -124,7 +143,7 @@ void AppHomeControl::startConnections()
         render();
         GetHAL().bleControlInit();
         if (!GetHAL().bleKeyboardIsConnected()) {
-            setStatus("Pair MacCtl");
+            setStatus("Pair ADVCtl");
         }
     }
     enterControlIfReady();
@@ -222,19 +241,20 @@ void AppHomeControl::repeatPointerMove()
     int8_t dx = 0;
     int8_t dy = 0;
     if (_hold_left) {
-        dx -= POINTER_STEP;
+        dx -= pointerStep();
     }
     if (_hold_right) {
-        dx += POINTER_STEP;
+        dx += pointerStep();
     }
     if (_hold_up) {
-        dy -= POINTER_STEP;
+        dy -= pointerStep();
     }
     if (_hold_down) {
-        dy += POINTER_STEP;
+        dy += pointerStep();
     }
 
     _last_pointer_repeat = GetHAL().millis();
+    markUserActivity();
     GetHAL().bleMouseMove(dx, dy);
 }
 
@@ -242,6 +262,13 @@ void AppHomeControl::handleExternalInput()
 {
     auto& input = GetHAL().externalInput;
     if (!input.isConnected() && !input.isEncoderConnected()) {
+        return;
+    }
+
+    if (_screen_off) {
+        if (input.getPressed() != 0 || input.getEncoderDelta() != 0 || input.getEncoderPressed()) {
+            wakeDisplay();
+        }
         return;
     }
 
@@ -254,36 +281,50 @@ void AppHomeControl::handleExternalInput()
 void AppHomeControl::handleExternalPointer(uint8_t buttons, uint8_t pressed, uint8_t released)
 {
     (void)released;
+    const uint32_t now = GetHAL().millis();
     int8_t dx = 0;
     int8_t dy = 0;
     if (buttons & ExternalInput::PAD_LEFT) {
-        dx -= POINTER_STEP;
+        dx -= pointerStep();
     }
     if (buttons & ExternalInput::PAD_RIGHT) {
-        dx += POINTER_STEP;
+        dx += pointerStep();
     }
     if (buttons & ExternalInput::PAD_UP) {
-        dy -= POINTER_STEP;
+        dy -= pointerStep();
     }
     if (buttons & ExternalInput::PAD_DOWN) {
-        dy += POINTER_STEP;
+        dy += pointerStep();
     }
+    bool moved = false;
     if (dx != 0 || dy != 0) {
-        GetHAL().bleMouseMove(dx, dy);
+        if (now - _last_pointer_repeat >= POINTER_REPEAT_MS) {
+            _last_pointer_repeat = now;
+            GetHAL().bleMouseMove(dx, dy);
+            moved = true;
+        }
     }
 
     if (pressed & ExternalInput::PAD_A) {
         GetHAL().bleMouseClick(1);
-        setStatus("Joystick left click");
     } else if (pressed & ExternalInput::PAD_B) {
         GetHAL().bleMouseClick(2);
+    }
+
+    if (pressed & ExternalInput::PAD_A) {
+        setStatus("Joystick left click");
+    } else if (pressed & ExternalInput::PAD_B) {
         setStatus("External right click");
-    } else if (dx != 0 || dy != 0) {
+    } else if (moved) {
         setStatus("Joystick mouse");
     }
 
-    if ((pressed != 0 || dx != 0 || dy != 0) && GetHAL().millis() - _last_external_render > EXTERNAL_RENDER_MS) {
-        _last_external_render = GetHAL().millis();
+    if (pressed != 0 || released != 0 || moved) {
+        markUserActivity();
+    }
+
+    if ((pressed != 0 || moved) && now - _last_external_render > EXTERNAL_RENDER_MS) {
+        _last_external_render = now;
         render();
     }
 }
@@ -293,36 +334,152 @@ void AppHomeControl::handleExternalEncoder()
     auto& input         = GetHAL().externalInput;
     const int16_t delta = input.getEncoderDelta();
     if (delta != 0) {
-        _pending_volume_delta = static_cast<int16_t>(
-            std::max<int32_t>(-50, std::min<int32_t>(50, static_cast<int32_t>(_pending_volume_delta) + delta)));
+        markUserActivity();
+        const uint8_t keyCode = delta > 0 ? KEY_F13 : KEY_F14;
+        const int count       = std::min<int>(5, std::abs(static_cast<int>(delta)));
+        for (int i = 0; i < count; ++i) {
+            GetHAL().bleKeyboardTap(0, static_cast<KeScanCode_t>(keyCode));
+        }
+        setStatus(delta > 0 ? "Knob F13" : "Knob F14");
     }
     if (input.getEncoderPressed()) {
-        if (GetHAL().bleMacCtlPlayPause()) {
-            setStatus("HomePod mute toggle");
-        } else {
-            setStatus("BLE not ready");
-        }
+        markUserActivity();
+        GetHAL().bleKeyboardTap(0, KEY_F15);
+        setStatus("Knob F15");
         render();
         return;
     }
-    if (_pending_volume_delta == 0) {
+    if (delta != 0) {
+        render();
+    }
+}
+
+void AppHomeControl::handleBleControlRequests()
+{
+    bool audio_test_active = false;
+    if (!GetHAL().bleConsumeAudioTestRequest(audio_test_active)) {
         return;
     }
 
-    const uint32_t now = GetHAL().millis();
-    if (_last_volume_apply != 0 && now - _last_volume_apply < 220) {
-        return;
-    }
-
-    const int16_t applyDelta = _pending_volume_delta;
-    _pending_volume_delta    = 0;
-    _last_volume_apply       = now;
-
-    if (GetHAL().bleMacCtlVolumeDelta(static_cast<int8_t>(std::max<int16_t>(-50, std::min<int16_t>(50, applyDelta))))) {
-        setStatus(applyDelta > 0 ? "HomePod volume up" : "HomePod volume down");
+    markUserActivity();
+    if (audio_test_active) {
+        startAudioTest();
     } else {
-        setStatus("BLE not ready");
+        stopAudioTest();
+        _mode = Mode::Dashboard;
+        render();
     }
+}
+
+void AppHomeControl::startAudioTest()
+{
+    mclog::tagInfo(getAppInfo().name, "audio test start");
+    if (_screen_off) {
+        wakeDisplay();
+    }
+    if (_audio_test_active) {
+        _mode = Mode::AudioTest;
+        render();
+        return;
+    }
+
+    audio::set_keyboard_sfx_enable(false);
+    GetHAL().speaker.end();
+    auto cfg = GetHAL().mic.config();
+    cfg.magnification      = 128;
+    cfg.noise_filter_level = 2;
+    GetHAL().mic.config(cfg);
+    GetHAL().mic.begin();
+
+    _audio_test_buffer.assign(AUDIO_TEST_LENGTH, 0);
+    _audio_test_active = true;
+    _mode              = Mode::AudioTest;
+    setStatus("Recording test active");
+    render();
+}
+
+void AppHomeControl::stopAudioTest()
+{
+    if (!_audio_test_active) {
+        return;
+    }
+    mclog::tagInfo(getAppInfo().name, "audio test stop");
+
+    while (GetHAL().mic.isRecording()) {
+        GetHAL().delay(1);
+    }
+    GetHAL().mic.end();
+    GetHAL().speaker.begin();
+    GetHAL().speaker.setVolume(255);
+    audio::set_keyboard_sfx_enable(true);
+    _audio_test_buffer.clear();
+    _audio_test_active = false;
+    setStatus("Recording test stopped");
+}
+
+int AppHomeControl::pointerStep()
+{
+    _pointer_sensitivity = std::max(2, std::min(6, static_cast<int>(
+        GetHAL().getSettings().GetInt("ptr_sens2", _pointer_sensitivity))));
+    return std::max(1, POINTER_STEP * _pointer_sensitivity / 2);
+}
+
+std::string AppHomeControl::pointerSensitivityLabel() const
+{
+    const int value = std::max(2, std::min(6, _pointer_sensitivity));
+    if ((value % 2) == 0) {
+        return std::to_string(value / 2) + "x";
+    }
+    return std::to_string(value / 2) + ".5x";
+}
+
+void AppHomeControl::adjustPointerSensitivity(int delta)
+{
+    const int previous = _pointer_sensitivity;
+    _pointer_sensitivity = std::max(2, std::min(6, _pointer_sensitivity + delta));
+    if (_pointer_sensitivity != previous) {
+        GetHAL().getSettings().SetInt("ptr_sens2", _pointer_sensitivity);
+    }
+    setStatus("Pointer sensitivity " + pointerSensitivityLabel());
+}
+
+void AppHomeControl::markUserActivity()
+{
+    _last_user_activity = GetHAL().millis();
+}
+
+void AppHomeControl::updatePowerSave()
+{
+    if (_screen_off || GetHAL().millis() - _last_user_activity < POWER_SAVE_MS) {
+        return;
+    }
+    sleepDisplay();
+}
+
+void AppHomeControl::sleepDisplay()
+{
+    if (_screen_off) {
+        return;
+    }
+
+    _display_brightness_before_sleep = std::max(1, GetHAL().getDeviceBrightnessPercent());
+    _screen_off                      = true;
+    resetPointerHolds();
+    GetHAL().bleKeyboardSendReport(0, KEY_NONE);
+    GetHAL().display.setBrightness(0);
+}
+
+void AppHomeControl::wakeDisplay()
+{
+    if (!_screen_off) {
+        markUserActivity();
+        return;
+    }
+
+    _screen_off = false;
+    markUserActivity();
+    GetHAL().display.setBrightness(static_cast<uint8_t>(_display_brightness_before_sleep * 255 / 100));
+    startConnections();
     render();
 }
 
@@ -389,6 +546,9 @@ void AppHomeControl::render()
         case Mode::Config:
             renderConfig();
             break;
+        case Mode::AudioTest:
+            renderAudioTest();
+            break;
         case Mode::Dashboard:
         default:
             renderDashboard();
@@ -403,17 +563,22 @@ void AppHomeControl::renderSetup()
     canvas.setTextSize(1);
     canvas.setCursor(0, 0);
     canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-    canvas.println("MacCtl");
+    canvas.println("ADVCtl");
 
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
     canvas.printf("BLE:  %s\n",
-                  GetHAL().bleKeyboardIsConnected() ? "paired" : (_ble_start_requested ? "pair MacCtl" : "stopped"));
-    canvas.println("HA:   Karabiner");
+                  GetHAL().bleKeyboardIsConnected() ? "paired" : (_ble_start_requested ? "pair ADVCtl" : "stopped"));
+    canvas.println("HA:   ADVCtl app");
 
     canvas.setTextColor(TFT_CYAN, THEME_COLOR_BG);
     canvas.println();
-    canvas.println("W: WiFi settings");
-    canvas.println("C: local settings");
+    canvas.println("Fn+W: WiFi settings");
+    canvas.println("Fn+C: local settings");
+    canvas.printf("Ptr:  %s  XY:%s X:%s Y:%s\n",
+                  pointerSensitivityLabel().c_str(),
+                  GetHAL().externalInput.getSwapAxes() ? "swap" : "normal",
+                  GetHAL().externalInput.getFlipX() ? "inv" : "normal",
+                  GetHAL().externalInput.getFlipY() ? "inv" : "normal");
     canvas.println("Home: launcher");
 
     renderStatusBar();
@@ -481,6 +646,12 @@ void AppHomeControl::renderDashboard()
     } else {
         canvas.println(_ha.isConfigured() ? "No HomePod state" : "HA not configured");
     }
+    canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
+    canvas.printf("Ptr %s XY %s X %s Y %s\n",
+                  pointerSensitivityLabel().c_str(),
+                  GetHAL().externalInput.getSwapAxes() ? "swap" : "normal",
+                  GetHAL().externalInput.getFlipX() ? "inv" : "normal",
+                  GetHAL().externalInput.getFlipY() ? "inv" : "normal");
 
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -499,7 +670,7 @@ void AppHomeControl::renderPointer()
     canvas.println("Enter/Space: click");
     canvas.println("Backspace: right click");
     canvas.println("[ ]: wheel");
-    canvas.println("Esc: dashboard");
+    canvas.println("Fn+Esc: dashboard");
     renderStatusBar();
     GetHAL().pushCanvas();
 }
@@ -514,7 +685,7 @@ void AppHomeControl::renderKeyboard()
     canvas.println("Keyboard Mode");
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
     canvas.println("Typing forwards to macOS");
-    canvas.println("Esc: dashboard");
+    canvas.println("Fn+Esc: dashboard");
     canvas.printf("BLE: %s\n", GetHAL().bleKeyboardIsConnected() ? "paired" : "advertising");
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -575,6 +746,59 @@ void AppHomeControl::renderConfig()
     GetHAL().pushCanvas();
 }
 
+void AppHomeControl::renderAudioTest()
+{
+    auto& canvas = GetHAL().canvas;
+    canvas.fillScreen(THEME_COLOR_BG);
+    canvas.setCursor(0, 0);
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
+    canvas.println("ADV Recording");
+    canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
+    canvas.println("Mic active");
+    canvas.println("Esc/Enter: stop");
+    renderStatusBar();
+    GetHAL().pushCanvas();
+}
+
+void AppHomeControl::renderAudioWaveform()
+{
+    if (!_audio_test_active || !GetHAL().mic.isEnabled()) {
+        return;
+    }
+    if (_audio_test_buffer.size() != AUDIO_TEST_LENGTH) {
+        _audio_test_buffer.assign(AUDIO_TEST_LENGTH, 0);
+    }
+    if (!GetHAL().mic.record(_audio_test_buffer.data(), AUDIO_TEST_LENGTH, AUDIO_TEST_RATE)) {
+        return;
+    }
+
+    auto& canvas = GetHAL().canvas;
+    const int32_t top = 28;
+    const int32_t h   = canvas.height() - top - 12;
+    const int32_t w   = std::min<int32_t>(canvas.width() - 4, AUDIO_TEST_LENGTH);
+    const int32_t mid = top + h / 2;
+    canvas.fillRect(0, top, canvas.width(), h, THEME_COLOR_BG);
+    canvas.drawLine(0, mid, canvas.width(), mid, TFT_DARKGREY);
+
+    for (int32_t x = 0; x < w; ++x) {
+        int32_t sample = _audio_test_buffer[x] >> 8;
+        int32_t y      = mid + sample;
+        if (y < top) y = top;
+        if (y >= top + h) y = top + h - 1;
+        canvas.drawFastVLine(x + 2, std::min(mid, y), std::max<int32_t>(1, std::abs(y - mid)), TFT_CYAN);
+    }
+
+    canvas.setCursor(0, 0);
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
+    canvas.println("ADV Recording");
+    canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
+    canvas.println("Mic active");
+    renderStatusBar();
+    GetHAL().pushCanvas();
+}
+
 void AppHomeControl::renderStatusBar()
 {
     auto& canvas = GetHAL().canvas;
@@ -586,6 +810,19 @@ void AppHomeControl::renderStatusBar()
 
 void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
 {
+    if (_screen_off) {
+        if (keyEvent.state) {
+            wakeDisplay();
+        }
+        return;
+    }
+
+    markUserActivity();
+    if (!keyEvent.state && GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_ESC) {
+        sleepDisplay();
+        return;
+    }
+
     if (_mode == Mode::Dashboard) {
         handleDashboardKey(keyEvent);
         return;
@@ -620,6 +857,13 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
         case Mode::Config:
             handleConfigKey(keyEvent);
             break;
+        case Mode::AudioTest:
+            if (keyEvent.keyCode == KEY_ESC || isEnterKey(keyEvent)) {
+                stopAudioTest();
+                _mode = Mode::Dashboard;
+                render();
+            }
+            break;
         case Mode::Dashboard:
         default:
             handleDashboardKey(keyEvent);
@@ -633,11 +877,11 @@ void AppHomeControl::handleSetupKey(const Keyboard::KeyEvent_t& keyEvent)
         return;
     }
 
-    if (keyEvent.keyCode == KEY_W) {
+    if (GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_W) {
         _mode         = Mode::WifiSsid;
         _input_buffer = _wifi_ssid;
         setStatus("Set WiFi SSID");
-    } else if (keyEvent.keyCode == KEY_C) {
+    } else if (GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_C) {
         _mode = Mode::Config;
         _input_buffer.clear();
         setStatus("Set HA lines");
@@ -702,88 +946,97 @@ void AppHomeControl::handleWifiKey(const Keyboard::KeyEvent_t& keyEvent)
 
 void AppHomeControl::handleDashboardKey(const Keyboard::KeyEvent_t& keyEvent)
 {
-    if (GetHAL().keyboard.isFnPressed() && keyEvent.state) {
-        if (keyEvent.keyCode == KEY_MINUS) {
-            if (GetHAL().bleMacCtlVolumeDelta(-1)) {
-                setStatus("HomePod volume down");
-            } else {
-                setStatus("BLE not ready");
-            }
-            render();
-            return;
-        }
-        if (keyEvent.keyCode == KEY_EQUAL) {
-            if (GetHAL().bleMacCtlVolumeDelta(1)) {
-                setStatus("HomePod volume up");
-            } else {
-                setStatus("BLE not ready");
-            }
-            render();
-            return;
-        }
-        if (keyEvent.keyCode == KEY_SPACE) {
-            if (GetHAL().bleMacCtlPlayPause()) {
-                setStatus("HomePod mute toggle");
-            } else {
-                setStatus("BLE not ready");
-            }
-            render();
-            return;
-        }
-        if (keyEvent.keyCode == KEY_T) {
-            sendTvPower();
-            render();
-            return;
-        }
-        if (keyEvent.keyCode == KEY_R) {
-            setStatus("Karabiner owns HA");
-            render();
-            return;
-        }
+    if (handleDashboardFnControl(keyEvent)) {
+        return;
     }
 
-    if (isLeftKey(keyEvent) || isRightKey(keyEvent) || isUpKey(keyEvent) || isDownKey(keyEvent)) {
+    forwardKeyboardEvent(keyEvent);
+}
+
+bool AppHomeControl::handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEvent)
+{
+    const bool fnActive = GetHAL().keyboard.isFnPressed();
+    if ((isLeftKey(keyEvent) && _hold_left) || (isRightKey(keyEvent) && _hold_right) ||
+        (isUpKey(keyEvent) && _hold_up) || (isDownKey(keyEvent) && _hold_down)) {
         updatePointerHold(keyEvent);
-        if (keyEvent.state) {
-            repeatPointerMove();
-        }
-        return;
-    }
-
-    if (!keyEvent.state) {
         GetHAL().bleKeyboardSendReport(GetHAL().keyboard.getModifierMask(), KEY_NONE);
-        return;
+        return true;
     }
 
-    if (keyEvent.keyCode == KEY_LEFTBRACE) {
+    if (!fnActive || !keyEvent.state || keyEvent.isModifier) {
+        return false;
+    }
+
+    if (isUpKey(keyEvent)) {
+        adjustPointerSensitivity(1);
+    } else if (isDownKey(keyEvent)) {
+        adjustPointerSensitivity(-1);
+    } else if (isLeftKey(keyEvent)) {
+        GetHAL().externalInput.toggleSwapAxes();
+        setStatus(GetHAL().externalInput.getSwapAxes() ? "Joystick XY swapped" : "Joystick XY normal");
+    } else if (isRightKey(keyEvent)) {
+        GetHAL().externalInput.toggleFlipX();
+        setStatus(GetHAL().externalInput.getFlipX() ? "Joystick X inverted" : "Joystick X normal");
+    } else if (keyEvent.keyCode == KEY_LEFTBRACE) {
         GetHAL().bleMouseClick(1);
         setStatus("Left click");
-        return;
-    }
-
-    if (keyEvent.keyCode == KEY_RIGHTBRACE) {
+    } else if (keyEvent.keyCode == KEY_RIGHTBRACE) {
         GetHAL().bleMouseClick(2);
         setStatus("Right click");
-        return;
+    } else if (keyEvent.keyCode == KEY_SPACE) {
+        if (GetHAL().bleMacCtlPlayPause()) {
+            setStatus("HomePod mute toggle");
+        } else {
+            setStatus("BLE not ready");
+        }
+    } else if (keyEvent.keyCode == KEY_W) {
+        _mode         = Mode::WifiSsid;
+        _input_buffer = _wifi_ssid;
+        setStatus("Set WiFi SSID");
+    } else if (keyEvent.keyCode == KEY_C) {
+        _mode = Mode::Config;
+        _input_buffer.clear();
+        setStatus("Set HA lines");
+    } else if (keyEvent.keyCode == KEY_T) {
+        sendTvPower();
+    } else if (keyEvent.keyCode == KEY_R) {
+        setStatus("Karabiner owns HA");
+    } else {
+        return false;
     }
 
+    GetHAL().bleKeyboardSendReport(GetHAL().keyboard.getModifierMask(), KEY_NONE);
+    render();
+    return true;
+}
+
+void AppHomeControl::forwardKeyboardEvent(const Keyboard::KeyEvent_t& keyEvent)
+{
     uint8_t modifier = GetHAL().keyboard.getModifierMask() | keyEvent.extraModifiers;
     KeScanCode_t key = keyEvent.isModifier ? KEY_NONE : keyEvent.keyCode;
+    if (!keyEvent.state) {
+        modifier = GetHAL().keyboard.getModifierMask();
+        key      = KEY_NONE;
+    }
     GetHAL().bleKeyboardSendReport(modifier, key);
 }
 
 void AppHomeControl::handlePointerKey(const Keyboard::KeyEvent_t& keyEvent)
 {
+    if (!keyEvent.state) {
+        return;
+    }
+
     if (keyEvent.keyCode == KEY_ESC) {
         _mode = Mode::Dashboard;
     } else if (isLeftKey(keyEvent)) {
-        GetHAL().bleMouseMove(-POINTER_STEP, 0);
+        GetHAL().bleMouseMove(-pointerStep(), 0);
     } else if (isRightKey(keyEvent)) {
-        GetHAL().bleMouseMove(POINTER_STEP, 0);
+        GetHAL().bleMouseMove(pointerStep(), 0);
     } else if (isUpKey(keyEvent)) {
-        GetHAL().bleMouseMove(0, -POINTER_STEP);
+        GetHAL().bleMouseMove(0, -pointerStep());
     } else if (isDownKey(keyEvent)) {
-        GetHAL().bleMouseMove(0, POINTER_STEP);
+        GetHAL().bleMouseMove(0, pointerStep());
     } else if (isEnterKey(keyEvent) || keyEvent.keyCode == KEY_SPACE) {
         GetHAL().bleMouseClick(1);
     } else if (keyEvent.keyCode == KEY_BACKSPACE) {
@@ -803,20 +1056,14 @@ void AppHomeControl::handleKeyboardKey(const Keyboard::KeyEvent_t& keyEvent)
         return;
     }
 
-    if (keyEvent.state && keyEvent.keyCode == KEY_ESC) {
+    if (GetHAL().keyboard.isFnPressed() && keyEvent.state && keyEvent.keyCode == KEY_ESC) {
         GetHAL().bleKeyboardSendReport(0, KEY_NONE);
         _mode = Mode::Dashboard;
         render();
         return;
     }
 
-    uint8_t modifier = GetHAL().keyboard.getModifierMask() | keyEvent.extraModifiers;
-    KeScanCode_t key = keyEvent.isModifier ? KEY_NONE : keyEvent.keyCode;
-    if (!keyEvent.state) {
-        key      = KEY_NONE;
-        modifier = GetHAL().keyboard.getModifierMask();
-    }
-    GetHAL().bleKeyboardSendReport(modifier, key);
+    forwardKeyboardEvent(keyEvent);
 }
 
 void AppHomeControl::handleVolumeKey(const Keyboard::KeyEvent_t& keyEvent)

@@ -17,6 +17,8 @@ static constexpr uint32_t CHAIN_INPUT_POLL_INTERVAL_MS        = 50;
 static constexpr uint32_t EXTERNAL_INPUT_PROBE_INTERVAL_MS    = 1000;
 static constexpr uint32_t EXTERNAL_INPUT_SCAN_LOG_INTERVAL_MS = 5000;
 static constexpr uint32_t EXTERNAL_INPUT_RETRY_INTERVAL_MS    = 5000;
+static constexpr uint32_t CHAIN_COMMAND_TIMEOUT_MS            = 160;
+static constexpr uint8_t CHAIN_INPUT_FAILURE_LIMIT            = 20;
 static constexpr uint8_t JOYSTICK_UNIT_ADDR                   = 0x52;
 static constexpr uint8_t JOYSTICK2_ADDR                       = 0x63;
 static constexpr uint8_t JOYSTICK2_OFFSET_ADC_VALUE_8BITS_REG = 0x60;
@@ -504,9 +506,17 @@ bool ExternalInput::chainBusReadInput(uint8_t gpio, uint8_t& level)
 bool ExternalInput::chainCommand(uint8_t index, uint8_t command, const uint8_t* data, size_t dataSize,
                                  uint8_t* response, size_t& responseSize)
 {
-    uart_flush(CHAIN_UART);
-    chainWritePacket(index, command, data, dataSize);
-    return chainReadPacket(response, responseSize, 80);
+    const size_t capacity = responseSize;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        responseSize = capacity;
+        uart_flush(CHAIN_UART);
+        chainWritePacket(index, command, data, dataSize);
+        if (chainReadPacket(response, responseSize, CHAIN_COMMAND_TIMEOUT_MS)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(4));
+    }
+    return false;
 }
 
 bool ExternalInput::chainReadPacket(uint8_t* response, size_t& responseSize, uint32_t timeoutMs)
@@ -710,8 +720,9 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
     if (!chainCommand(_chain_joystick_index, 0x35, nullptr, 0, response, responseSize) ||
         !parseChainValue(0x35, response, responseSize, data, dataSize) || dataSize < 2) {
         ++_chain_read_failures;
-        if (_chain_read_failures < 3) {
-            mclog::tagWarn(TAG, "chain joystick axis read miss {}/3", _chain_read_failures);
+        if (_chain_read_failures < CHAIN_INPUT_FAILURE_LIMIT) {
+            mclog::tagWarn(TAG, "chain joystick axis read miss {}/{}", _chain_read_failures,
+                           CHAIN_INPUT_FAILURE_LIMIT);
             return true;
         }
         return false;
@@ -797,8 +808,9 @@ bool ExternalInput::readChainEncoder()
     if (!chainCommand(_chain_encoder_index, CHAIN_ENCODER_READ_DELTA, nullptr, 0, response, responseSize) ||
         !parseChainValue(CHAIN_ENCODER_READ_DELTA, response, responseSize, data, dataSize) || dataSize < 2) {
         ++_encoder_read_failures;
-        if (_encoder_read_failures < 3) {
-            mclog::tagWarn(TAG, "chain encoder delta read miss {}/3", _encoder_read_failures);
+        if (_encoder_read_failures < CHAIN_INPUT_FAILURE_LIMIT) {
+            mclog::tagWarn(TAG, "chain encoder delta read miss {}/{}", _encoder_read_failures,
+                           CHAIN_INPUT_FAILURE_LIMIT);
             return true;
         }
         return false;
@@ -829,8 +841,9 @@ bool ExternalInput::readDualButtons(uint8_t& buttons)
         uint8_t blue = 0;
         if (!chainBusReadInput(CHAIN_GPIO_PIN_1, red) || !chainBusReadInput(CHAIN_GPIO_PIN_2, blue)) {
             ++_chain_bus_read_failures;
-            if (_chain_bus_read_failures < 3) {
-                mclog::tagWarn(TAG, "chainbus dual button read miss {}/3", _chain_bus_read_failures);
+            if (_chain_bus_read_failures < CHAIN_INPUT_FAILURE_LIMIT) {
+                mclog::tagWarn(TAG, "chainbus dual button read miss {}/{}", _chain_bus_read_failures,
+                               CHAIN_INPUT_FAILURE_LIMIT);
                 return true;
             }
             return false;

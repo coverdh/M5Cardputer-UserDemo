@@ -17,13 +17,17 @@ typedef enum {
     BLE_HID_DEVICE_STATE_CONNECTED,
 } BleHidDeviceState_t;
 
+typedef void (*ble_hid_device_helper_output_callback_t)(const uint8_t* data, uint8_t len);
+
 void ble_hid_device_helper_init(void);
 void ble_hid_device_helper_send(uint8_t* buffer);
 void ble_hid_device_helper_send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
 void ble_hid_device_helper_send_consumer(uint16_t usage_id);
 bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta);
 bool ble_hid_device_helper_send_macctl_play_pause(void);
+void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback);
 BleHidDeviceState_t ble_hid_device_helper_get_state(void);
+bool ble_hid_device_helper_is_ready(void);
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle);
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle);
 void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled);

@@ -9,7 +9,7 @@ menu "HID Example Configuration"
 
     choice EXAMPLE_HID_DEVICE_ROLE
         prompt "HID Device Role"
-        depends on BT_NIMBLE_ENABLED
+        depends on BT_NIMBLE_ENABLED || BT_BLE_ENABLED
         default EXAMPLE_MEDIA_ENABLE
         help
             Three Supported Roles for Device
@@ -18,15 +18,15 @@ menu "HID Example Configuration"
             - Mouse
 
         config EXAMPLE_MEDIA_ENABLE
-            select BT_NIMBLE_HID_SERVICE
+            select BT_NIMBLE_HID_SERVICE if BT_NIMBLE_ENABLED
             bool "Enable Media Device"
 
         config EXAMPLE_KBD_ENABLE
-            select BT_NIMBLE_HID_SERVICE
+            select BT_NIMBLE_HID_SERVICE if BT_NIMBLE_ENABLED
             bool "Enable Keyboard Device"
 
         config EXAMPLE_MOUSE_ENABLE
-            select BT_NIMBLE_HID_SERVICE
+            select BT_NIMBLE_HID_SERVICE if BT_NIMBLE_ENABLED
             bool "Enable Mouse Device"
     endchoice
 

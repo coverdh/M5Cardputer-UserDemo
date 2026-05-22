@@ -15,9 +15,11 @@ public struct HomeAssistantConfig: Equatable {
 public struct HomeAssistantState: Decodable, Equatable {
     public struct Attributes: Decodable, Equatable {
         public var volumeLevel: Double?
+        public var isVolumeMuted: Bool?
 
         enum CodingKeys: String, CodingKey {
             case volumeLevel = "volume_level"
+            case isVolumeMuted = "is_volume_muted"
         }
     }
 
@@ -28,10 +30,13 @@ public struct HomeAssistantState: Decodable, Equatable {
 public final class HomeAssistantClient {
     private let config: HomeAssistantConfig
     private let session: URLSession
+    private let muteCacheURL: URL
 
     public init(config: HomeAssistantConfig, session: URLSession = .shared) {
         self.config = config
         self.session = session
+        self.muteCacheURL = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".config/karabiner/.ha_appletv_last_volume")
     }
 
     public func handle(_ command: MacCtlCommand) async throws {
@@ -39,7 +44,7 @@ public final class HomeAssistantClient {
         case .volumeDelta(let delta):
             try await applyVolumeDelta(delta)
         case .playPause:
-            try await callService("media_player", "media_play_pause", body: ["entity_id": config.entityID])
+            try await toggleMute()
         }
     }
 
@@ -53,22 +58,38 @@ public final class HomeAssistantClient {
             return
         }
 
-        let state = try await fetchState()
-        if let volumeLevel = state.attributes.volumeLevel {
-            let current = Int((volumeLevel * 100.0).rounded())
-            let target = targetVolumePercent(current: current, delta: delta)
-            try await callService(
-                "media_player",
-                "volume_set",
-                body: ["entity_id": config.entityID, "volume_level": Double(target) / 100.0]
-            )
-            return
-        }
-
         let service = delta > 0 ? "volume_up" : "volume_down"
         for _ in 0..<min(abs(delta), 5) {
             try await callService("media_player", service, body: ["entity_id": config.entityID])
         }
+    }
+
+    private func toggleMute() async throws {
+        let state = try await fetchState()
+        let currentVolume = state.attributes.volumeLevel ?? 1.0
+        let muted = state.attributes.isVolumeMuted ?? (currentVolume <= 0.001)
+        do {
+            try await callService("media_player", "volume_mute", body: ["entity_id": config.entityID, "is_volume_muted": !muted])
+        } catch {
+            try await fallbackMuteToggle(targetMute: !muted, currentVolume: currentVolume)
+        }
+    }
+
+    private func fallbackMuteToggle(targetMute: Bool, currentVolume: Double) async throws {
+        if targetMute {
+            if currentVolume > 0.001 {
+                try? "\(currentVolume)\n".write(to: muteCacheURL, atomically: true, encoding: .utf8)
+            }
+            try await callService("media_player", "volume_set", body: ["entity_id": config.entityID, "volume_level": 0.0])
+            return
+        }
+
+        var restoreVolume = 0.15
+        if let cached = try? String(contentsOf: muteCacheURL).trimmingCharacters(in: .whitespacesAndNewlines),
+           let value = Double(cached), value > 0.001 {
+            restoreVolume = value
+        }
+        try await callService("media_player", "volume_set", body: ["entity_id": config.entityID, "volume_level": restoreVolume])
     }
 
     private func callService(_ domain: String, _ service: String, body: [String: Any]) async throws {
