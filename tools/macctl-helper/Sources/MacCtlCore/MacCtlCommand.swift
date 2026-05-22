@@ -18,6 +18,29 @@ public enum MacCtlCommand: Equatable {
             return nil
         }
     }
+
+    public init?(hotKeyID: UInt32) {
+        guard let hotKey = MacCtlHotKey(rawValue: hotKeyID) else {
+            return nil
+        }
+
+        switch hotKey {
+        case .volumeUp:
+            self = .volumeDelta(1)
+        case .volumeDown:
+            self = .volumeDelta(-1)
+        case .playPause:
+            self = .playPause
+        }
+    }
+}
+
+public enum MacCtlHotKey: UInt32 {
+    case volumeUp = 1
+    case volumeDown = 2
+    case playPause = 3
+
+    public static let signature: UInt32 = 0x4D_43_54_4C
 }
 
 public func targetVolumePercent(current: Int, delta: Int, stepPercent: Int = 2) -> Int {

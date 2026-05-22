@@ -16,9 +16,5 @@
     <string>1</string>
     <key>LSUIElement</key>
     <true/>
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>MacCtl Helper uses Bluetooth to receive knob commands from the Cardputer.</string>
-    <key>NSBluetoothPeripheralUsageDescription</key>
-    <string>MacCtl Helper uses Bluetooth to receive knob commands from the Cardputer.</string>
 </dict>
 </plist>

@@ -766,8 +766,7 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
 #endif /* CONFIG_BT_BLE_ENABLED */
 
 #if CONFIG_BT_NIMBLE_ENABLED
-#define GATT_SVR_SVC_HID_UUID    0x1812
-#define GATT_SVR_SVC_MACCTL_UUID 0xFFF0
+#define GATT_SVR_SVC_HID_UUID 0x1812
 
 extern void ble_hid_task_start_up(void);
 static struct ble_hs_adv_fields fields;
@@ -805,11 +804,11 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
     fields.name_len         = strlen(device_name);
     fields.name_is_complete = 1;
 
-    uuid16   = (ble_uuid16_t *)malloc(sizeof(ble_uuid16_t) * 2);
-    uuid16_1 = (ble_uuid16_t[]){BLE_UUID16_INIT(GATT_SVR_SVC_HID_UUID), BLE_UUID16_INIT(GATT_SVR_SVC_MACCTL_UUID)};
-    memcpy(uuid16, uuid16_1, sizeof(ble_uuid16_t) * 2);
+    uuid16   = (ble_uuid16_t *)malloc(sizeof(ble_uuid16_t));
+    uuid16_1 = (ble_uuid16_t[]){BLE_UUID16_INIT(GATT_SVR_SVC_HID_UUID)};
+    memcpy(uuid16, uuid16_1, sizeof(ble_uuid16_t));
     fields.uuids16             = uuid16;
-    fields.num_uuids16         = 2;
+    fields.num_uuids16         = 1;
     fields.uuids16_is_complete = 1;
 
     /* Initialize the security configuration */

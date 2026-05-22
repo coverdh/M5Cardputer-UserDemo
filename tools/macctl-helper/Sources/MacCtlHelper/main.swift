@@ -1,12 +1,8 @@
-import CoreBluetooth
+import Carbon
 import Foundation
 import MacCtlCore
 
-private let macCtlServiceUUID = CBUUID(string: "FFF0")
-private let macCtlCommandUUID = CBUUID(string: "FFF1")
-
 private struct HelperConfig {
-    var deviceName = "MacCtl"
     var homeAssistant: HomeAssistantConfig?
     var expectedCommands: Int?
 
@@ -20,8 +16,6 @@ private struct HelperConfig {
                 continue
             }
             switch arg {
-            case "--device":
-                config.deviceName = value
             case "--ha-url":
                 values["MACCTL_HA_URL"] = value
             case "--ha-token":
@@ -48,12 +42,11 @@ private struct HelperConfig {
     }
 }
 
-private final class MacCtlBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+private final class MacCtlBridge {
     private let config: HelperConfig
     private let homeAssistant: HomeAssistantClient?
-    private var central: CBCentralManager!
-    private var peripheral: CBPeripheral?
     private var handledCommands = 0
+    private var hotKeyRefs: [EventHotKeyRef?] = []
 
     init(config: HelperConfig) {
         self.config = config
@@ -62,75 +55,63 @@ private final class MacCtlBridge: NSObject, CBCentralManagerDelegate, CBPeripher
         } else {
             self.homeAssistant = nil
         }
-        super.init()
-        self.central = CBCentralManager(delegate: self, queue: .main)
     }
 
-    func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        guard central.state == .poweredOn else {
-            print("Bluetooth state: \(central.state.rawValue)")
-            return
-        }
-        print("Scanning for \(config.deviceName)")
-        central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+    func start() {
+        installHotKeyHandler()
+        registerHotKey(keyCode: UInt32(kVK_F18), commandID: MacCtlHotKey.volumeUp.rawValue, label: "F18 volume up")
+        registerHotKey(keyCode: UInt32(kVK_F19), commandID: MacCtlHotKey.volumeDown.rawValue, label: "F19 volume down")
+        registerHotKey(keyCode: UInt32(kVK_F20), commandID: MacCtlHotKey.playPause.rawValue, label: "F20 play/pause")
+        print("MacCtl Helper listening for BLE HID hotkeys")
     }
 
-    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
-        guard peripheral.name == config.deviceName || advertisedName == config.deviceName else {
-            return
-        }
-
-        self.peripheral = peripheral
-        peripheral.delegate = self
-        central.stopScan()
-        print("Connecting to \(config.deviceName)")
-        central.connect(peripheral)
-    }
-
-    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        print("Connected; discovering MacCtl service")
-        peripheral.discoverServices([macCtlServiceUUID])
-    }
-
-    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        print("Disconnected; scanning again")
-        self.peripheral = nil
-        central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
-    }
-
-    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        if let error {
-            print("Service discovery failed: \(error.localizedDescription)")
-            return
-        }
-        peripheral.services?.forEach { service in
-            if service.uuid == macCtlServiceUUID {
-                peripheral.discoverCharacteristics([macCtlCommandUUID], for: service)
+    private func installHotKeyHandler() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        let status = InstallEventHandler(GetApplicationEventTarget(), { _, eventRef, userData in
+            guard let eventRef, let userData else {
+                return noErr
             }
-        }
-    }
 
-    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        if let error {
-            print("Characteristic discovery failed: \(error.localizedDescription)")
-            return
-        }
-        service.characteristics?.forEach { characteristic in
-            if characteristic.uuid == macCtlCommandUUID {
-                print("Subscribed to MacCtl command notifications")
-                peripheral.setNotifyValue(true, for: characteristic)
+            var hotKeyID = EventHotKeyID()
+            let status = GetEventParameter(
+                eventRef,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &hotKeyID
+            )
+            guard status == noErr else {
+                return status
             }
+
+            let bridge = Unmanaged<MacCtlBridge>.fromOpaque(userData).takeUnretainedValue()
+            bridge.handleHotKey(commandID: hotKeyID.id)
+            return noErr
+        }, 1, &eventType, selfPtr, nil)
+
+        if status != noErr {
+            print("Hotkey handler install failed: \(status)")
         }
     }
 
-    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        if let error {
-            print("Notification failed: \(error.localizedDescription)")
-            return
+    private func registerHotKey(keyCode: UInt32, commandID: UInt32, label: String) {
+        let hotKeyID = EventHotKeyID(signature: MacCtlHotKey.signature, id: commandID)
+        var hotKeyRef: EventHotKeyRef?
+        let status = RegisterEventHotKey(keyCode, 0, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        if status == noErr {
+            hotKeyRefs.append(hotKeyRef)
+            print("Registered \(label)")
+        } else {
+            print("Failed to register \(label): \(status)")
         }
-        guard let data = characteristic.value, let command = MacCtlCommand(payload: data) else {
-            print("Ignored unknown command")
+    }
+
+    private func handleHotKey(commandID: UInt32) {
+        guard let command = MacCtlCommand(hotKeyID: commandID) else {
+            print("Ignored unknown hotkey \(commandID)")
             return
         }
 
@@ -157,4 +138,5 @@ private final class MacCtlBridge: NSObject, CBCentralManagerDelegate, CBPeripher
 
 private let config = HelperConfig.load()
 private let bridge = MacCtlBridge(config: config)
+bridge.start()
 RunLoop.main.run()

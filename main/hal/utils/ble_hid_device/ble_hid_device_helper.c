@@ -23,11 +23,8 @@
 
 #if CONFIG_BT_NIMBLE_ENABLED
 #include "host/ble_hs.h"
-#include "host/ble_gatt.h"
-#include "nimble/nimble_npl.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
-#include "os/os_mbuf.h"
 #else
 #include "esp_bt_defs.h"
 #if CONFIG_BT_BLE_ENABLED
@@ -53,11 +50,6 @@ static const char *TAG = "ble_hid";
 
 static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 
-#define MACCTL_SERVICE_UUID      0xFFF0
-#define MACCTL_COMMAND_CHAR_UUID 0xFFF1
-#define MACCTL_CMD_VOLUME_DELTA  1
-#define MACCTL_CMD_PLAY_PAUSE    2
-
 #define BLE_HID_MAP_INDEX_KEYBOARD 0
 #define BLE_HID_MAP_INDEX_MOUSE    1
 #define BLE_HID_MAP_INDEX_MEDIA    2
@@ -65,6 +57,10 @@ static BleHidDeviceState_t s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
 #define BLE_HID_RPT_ID_KEYBOARD 1
 #define BLE_HID_RPT_ID_MOUSE    2
 #define BLE_HID_RPT_ID_MEDIA    3
+
+#define USB_HID_KEY_F18 0x69
+#define USB_HID_KEY_F19 0x6A
+#define USB_HID_KEY_F20 0x6B
 
 typedef struct {
     TaskHandle_t task_hdl;
@@ -75,122 +71,6 @@ typedef struct {
 
 #if CONFIG_BT_BLE_ENABLED || CONFIG_BT_NIMBLE_ENABLED
 static local_param_t s_ble_hid_param = {0};
-
-#if CONFIG_BT_NIMBLE_ENABLED
-static uint16_t s_macctl_conn_handle          = BLE_HS_CONN_HANDLE_NONE;
-static uint16_t s_macctl_command_value_handle = 0;
-static bool s_macctl_command_notify_enabled   = false;
-extern struct ble_npl_eventq *ble_hs_evq_get(void);
-
-typedef struct {
-    struct ble_npl_event event;
-    uint8_t payload[3];
-    uint16_t conn_handle;
-    uint16_t value_handle;
-    bool in_use;
-} macctl_notify_event_t;
-
-#define MACCTL_NOTIFY_EVENT_COUNT 4
-static macctl_notify_event_t s_macctl_notify_events[MACCTL_NOTIFY_EVENT_COUNT];
-static bool s_macctl_notify_events_initialized = false;
-
-static void macctl_notify_event_cb(struct ble_npl_event *event)
-{
-    macctl_notify_event_t *notify_event = (macctl_notify_event_t *)ble_npl_event_get_arg(event);
-    struct os_mbuf *om                  = ble_hs_mbuf_from_flat(notify_event->payload, sizeof(notify_event->payload));
-    if (!om) {
-        notify_event->in_use = false;
-        return;
-    }
-
-    int rc = ble_gatts_notify_custom(notify_event->conn_handle, notify_event->value_handle, om);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "macctl notify failed: %d", rc);
-    }
-    notify_event->in_use = false;
-}
-
-static void macctl_notify_events_init(void)
-{
-    if (s_macctl_notify_events_initialized) {
-        return;
-    }
-    for (size_t i = 0; i < MACCTL_NOTIFY_EVENT_COUNT; ++i) {
-        ble_npl_event_init(&s_macctl_notify_events[i].event, macctl_notify_event_cb, &s_macctl_notify_events[i]);
-    }
-    s_macctl_notify_events_initialized = true;
-}
-
-static int macctl_command_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt,
-                                    void *arg)
-{
-    (void)conn_handle;
-    (void)attr_handle;
-    (void)ctxt;
-    (void)arg;
-    return 0;
-}
-
-static const struct ble_gatt_chr_def s_macctl_characteristics[] = {
-    {
-        .uuid       = BLE_UUID16_DECLARE(MACCTL_COMMAND_CHAR_UUID),
-        .access_cb  = macctl_command_access_cb,
-        .val_handle = &s_macctl_command_value_handle,
-        .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
-    },
-    {0},
-};
-
-static const struct ble_gatt_svc_def s_macctl_services[] = {
-    {
-        .type            = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid            = BLE_UUID16_DECLARE(MACCTL_SERVICE_UUID),
-        .characteristics = s_macctl_characteristics,
-    },
-    {0},
-};
-
-static int macctl_service_init(void)
-{
-    int rc = ble_gatts_count_cfg(s_macctl_services);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "macctl service count failed: %d", rc);
-        return rc;
-    }
-
-    rc = ble_gatts_add_svcs(s_macctl_services);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "macctl service add failed: %d", rc);
-    }
-    return rc;
-}
-
-static bool macctl_notify(uint8_t command, int8_t value)
-{
-    if (s_macctl_conn_handle == BLE_HS_CONN_HANDLE_NONE || s_macctl_command_value_handle == 0 ||
-        !s_macctl_command_notify_enabled) {
-        return false;
-    }
-
-    macctl_notify_events_init();
-    for (size_t i = 0; i < MACCTL_NOTIFY_EVENT_COUNT; ++i) {
-        if (s_macctl_notify_events[i].in_use) {
-            continue;
-        }
-        s_macctl_notify_events[i].payload[0]    = command;
-        s_macctl_notify_events[i].payload[1]    = (uint8_t)value;
-        s_macctl_notify_events[i].payload[2]    = 0;
-        s_macctl_notify_events[i].conn_handle   = s_macctl_conn_handle;
-        s_macctl_notify_events[i].value_handle  = s_macctl_command_value_handle;
-        s_macctl_notify_events[i].in_use        = true;
-        ble_npl_eventq_put(ble_hs_evq_get(), &s_macctl_notify_events[i].event);
-        return true;
-    }
-
-    ESP_LOGW(TAG, "macctl notify queue full");
-    return false;
-}
-#endif
 
 const unsigned char mediaReportMap[] = {
     0x05, 0x0C,  // Usage Page (Consumer)
@@ -1114,11 +994,6 @@ void _demo_app_main(void)
     ble_store_config_init();
 
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ret                        = macctl_service_init();
-    if (ret) {
-        ESP_LOGE(TAG, "macctl service init failed: %d", ret);
-        return;
-    }
 
     /* Starting nimble task after gatts is initialized*/
     ret = esp_nimble_enable(ble_hid_device_host_task);
@@ -1155,23 +1030,53 @@ void ble_hid_device_helper_send_consumer(uint16_t usage_id)
     esp_hidd_send_consumer_value((uint8_t)usage_id, false);
 }
 
+static bool ble_hid_device_helper_send_keycode(uint8_t keycode)
+{
+    if (!s_ble_hid_param.hid_dev || s_ble_hid_keyboard_state != BLE_HID_DEVICE_STATE_CONNECTED) {
+        return false;
+    }
+
+    uint8_t buffer[8] = {0};
+    buffer[2]         = keycode;
+    esp_err_t ret     = esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_KEYBOARD,
+                                               BLE_HID_RPT_ID_KEYBOARD, buffer, sizeof(buffer));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "macctl key press failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+    memset(buffer, 0, sizeof(buffer));
+    ret = esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, BLE_HID_MAP_INDEX_KEYBOARD, BLE_HID_RPT_ID_KEYBOARD, buffer,
+                                 sizeof(buffer));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "macctl key release failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    return true;
+}
+
 bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta)
 {
-#if CONFIG_BT_NIMBLE_ENABLED
-    return macctl_notify(MACCTL_CMD_VOLUME_DELTA, delta);
-#else
-    (void)delta;
-    return false;
-#endif
+    uint8_t keycode = delta > 0 ? USB_HID_KEY_F18 : USB_HID_KEY_F19;
+    uint8_t count   = (uint8_t)abs(delta);
+    if (count == 0) {
+        return true;
+    }
+
+    for (uint8_t i = 0; i < count; ++i) {
+        if (!ble_hid_device_helper_send_keycode(keycode)) {
+            return false;
+        }
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+    return true;
 }
 
 bool ble_hid_device_helper_send_macctl_play_pause(void)
 {
-#if CONFIG_BT_NIMBLE_ENABLED
-    return macctl_notify(MACCTL_CMD_PLAY_PAUSE, 0);
-#else
-    return false;
-#endif
+    return ble_hid_device_helper_send_keycode(USB_HID_KEY_F20);
 }
 
 BleHidDeviceState_t ble_hid_device_helper_get_state(void)
@@ -1181,39 +1086,17 @@ BleHidDeviceState_t ble_hid_device_helper_get_state(void)
 
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
-#if CONFIG_BT_NIMBLE_ENABLED
-    s_macctl_conn_handle                = conn_handle;
-    s_macctl_command_notify_enabled     = false;
-#else
     (void)conn_handle;
-#endif
 }
 
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
 {
-#if CONFIG_BT_NIMBLE_ENABLED
-    if (s_macctl_conn_handle == conn_handle) {
-        s_macctl_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        s_macctl_command_notify_enabled = false;
-    }
-#else
     (void)conn_handle;
-#endif
 }
 
 void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled)
 {
-#if CONFIG_BT_NIMBLE_ENABLED
-    if (s_macctl_conn_handle != conn_handle || s_macctl_command_value_handle == 0) {
-        return;
-    }
-    if (attr_handle == s_macctl_command_value_handle || attr_handle == s_macctl_command_value_handle + 1) {
-        s_macctl_command_notify_enabled = notify_enabled;
-        ESP_LOGI(TAG, "macctl command notify %s", notify_enabled ? "enabled" : "disabled");
-    }
-#else
     (void)conn_handle;
     (void)attr_handle;
     (void)notify_enabled;
-#endif
 }

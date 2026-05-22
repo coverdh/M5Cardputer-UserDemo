@@ -12,6 +12,13 @@ final class MacCtlCommandTests: XCTestCase {
         XCTAssertEqual(MacCtlCommand(payload: Data([2, 0, 0])), .playPause)
     }
 
+    func testParsesHotKeys() {
+        XCTAssertEqual(MacCtlCommand(hotKeyID: MacCtlHotKey.volumeUp.rawValue), .volumeDelta(1))
+        XCTAssertEqual(MacCtlCommand(hotKeyID: MacCtlHotKey.volumeDown.rawValue), .volumeDelta(-1))
+        XCTAssertEqual(MacCtlCommand(hotKeyID: MacCtlHotKey.playPause.rawValue), .playPause)
+        XCTAssertNil(MacCtlCommand(hotKeyID: 99))
+    }
+
     func testRejectsUnknownPayloads() {
         XCTAssertNil(MacCtlCommand(payload: Data()))
         XCTAssertNil(MacCtlCommand(payload: Data([99, 0, 0])))
