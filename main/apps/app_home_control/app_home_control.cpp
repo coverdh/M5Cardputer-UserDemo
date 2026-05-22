@@ -104,6 +104,7 @@ void AppHomeControl::onRunning()
 void AppHomeControl::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
+    GetHAL().setFullscreenMode(false);
     exitPowerSave();
     if (_screen_off) {
         GetHAL().display.setBrightness(static_cast<uint8_t>(_display_brightness_before_sleep * 255 / 100));
@@ -660,6 +661,10 @@ void AppHomeControl::refreshHomePodState()
 
 void AppHomeControl::render()
 {
+    if (_mode != Mode::Dashboard) {
+        GetHAL().setFullscreenMode(false);
+    }
+
     switch (_mode) {
         case Mode::Setup:
             renderSetup();
@@ -751,6 +756,13 @@ void AppHomeControl::renderWifiPrompt(const char* title, bool maskInput)
 
 void AppHomeControl::renderDashboard()
 {
+    const auto& nowPlaying = GetHAL().bleMacCtlNowPlaying();
+    if (GetHAL().bleMacCtlIsConnected() && nowPlaying.active) {
+        renderNowPlaying();
+        return;
+    }
+
+    GetHAL().setFullscreenMode(false);
     auto& canvas = GetHAL().canvas;
     canvas.fillScreen(THEME_COLOR_BG);
     canvas.setTextSize(1);
@@ -794,8 +806,83 @@ void AppHomeControl::renderDashboard()
     GetHAL().pushCanvas();
 }
 
+void AppHomeControl::renderNowPlaying()
+{
+    GetHAL().setFullscreenMode(true);
+    auto& display = GetHAL().display;
+    const auto& state = GetHAL().bleMacCtlNowPlaying();
+    const int width = display.width();
+    const int height = display.height();
+
+    uint32_t hash = 2166136261u;
+    for (const char* p = state.title[0] ? state.title : "ADVCtl"; *p; ++p) {
+        hash ^= static_cast<uint8_t>(*p);
+        hash *= 16777619u;
+    }
+    const uint16_t coverA = display.color565(40 + (hash & 0x3F), 55 + ((hash >> 6) & 0x3F), 80 + ((hash >> 12) & 0x5F));
+    const uint16_t coverB = display.color565(120 + ((hash >> 4) & 0x3F), 60 + ((hash >> 10) & 0x3F), 80 + ((hash >> 16) & 0x3F));
+
+    display.fillScreen(display.color565(8, 10, 14));
+    for (int y = 0; y < height; y += 3) {
+        const uint8_t shade = static_cast<uint8_t>(12 + y / 5);
+        display.fillRect(0, y, width, 3, display.color565(shade, shade + 2, shade + 8));
+    }
+
+    const int cover = std::min(84, height - 36);
+    const int coverX = 12;
+    const int coverY = 14;
+    display.fillRoundRect(coverX, coverY, cover, cover, 10, coverA);
+    display.fillRoundRect(coverX + 8, coverY + 8, cover - 16, cover - 16, 8, coverB);
+    display.fillCircle(coverX + cover / 2, coverY + cover / 2, cover / 5, display.color565(250, 250, 250));
+    display.fillCircle(coverX + cover / 2, coverY + cover / 2, cover / 12, coverA);
+
+    const int textX = coverX + cover + 14;
+    const int textW = width - textX - 12;
+    display.setTextSize(1);
+    display.setTextColor(TFT_WHITE);
+    display.setCursor(textX, 18);
+    std::string title = state.title[0] ? state.title : "Playing";
+    if (static_cast<int>(title.size()) > textW / 6) {
+        title = title.substr(0, std::max(0, textW / 6 - 1)) + ".";
+    }
+    display.print(title.c_str());
+
+    display.setTextColor(display.color565(175, 185, 195));
+    display.setCursor(textX, 35);
+    std::string artist = state.artist[0] ? state.artist : "HomePod";
+    if (static_cast<int>(artist.size()) > textW / 6) {
+        artist = artist.substr(0, std::max(0, textW / 6 - 1)) + ".";
+    }
+    display.print(artist.c_str());
+
+    display.setTextColor(TFT_WHITE);
+    display.setCursor(textX, 58);
+    display.printf("%s  Vol %u%%", state.playing ? "Playing" : "Paused", state.volumePercent);
+    if (state.muted) {
+        display.print(" muted");
+    }
+
+    const int barX = textX;
+    const int barY = 84;
+    const int barW = textW;
+    const int fillW = std::max(0, std::min(barW, barW * static_cast<int>(state.progressPercent) / 100));
+    display.fillRoundRect(barX, barY, barW, 5, 3, display.color565(60, 65, 76));
+    display.fillRoundRect(barX, barY, fillW, 5, 3, TFT_WHITE);
+    display.setTextColor(display.color565(175, 185, 195));
+    display.setCursor(barX, barY + 11);
+    display.printf("%u%%", state.progressPercent);
+
+    const int iconX = width - 36;
+    const int iconY = height - 32;
+    display.drawCircle(iconX, iconY, 13, display.color565(210, 215, 225));
+    display.setCursor(iconX - 5, iconY - 4);
+    display.setTextColor(TFT_WHITE);
+    display.print(state.playing ? ">" : "||");
+}
+
 void AppHomeControl::renderPointer()
 {
+    GetHAL().setFullscreenMode(false);
     auto& canvas = GetHAL().canvas;
     canvas.fillScreen(THEME_COLOR_BG);
     canvas.setCursor(0, 0);
@@ -955,6 +1042,17 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
     }
 
     markUserActivity();
+    if (!GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_BACKSLASH) {
+        if (keyEvent.state) {
+            GetHAL().bleMouseClick(1);
+            setStatus("Left click");
+            if (_mode == Mode::Dashboard) {
+                render();
+            }
+        }
+        return;
+    }
+
     if (_mode != Mode::Dashboard && GetHAL().keyboard.isFnPressed() && keyEvent.keyCode == KEY_S) {
         if (!keyEvent.state) {
             sleepDisplay();

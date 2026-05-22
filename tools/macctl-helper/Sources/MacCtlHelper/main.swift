@@ -18,6 +18,9 @@ private let advCtlAudioTestCommand: UInt8 = 0x82
 private let advCtlResetConfigCommand: UInt8 = 0x83
 private let advCtlTimeSyncCommand: UInt8 = 0x84
 private let advCtlSetPowerCommand: UInt8 = 0x86
+private let advCtlNowPlayingCommand: UInt8 = 0x87
+private let advCtlNowPlayingTitleCommand: UInt8 = 0x88
+private let advCtlNowPlayingArtistCommand: UInt8 = 0x89
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
@@ -52,6 +55,18 @@ private func log(_ message: String) {
 
 private func hidProperty<T>(_ device: IOHIDDevice, _ key: CFString, as type: T.Type) -> T? {
     IOHIDDeviceGetProperty(device, key) as? T
+}
+
+private func clippedUTF8Bytes(_ string: String, maxBytes: Int) -> [UInt8] {
+    var result: [UInt8] = []
+    for scalar in string.unicodeScalars {
+        let bytes = Array(String(scalar).utf8)
+        if result.count + bytes.count > maxBytes {
+            break
+        }
+        result.append(contentsOf: bytes)
+    }
+    return result
 }
 
 private func separatorBox() -> NSBox {
@@ -102,6 +117,42 @@ private struct HelperConfig {
             config.homeAssistant = HomeAssistantConfig(baseURL: url, token: token, entityID: entity)
         }
         return config
+    }
+}
+
+private struct NowPlayingSnapshot: Equatable {
+    var active: Bool
+    var playing: Bool
+    var muted: Bool
+    var volumePercent: UInt8
+    var progressPercent: UInt8
+    var title: String
+    var artist: String
+
+    init(active: Bool, playing: Bool, muted: Bool, volumePercent: UInt8, progressPercent: UInt8, title: String, artist: String) {
+        self.active = active
+        self.playing = playing
+        self.muted = muted
+        self.volumePercent = volumePercent
+        self.progressPercent = progressPercent
+        self.title = title
+        self.artist = artist
+    }
+
+    init(state: HomeAssistantState) {
+        let attributes = state.attributes
+        playing = state.state == "playing"
+        muted = attributes.isVolumeMuted ?? ((attributes.volumeLevel ?? 0) <= 0.001)
+        let hasMedia = !(attributes.mediaTitle ?? "").isEmpty || !(attributes.mediaArtist ?? "").isEmpty
+        active = (state.state == "playing" || state.state == "paused") && hasMedia
+        volumePercent = UInt8(min(100, max(0, Int(((attributes.volumeLevel ?? 0) * 100).rounded()))))
+        if let position = attributes.mediaPosition, let duration = attributes.mediaDuration, duration > 0 {
+            progressPercent = UInt8(min(100, max(0, Int((position / duration * 100).rounded()))))
+        } else {
+            progressPercent = 0
+        }
+        title = attributes.mediaTitle ?? (active ? "Playing" : "")
+        artist = attributes.mediaArtist ?? attributes.mediaAlbumName ?? ""
     }
 }
 
@@ -232,6 +283,8 @@ private final class ADVCtlBridge {
     private var hidManager: IOHIDManager?
     private var hidDevices: [HIDDeviceRegistration] = []
     private var pressedKnobKeys = Set<UInt8>()
+    private var nowPlayingTask: Task<Void, Never>?
+    private var lastNowPlayingTextSignature = ""
     weak var delegate: ADVCtlBridgeDelegate?
 
     init(config: HelperConfig) {
@@ -244,6 +297,7 @@ private final class ADVCtlBridge {
     }
 
     deinit {
+        nowPlayingTask?.cancel()
         for registration in hidDevices {
             registration.reportBuffer.deallocate()
         }
@@ -281,6 +335,7 @@ private final class ADVCtlBridge {
         if let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> {
             devices.forEach(attach)
         }
+        startNowPlayingSync()
     }
 
     func sendSettings(_ settings: JoystickSettings) {
@@ -333,7 +388,65 @@ private final class ADVCtlBridge {
                            successMessage: active ? "ADV recording test activated" : "ADV recording test stopped")
     }
 
-    private func sendControlPayload(_ bytes: [UInt8], successMessage: String) {
+    @MainActor private func sendNowPlaying(_ snapshot: NowPlayingSnapshot) {
+        var flags: UInt8 = 0
+        if snapshot.active { flags |= 0x01 }
+        if snapshot.playing { flags |= 0x02 }
+        if snapshot.muted { flags |= 0x04 }
+        sendControlPayload([advCtlNowPlayingCommand, flags, snapshot.volumePercent, snapshot.progressPercent],
+                           successMessage: "Synced now playing",
+                           updateStatus: false)
+
+        let signature = "\(snapshot.title)\u{1f}\(snapshot.artist)"
+        guard snapshot.active, signature != lastNowPlayingTextSignature else {
+            if !snapshot.active {
+                lastNowPlayingTextSignature = ""
+            }
+            return
+        }
+        lastNowPlayingTextSignature = signature
+        sendText(command: advCtlNowPlayingTitleCommand, text: snapshot.title)
+        sendText(command: advCtlNowPlayingArtistCommand, text: snapshot.artist)
+    }
+
+    @MainActor private func sendText(command: UInt8, text: String) {
+        let bytes = clippedUTF8Bytes(text, maxBytes: 32)
+        let packetCount = max(1, (bytes.count + 1) / 2)
+        for index in 0..<packetCount {
+            let firstIndex = index * 2
+            let first = firstIndex < bytes.count ? bytes[firstIndex] : 0
+            let second = firstIndex + 1 < bytes.count ? bytes[firstIndex + 1] : 0
+            sendControlPayload([command, UInt8(index), first, second],
+                               successMessage: "Synced now playing text",
+                               updateStatus: false)
+        }
+    }
+
+    private func startNowPlayingSync() {
+        guard let homeAssistant, nowPlayingTask == nil else {
+            return
+        }
+        nowPlayingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    let state = try await homeAssistant.fetchState()
+                    let snapshot = NowPlayingSnapshot(state: state)
+                    await self?.sendNowPlaying(snapshot)
+                } catch {
+                    await self?.sendNowPlaying(NowPlayingSnapshot(active: false,
+                                                                  playing: false,
+                                                                  muted: false,
+                                                                  volumePercent: 0,
+                                                                  progressPercent: 0,
+                                                                  title: "",
+                                                                  artist: ""))
+                }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
+    }
+
+    private func sendControlPayload(_ bytes: [UInt8], successMessage: String, updateStatus: Bool = true) {
         var payload = bytes
         var sent = false
         for registration in hidDevices {
@@ -348,10 +461,12 @@ private final class ADVCtlBridge {
             if status == kIOReturnSuccess {
                 sent = true
             } else if status != kIOReturnUnsupported {
-                updateMessage("Set audio test failed: \(status)")
+                updateMessage("Set control payload failed: \(status)")
             }
         }
-        updateMessage(sent ? successMessage : "ADV control endpoint not connected")
+        if updateStatus {
+            updateMessage(sent ? successMessage : "ADV control endpoint not connected")
+        }
     }
 
     private func attach(_ device: IOHIDDevice) {

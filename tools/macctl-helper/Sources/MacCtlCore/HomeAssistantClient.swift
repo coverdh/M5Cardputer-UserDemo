@@ -16,10 +16,20 @@ public struct HomeAssistantState: Decodable, Equatable {
     public struct Attributes: Decodable, Equatable {
         public var volumeLevel: Double?
         public var isVolumeMuted: Bool?
+        public var mediaTitle: String?
+        public var mediaArtist: String?
+        public var mediaAlbumName: String?
+        public var mediaPosition: Double?
+        public var mediaDuration: Double?
 
         enum CodingKeys: String, CodingKey {
             case volumeLevel = "volume_level"
             case isVolumeMuted = "is_volume_muted"
+            case mediaTitle = "media_title"
+            case mediaArtist = "media_artist"
+            case mediaAlbumName = "media_album_name"
+            case mediaPosition = "media_position"
+            case mediaDuration = "media_duration"
         }
     }
 

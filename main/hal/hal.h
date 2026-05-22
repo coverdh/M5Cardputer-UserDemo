@@ -123,12 +123,23 @@ public:
     void bleMouseMove(int8_t dx, int8_t dy, int8_t wheel = 0);
     void bleMouseClick(uint8_t buttons);
     void bleConsumerSend(uint16_t usageId);
+    struct MacCtlNowPlayingState {
+        bool active = false;
+        bool playing = false;
+        bool muted = false;
+        uint8_t volumePercent = 0;
+        uint8_t progressPercent = 0;
+        uint32_t updatedMs = 0;
+        char title[33] = {};
+        char artist[33] = {};
+    };
     bool bleMacCtlVolumeDelta(int8_t delta);
     bool bleMacCtlPlayPause();
     bool bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode);
     bool bleMacCtlPowerConfig(uint8_t screenTimeoutSeconds, uint8_t powerSaveTimeoutMinutes);
     bool bleMacCtlIsConnected() const;
     bool bleMacCtlTimeSynced() const;
+    const MacCtlNowPlayingState& bleMacCtlNowPlaying() const;
     bool bleConsumeAudioTestRequest(bool& active);
 
     /* ----------------------------------- USB ---------------------------------- */

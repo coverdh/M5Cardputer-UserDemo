@@ -129,6 +129,7 @@ private:
     void renderSetup();
     void renderWifiPrompt(const char* title, bool maskInput);
     void renderDashboard();
+    void renderNowPlaying();
     void renderPointer();
     void renderKeyboard();
     void renderVolume();

@@ -10,6 +10,7 @@
 #include <M5Unified.hpp>
 #include <esp_mac.h>
 #include <algorithm>
+#include <cstring>
 #include <memory>
 
 static std::unique_ptr<Hal> _hal_instance;
@@ -653,7 +654,26 @@ static bool s_advctl_control_ready = false;
 static bool s_advctl_audio_test_pending = false;
 static bool s_advctl_audio_test_active = false;
 static bool s_advctl_time_synced = false;
+static Hal::MacCtlNowPlayingState s_advctl_now_playing;
 static constexpr time_t ADVCTL_TIME_SYNC_EPOCH = 1704067200;  // 2024-01-01 00:00:00 UTC
+
+static void write_advctl_text_chunk(char* target, size_t target_len, uint8_t offset, uint8_t a, uint8_t b)
+{
+    if (!target || target_len == 0) {
+        return;
+    }
+    if (offset == 0) {
+        std::memset(target, 0, target_len);
+    }
+    const size_t pos = static_cast<size_t>(offset) * 2;
+    if (pos < target_len - 1) {
+        target[pos] = static_cast<char>(a);
+    }
+    if (pos + 1 < target_len - 1) {
+        target[pos + 1] = static_cast<char>(b);
+    }
+    target[target_len - 1] = '\0';
+}
 
 static uint8_t advctl_config_flags()
 {
@@ -737,6 +757,32 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
         return;
     }
 
+    if (data[0] == 0x87 && len >= 4) {
+        s_advctl_now_playing.active = (data[1] & 0x01) != 0;
+        s_advctl_now_playing.playing = (data[1] & 0x02) != 0;
+        s_advctl_now_playing.muted = (data[1] & 0x04) != 0;
+        s_advctl_now_playing.volumePercent = std::min<uint8_t>(100, data[2]);
+        s_advctl_now_playing.progressPercent = std::min<uint8_t>(100, data[3]);
+        s_advctl_now_playing.updatedMs = GetHAL().millis();
+        if (!s_advctl_now_playing.active) {
+            std::memset(s_advctl_now_playing.title, 0, sizeof(s_advctl_now_playing.title));
+            std::memset(s_advctl_now_playing.artist, 0, sizeof(s_advctl_now_playing.artist));
+        }
+        return;
+    }
+
+    if (data[0] == 0x88 && len >= 4) {
+        write_advctl_text_chunk(s_advctl_now_playing.title, sizeof(s_advctl_now_playing.title), data[1], data[2], data[3]);
+        s_advctl_now_playing.updatedMs = GetHAL().millis();
+        return;
+    }
+
+    if (data[0] == 0x89 && len >= 4) {
+        write_advctl_text_chunk(s_advctl_now_playing.artist, sizeof(s_advctl_now_playing.artist), data[1], data[2], data[3]);
+        s_advctl_now_playing.updatedMs = GetHAL().millis();
+        return;
+    }
+
     if (len < 3 || data[0] != 0x81) {
         return;
     }
@@ -780,6 +826,7 @@ void Hal::bleControlStop()
     _is_ble_keyboard_inited = false;
     s_advctl_control_ready  = false;
     s_advctl_time_synced    = false;
+    s_advctl_now_playing    = {};
 }
 
 void Hal::bleKeyboardInit()
@@ -912,6 +959,11 @@ bool Hal::bleMacCtlIsConnected() const
 bool Hal::bleMacCtlTimeSynced() const
 {
     return s_advctl_time_synced;
+}
+
+const Hal::MacCtlNowPlayingState& Hal::bleMacCtlNowPlaying() const
+{
+    return s_advctl_now_playing;
 }
 
 bool Hal::bleConsumeAudioTestRequest(bool& active)
