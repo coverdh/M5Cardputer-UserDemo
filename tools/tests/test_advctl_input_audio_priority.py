@@ -24,6 +24,11 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("handleExternalInput();", block)
         self.assertLess(block.index("handleExternalInput();"), block.index("renderAudioWaveform();"))
 
+        header = (ROOT / "main/apps/app_home_control/app_home_control.h").read_text()
+        self.assertIn("AUDIO_TEST_LENGTH    = 120", header)
+        self.assertIn("AUDIO_TEST_RATE      = 16000", header)
+        self.assertIn("AUDIO_STREAM_PAYLOAD = 60", header)
+
     def test_app_entry_requests_chain_joystick_center_calibration(self):
         app_source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
         on_open = app_source[app_source.index("void AppHomeControl::onOpen()"):app_source.index("void AppHomeControl::onRunning()")]
@@ -99,6 +104,10 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("ble_hid_device_helper_handle_keyboard_output(param->output.data, param->output.length)", output_case)
         self.assertIn("MACCTL_LED_CMD_AUDIO_START", source)
         self.assertIn("uint8_t command[4] = {0x82", source)
+
+        defaults = (ROOT / "sdkconfig.defaults").read_text()
+        self.assertIn("CONFIG_BT_NIMBLE_ENABLED=y", defaults)
+        self.assertNotIn("CONFIG_BT_CLASSIC_ENABLED=y", defaults)
 
     def test_keyboard_report_map_keeps_output_byte_aligned(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()

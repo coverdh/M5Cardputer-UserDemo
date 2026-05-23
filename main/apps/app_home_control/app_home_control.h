@@ -89,7 +89,7 @@ private:
     static constexpr uint32_t DEFAULT_SCREEN_TIMEOUT_MS = 30000;
     static constexpr uint32_t DEFAULT_POWER_SAVE_TIMEOUT_MS = 180000;
     static constexpr int ACTION_COUNT            = 8;
-    static constexpr size_t AUDIO_TEST_LENGTH    = 200;
+    static constexpr size_t AUDIO_TEST_LENGTH    = 120;
     static constexpr size_t AUDIO_TEST_RATE      = 16000;
     static constexpr size_t AUDIO_STREAM_PAYLOAD = 60;
     static const Action ACTIONS[ACTION_COUNT];

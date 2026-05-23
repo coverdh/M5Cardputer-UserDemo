@@ -62,6 +62,9 @@ public:
             syslog(LOG_ERR, "ADVCtlAudio: StartIO failed; ring unavailable errno=%d", errno);
             return kAudioHardwareUnspecifiedError;
         }
+        if (runningClients_ == 1) {
+            ResetRingCursors();
+        }
         SetDemand(1);
         syslog(LOG_NOTICE,
                "ADVCtlAudio: StartIO running=%u read=%llu write=%llu underruns=%llu overruns=%llu",
@@ -214,6 +217,17 @@ private:
         }
         header_->demand = demand;
         header_->runningClients = runningClients_;
+    }
+
+    void ResetRingCursors()
+    {
+        if (!header_) {
+            return;
+        }
+        header_->readIndex = 0;
+        header_->writeIndex = 0;
+        header_->underrunCount = 0;
+        header_->overrunCount = 0;
     }
 
     void* mapped_ = nullptr;

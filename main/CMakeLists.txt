@@ -29,4 +29,7 @@ file(GLOB EXTERN_FILES assets/*)
 idf_component_register(SRCS "main.cpp" "hal/external_input.cpp" "apps/app_external_input_test/app_external_input_test.cpp" ${MY_SRCS}
                     INCLUDE_DIRS ${MY_INCLUDE_DIRS} ${PIKA_PYTHON_INCS}
                     EMBED_FILES ${EXTERN_FILES}
+                    REQUIRES M5GFX M5Unified bt driver esp_event esp_hid esp_http_client esp_http_server
+                             esp_netif esp_partition esp_timer esp_wifi fatfs heap json mooncake mooncake_log
+                             nvs_flash smooth_ui_toolkit
 )
