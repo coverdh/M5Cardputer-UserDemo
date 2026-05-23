@@ -964,7 +964,6 @@ private enum ADVCtlSettingsPage: Hashable, CaseIterable {
 
 private final class ADVCtlSettingsViewModel: ObservableObject {
     private let settings: JoystickSettings
-    let waveformView = WaveformView(frame: .zero)
 
     var onSettingsChanged: (() -> Void)?
     var onPowerSettingsChanged: (() -> Void)?
@@ -1071,7 +1070,6 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
         knobMode = settings.knobMode
         screenTimeoutSeconds = settings.screenTimeoutSeconds
         powerSaveTimeoutMinutes = settings.powerSaveTimeoutMinutes
-        waveformView.isActive = audioTestActive
     }
 
     func updateStatus(connected: Bool, knobStatus: String) {
@@ -1089,7 +1087,6 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     func updateAudioStatus(_ message: String, active: Bool) {
         microphoneStatus = message
         audioTestActive = active
-        waveformView.isActive = active
         refresh()
     }
 
@@ -1158,7 +1155,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     }
 }
 
-private final class SettingsWindowController: NSWindowController {
+private final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
     private let viewModel: ADVCtlSettingsViewModel
 
     var onSettingsChanged: (() -> Void)? {
@@ -1224,6 +1221,12 @@ private final class SettingsWindowController: NSWindowController {
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        let toolbar = NSToolbar(identifier: NSToolbar.Identifier("ADVCtlSettingsToolbar"))
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.showsBaselineSeparator = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
         window.title = ""
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -1232,6 +1235,29 @@ private final class SettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .flexibleSpace]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar]
+    }
+
+    func toolbar(_ toolbar: NSToolbar,
+                 itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard itemIdentifier == .toggleSidebar else {
+            return nil
+        }
+        let item = NSToolbarItem(itemIdentifier: .toggleSidebar)
+        item.label = "边栏"
+        item.paletteLabel = "边栏"
+        item.toolTip = "显示或隐藏边栏"
+        item.target = nil
+        item.action = #selector(NSSplitViewController.toggleSidebar(_:))
+        return item
     }
 
     func updateStatus(connected: Bool, knobStatus: String) {
@@ -1276,10 +1302,6 @@ private struct ADVCtlSettingsRootView: View {
                 }
             }
             .listStyle(.sidebar)
-            .safeAreaInset(edge: .top) {
-                Color.clear.frame(height: 28)
-            }
-            .ignoresSafeArea(.container, edges: .top)
             .navigationSplitViewColumnWidth(180)
         } detail: {
             ADVCtlSettingsDetailView(model: model)
@@ -1329,13 +1351,7 @@ private struct ADVCtlInstallGuideView: View {
                                 symbol: "exclamationmark.triangle.fill")
             }
 
-            StatusGrid(items: [
-                ("应用", model.appInstallStatus, model.appInstalled),
-                ("音频驱动", model.audioDriverStatus, model.audioDriverInstalled),
-                ("系统权限", permissionsSummary(model), permissionsReady(model)),
-            ])
-
-            SettingsGroup("安装") {
+            SettingsGroup("安装与启动") {
                 ActionStatusRow(title: "ADVCtl.app",
                                 detail: model.appInstallStatus,
                                 symbol: model.appInstalled ? "checkmark.circle.fill" : "app.badge",
@@ -1407,19 +1423,23 @@ private struct ADVCtlGeneralView: View {
         SettingsScrollPage {
             SettingsHeader(title: "通用", subtitle: "管理 ADVCtl 的安装位置、登录启动和蓝牙配对入口。")
             SettingsGroup("ADVCtl") {
-                StatusRow(title: "ADVCtl.app", detail: model.appInstallStatus, ok: model.appInstalled)
-                ActionRow(title: "安装位置", buttonTitle: "安装到 /Applications") {
-                    model.onInstallApp?()
-                }
-                StatusRow(title: "登录启动", detail: model.loginStartupStatus, ok: model.launchAtLoginEnabled)
+                ActionStatusRow(title: "应用",
+                                detail: model.appInstallStatus,
+                                symbol: model.appInstalled ? "checkmark.circle.fill" : "app.badge",
+                                ok: model.appInstalled,
+                                buttonTitle: "安装到 /Applications",
+                                action: { model.onInstallApp?() })
                 ToggleStatusRow(title: "登录后自动启动",
                                 detail: model.launchAtLoginDetail,
                                 symbol: "power.circle.fill",
                                 isOn: Binding(get: { model.launchAtLoginEnabled },
                                               set: { model.onLaunchAtLoginChanged?($0) }))
-                ActionRow(title: "蓝牙配对", buttonTitle: "打开蓝牙") {
-                    model.onOpenBluetooth?()
-                }
+                ActionStatusRow(title: "蓝牙",
+                                detail: "配对 ADVCtl",
+                                symbol: "dot.radiowaves.left.and.right",
+                                ok: true,
+                                buttonTitle: "打开蓝牙",
+                                action: { model.onOpenBluetooth?() })
             }
         }
     }
@@ -1431,18 +1451,15 @@ private struct ADVCtlStatusView: View {
     var body: some View {
         SettingsScrollPage {
             SettingsHeader(title: "ADV", subtitle: "查看 ADV 蓝牙连接、旋钮输入和最近的硬件同步状态。")
-            StatusGrid(items: [
-                ("ADV", model.connectionStatus, model.connected),
-                ("旋钮", model.knobStatus, model.connected),
-                ("消息", model.messageStatus, true),
-            ])
-            SettingsGroup("连接") {
-                StatusRow(title: "ADV", detail: model.connectionStatus, ok: model.connected)
+            SettingsGroup("状态与同步") {
+                StatusRow(title: "连接", detail: model.connectionStatus, ok: model.connected)
                 StatusRow(title: "旋钮", detail: model.knobStatus, ok: model.connected)
-                StatusRow(title: "最近消息", detail: model.messageStatus, ok: true)
-                ActionRow(title: "硬件配置", buttonTitle: "从 ADV 刷新") {
-                    model.onRefreshSettings?()
-                }
+                ActionStatusRow(title: "硬件配置",
+                                detail: model.messageStatus,
+                                symbol: "arrow.triangle.2.circlepath",
+                                ok: true,
+                                buttonTitle: "从 ADV 刷新",
+                                action: { model.onRefreshSettings?() })
             }
         }
     }
@@ -1496,26 +1513,14 @@ private struct ADVCtlAudioView: View {
     var body: some View {
         SettingsScrollPage {
             SettingsHeader(title: "音频", subtitle: "系统应用读取 ADVCtlAudio 麦克风时自动激活 ADV，并通过本地环形缓冲传输音频。")
-            SettingsGroup("系统音频驱动") {
-                StatusRow(title: "ADVCtlAudio", detail: model.audioDriverStatus, ok: model.audioDriverInstalled)
-                ActionRow(title: "驱动", buttonTitle: model.audioDriverInstalled ? "重新安装驱动" : "安装音频驱动") {
-                    model.onInstallAudioDriver?()
-                }
-            }
-            SettingsGroup("音频") {
-                StatusRow(title: "录制测试", detail: model.audioStateText, ok: model.audioTestActive)
-                StatusRow(title: "系统麦克风", detail: model.microphoneStatus, ok: model.audioTestActive)
-                VStack(alignment: .leading, spacing: 10) {
-                    ADVCtlWaveformHost(model: model)
-                        .frame(width: 360, height: 118)
-                    Button {
-                        model.onAudioTestChanged?(!model.audioTestActive)
-                    } label: {
-                        Label(model.audioTestActive ? "停止 ADV 麦克风" : "启用 ADV 麦克风",
-                              systemImage: model.audioTestActive ? "stop.circle" : "mic.circle")
-                    }
-                }
-                .padding(.vertical, 6)
+            SettingsGroup("音频链路") {
+                ActionStatusRow(title: "ADVCtlAudio",
+                                detail: model.audioDriverStatus,
+                                symbol: model.audioDriverInstalled ? "checkmark.circle.fill" : "waveform.badge.mic",
+                                ok: model.audioDriverInstalled,
+                                buttonTitle: model.audioDriverInstalled ? "重新安装驱动" : "安装音频驱动",
+                                action: { model.onInstallAudioDriver?() })
+                AudioBridgePanel(model: model)
             }
         }
     }
@@ -1832,15 +1837,86 @@ private struct SettingsRow<Trailing: View>: View {
     }
 }
 
-private struct ADVCtlWaveformHost: NSViewRepresentable {
+private struct AudioBridgePanel: View {
     @ObservedObject var model: ADVCtlSettingsViewModel
 
-    func makeNSView(context: Context) -> WaveformView {
-        model.waveformView
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Label("ADV 麦克风", systemImage: model.audioTestActive ? "mic.fill" : "mic")
+                    .font(.headline)
+                Spacer(minLength: 16)
+                StatusBadge(text: model.microphoneStatus, ok: model.audioTestActive)
+                Toggle("", isOn: Binding(get: { model.audioTestActive },
+                                         set: { model.onAudioTestChanged?($0) }))
+                    .labelsHidden()
+            }
+
+            ModernWaveformView(active: model.audioTestActive)
+                .frame(height: 132)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct ModernWaveformView: View {
+    let active: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active)) { timeline in
+            Canvas { context, size in
+                drawWaveform(in: &context, size: size, time: timeline.date.timeIntervalSinceReferenceDate)
+            }
+        }
+        .background(
+            LinearGradient(colors: [Color(nsColor: .controlBackgroundColor),
+                                    Color(nsColor: .windowBackgroundColor)],
+                           startPoint: .topLeading,
+                           endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.secondary.opacity(0.16), lineWidth: 1)
+        }
     }
 
-    func updateNSView(_ nsView: WaveformView, context: Context) {
-        nsView.isActive = model.audioTestActive
+    private func drawWaveform(in context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
+        let bars = 48
+        let gap: CGFloat = 3
+        let barWidth = max(3, (size.width - CGFloat(bars - 1) * gap) / CGFloat(bars))
+        let midY = size.height / 2
+        let maxHeight = size.height * 0.72
+
+        for index in 0..<bars {
+            let progress = Double(index) / Double(max(1, bars - 1))
+            let envelope = 0.42 + 0.58 * sin(progress * .pi)
+            let moving = abs(sin(time * 3.1 + Double(index) * 0.34)) * 0.62 +
+                abs(sin(time * 1.7 + Double(index) * 0.19)) * 0.38
+            let idle = 0.16 + 0.08 * sin(Double(index) * 0.51)
+            let value = active ? max(0.12, moving * envelope) : idle
+            let height = max(5, CGFloat(value) * maxHeight)
+            let x = CGFloat(index) * (barWidth + gap)
+            let rect = CGRect(x: x, y: midY - height / 2, width: barWidth, height: height)
+            let path = Path(roundedRect: rect, cornerRadius: barWidth / 2)
+            let top = CGPoint(x: rect.midX, y: rect.minY)
+            let bottom = CGPoint(x: rect.midX, y: rect.maxY)
+            let colors = active ? [Color.accentColor, Color.green] : [Color.secondary.opacity(0.34), Color.secondary.opacity(0.18)]
+            context.fill(path, with: .linearGradient(Gradient(colors: colors), startPoint: top, endPoint: bottom))
+        }
+    }
+}
+
+private struct StatusBadge: View {
+    let text: String
+    let ok: Bool
+
+    var body: some View {
+        Label(text, systemImage: ok ? "checkmark.circle.fill" : "circle")
+            .font(.callout)
+            .foregroundStyle(ok ? .green : .secondary)
+            .lineLimit(1)
     }
 }
 
@@ -1849,12 +1925,9 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     private let settings = JoystickSettings()
     private lazy var bridge = ADVCtlBridge(config: HelperConfig.load())
     private lazy var settingsWindow = SettingsWindowController(settings: settings)
-    private var statusItem: NSStatusItem?
-    private let connectionMenuItem = NSMenuItem(title: "未连接", action: nil, keyEquivalent: "")
-    private let knobMenuItem = NSMenuItem(title: "旋钮：无输入", action: nil, keyEquivalent: "")
-    private let messageMenuItem = NSMenuItem(title: "启动中", action: nil, keyEquivalent: "")
     private var connected = false
     private var knobStatus = "旋钮：无输入"
+    private var lastMessage = "启动中"
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var didCompleteLaunchSetup = false
@@ -1914,9 +1987,6 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settingsWindow.onOpenBluetooth = {
             openBluetoothPreferences()
         }
-        DispatchQueue.main.async { [weak self] in
-            self?.buildStatusItem()
-        }
         if !shouldOpenInstallGuide && !shouldOpenSettings {
             applyDefaultLaunchAtLogin()
         }
@@ -1941,9 +2011,25 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         bridge.sendAudioTest(active: false)
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return true
+    }
+
+    func showSettings() {
+        openSettings()
+    }
+
+    func showInstallGuide() {
+        openInstallGuide()
+    }
+
+    func quitApplication() {
+        quit()
+    }
+
     func bridgeDidUpdateConnection(deviceCount: Int) {
         connected = deviceCount > 0
-        connectionMenuItem.title = connected ? "已连接 (\(deviceCount))" : "未连接"
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
     }
 
@@ -1954,7 +2040,6 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         case .playPause:
             knobStatus = "旋钮：按下"
         }
-        knobMenuItem.title = knobStatus
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
     }
 
@@ -1969,64 +2054,32 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         default:
             knobStatus = "旋钮：按键 \(keyCode)"
         }
-        knobMenuItem.title = knobStatus
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
     }
 
     func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
         settings.applyHardware(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
         settingsWindow.applyHardwareSettings(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
-        messageMenuItem.title = "已收到硬件设置"
+        lastMessage = "已收到硬件设置"
+        settingsWindow.updateMessage(lastMessage)
     }
 
     func bridgeDidReceivePowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8) {
         settings.applyPower(screenTimeoutSeconds: screenTimeoutSeconds, powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
         settingsWindow.applyPowerSettings(screenTimeoutSeconds: screenTimeoutSeconds,
                                           powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
-        messageMenuItem.title = "已收到省电设置"
+        lastMessage = "已收到省电设置"
+        settingsWindow.updateMessage(lastMessage)
     }
 
     func bridgeDidUpdateAudioStatus(_ message: String, active: Bool) {
         settingsWindow.updateAudioStatus(message, active: active)
-        messageMenuItem.title = message
+        lastMessage = message
     }
 
     func bridgeDidUpdateMessage(_ message: String) {
-        messageMenuItem.title = message
+        lastMessage = message
         settingsWindow.updateMessage(message)
-    }
-
-    private func buildStatusItem() {
-        guard statusItem == nil else {
-            return
-        }
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let image = NSImage(systemSymbolName: "waveform",
-                               accessibilityDescription: "ADVCtl") {
-            image.isTemplate = true
-            item.button?.image = image
-        }
-        item.button?.title = ""
-        item.button?.imagePosition = .imageOnly
-        item.button?.toolTip = "ADVCtl"
-
-        let menu = NSMenu()
-        let openItem = NSMenuItem(title: "打开 ADVCtl", action: #selector(openSettings), keyEquivalent: "")
-        openItem.target = self
-        menu.addItem(openItem)
-
-        let installItem = NSMenuItem(title: "安装向导", action: #selector(openInstallGuide), keyEquivalent: "")
-        installItem.target = self
-        menu.addItem(installItem)
-
-        menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "退出 ADVCtl", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        item.menu = menu
-        statusItem = item
-        log("ADVCtl status item installed")
     }
 
     private func handOffToRunningInstance(showInstallGuide: Bool, showSettings: Bool) -> Bool {
@@ -2038,7 +2091,10 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         }
 
         let notificationName = showInstallGuide ? advCtlShowInstallNotification : advCtlShowSettingsNotification
-        DistributedNotificationCenter.default().postNotificationName(notificationName, object: nil)
+        DistributedNotificationCenter.default().postNotificationName(notificationName,
+                                                                     object: advCtlBundleIdentifier,
+                                                                     userInfo: nil,
+                                                                     deliverImmediately: true)
         runningApp.activate(options: [.activateIgnoringOtherApps])
         NSApp.terminate(nil)
         return true
@@ -2153,9 +2209,11 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     private func installApp() {
         do {
             try ADVCtlInstaller.installAppToApplications()
-            messageMenuItem.title = "已安装 ADVCtl.app"
+            lastMessage = "已安装 ADVCtl.app"
+            settingsWindow.updateMessage(lastMessage)
         } catch {
-            messageMenuItem.title = "应用安装失败"
+            lastMessage = "应用安装失败"
+            settingsWindow.updateMessage(lastMessage)
             log("App install failed: \(error.localizedDescription)")
         }
         settingsWindow.refresh()
@@ -2164,9 +2222,11 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     private func installAudioDriver() {
         do {
             try ADVCtlInstaller.installAudioDriver()
-            messageMenuItem.title = "已安装 ADVCtlAudio"
+            lastMessage = "已安装 ADVCtlAudio"
+            settingsWindow.updateMessage(lastMessage)
         } catch {
-            messageMenuItem.title = "音频驱动安装失败"
+            lastMessage = "音频驱动安装失败"
+            settingsWindow.updateMessage(lastMessage)
             log("Audio driver install failed: \(error.localizedDescription)")
         }
         settingsWindow.refresh()
@@ -2176,9 +2236,11 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         UserDefaults.standard.set(enabled, forKey: launchAtLoginDefaultsKey)
         do {
             try ADVCtlInstaller.setLaunchAtLogin(enabled)
-            messageMenuItem.title = enabled ? "登录启动已开启" : "登录启动已关闭"
+            lastMessage = enabled ? "登录启动已开启" : "登录启动已关闭"
+            settingsWindow.updateMessage(lastMessage)
         } catch {
-            messageMenuItem.title = "登录启动设置失败"
+            lastMessage = "登录启动设置失败"
+            settingsWindow.updateMessage(lastMessage)
             log("Launch at Login update failed: \(error.localizedDescription)")
         }
         settingsWindow.refresh()
@@ -2210,8 +2272,32 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     }
 }
 
-let app = NSApplication.shared
-private let delegate = ADVCtlAppDelegate()
-app.delegate = delegate
-delegate.start()
-app.run()
+@main
+private struct ADVCtlApplication: App {
+    @NSApplicationDelegateAdaptor(ADVCtlAppDelegate.self) private var appDelegate
+
+    var body: some Scene {
+        MenuBarExtra("ADVCtl", systemImage: "waveform") {
+            Button {
+                appDelegate.showSettings()
+            } label: {
+                Label("打开 ADVCtl", systemImage: "macwindow")
+            }
+
+            Button {
+                appDelegate.showInstallGuide()
+            } label: {
+                Label("安装向导", systemImage: "externaldrive.badge.checkmark")
+            }
+
+            Divider()
+
+            Button {
+                appDelegate.quitApplication()
+            } label: {
+                Label("退出 ADVCtl", systemImage: "xmark.circle")
+            }
+        }
+        .menuBarExtraStyle(.menu)
+    }
+}

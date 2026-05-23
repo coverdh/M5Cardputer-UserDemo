@@ -4,6 +4,7 @@ These rules apply to this repository unless a deeper `AGENTS.md` overrides them.
 
 ## BLE Device Identity
 
+- Baseline Bluetooth type: ADVCtl is a standard BLE HID composite keyboard/mouse device using HID service UUID `0x1812`, advertised/GAP name `ADVCtl`, and keyboard appearance `ESP_HID_APPEARANCE_KEYBOARD`. The NimBLE report map is a single composite HID map with keyboard report ID `1`, mouse report ID `2`, consumer/media report ID `3`, and ADVCtl vendor control/audio report ID `4`.
 - Keep ADVCtl as a BLE HID keyboard/composite HID device. Do not change the device type, HID role, advertised HID service, or keyboard appearance for microphone work.
 - BLE advertising must keep the HID service UUID `0x1812` as the advertised service. Do not advertise the ADVCtl custom service `0xFFF0` as the primary device identity.
 - Keep the advertised name and GAP Device Name in sync as `ADVCtl`; call `ble_svc_gap_device_name_set(device_name)` for NimBLE HID so macOS/iOS pairing UIs resolve the device correctly.
