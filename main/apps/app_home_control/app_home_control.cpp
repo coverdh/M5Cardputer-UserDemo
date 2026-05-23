@@ -51,6 +51,7 @@ void AppHomeControl::onOpen()
 
     loadConfig();
     loadWifiConfig();
+    GetHAL().externalInput.calibrateJoystickCenter();
 
     _key_event_slot_id = GetHAL().keyboard.onKeyEvent.connect(
         [this](const Keyboard::KeyEvent_t& keyEvent) { handleKeyEvent(keyEvent); });
@@ -69,9 +70,7 @@ void AppHomeControl::onRunning()
     }
     updatePowerSave();
     if (_screen_off) {
-        if (!_power_save_active) {
-            handleExternalInput();
-        }
+        handleExternalInput();
         return;
     }
 
@@ -88,6 +87,7 @@ void AppHomeControl::onRunning()
     }
 
     if (_mode == Mode::AudioTest) {
+        handleExternalInput();
         renderAudioWaveform();
         return;
     }
@@ -635,10 +635,7 @@ void AppHomeControl::enterPowerSave()
     sleepDisplay();
     _power_save_active = true;
     resetPointerHolds();
-    GetHAL().externalInput.setPaused(true);
     GetHAL().bleKeyboardSendReport(0, KEY_NONE);
-    GetHAL().bleControlStop();
-    _ble_start_requested = false;
     GetHAL().speaker.end();
 }
 

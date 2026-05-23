@@ -31,6 +31,7 @@ static constexpr uint8_t BYTE_BUTTON_STATUS_8BYTE_REG         = 0x60;
 static constexpr int JOYSTICK_UNIT_CENTER                     = 128;
 static constexpr int JOYSTICK_UNIT_DEAD_ZONE                  = 38;
 static constexpr int JOYSTICK2_DEAD_ZONE                      = 24;
+static constexpr int CHAIN_JOYSTICK_DEAD_ZONE                 = 12;
 static constexpr uart_port_t CHAIN_UART                       = UART_NUM_1;
 static constexpr int CHAIN_RX_A                               = 1;
 static constexpr int CHAIN_TX_A                               = 2;
@@ -128,6 +129,13 @@ void ExternalInput::loadSettings(Settings& settings)
                    _flip_y ? "yes" : "no", _swap_axes ? "yes" : "no");
 }
 
+void ExternalInput::calibrateJoystickCenter()
+{
+    _chain_joystick_center_ready   = false;
+    _chain_joystick_center_pending = true;
+    mclog::tagInfo(TAG, "chain joystick center calibration requested");
+}
+
 void ExternalInput::setDirectionTransform(bool flipX, bool flipY, bool swapAxes)
 {
     if (_flip_x == flipX && _flip_y == flipY && _swap_axes == swapAxes) {
@@ -188,8 +196,10 @@ bool ExternalInput::read(uint8_t& buttons, uint32_t now)
             connected = true;
         } else {
             mclog::tagWarn(TAG, "chain joystick read failed");
-            _joystick_type        = JoystickType::None;
-            _chain_joystick_index = 0;
+            _joystick_type                   = JoystickType::None;
+            _chain_joystick_index            = 0;
+            _chain_joystick_center_ready     = false;
+            _chain_joystick_center_pending   = false;
             if (_encoder_type != EncoderType::ChainEncoder && !_dual_button_connected) {
                 _chain_uart_ready = false;
             }
@@ -262,6 +272,9 @@ void ExternalInput::probeBus(uint32_t now)
     _chain_joystick_index        = 0;
     _chain_encoder_index         = 0;
     _chain_bus_index             = 0;
+    _chain_joystick_center_x     = 0;
+    _chain_joystick_center_y     = 0;
+    _chain_joystick_center_ready = false;
     _chain_uart_ready            = false;
     _chain_read_failures         = 0;
     _encoder_read_failures       = 0;
@@ -386,9 +399,10 @@ bool ExternalInput::tryChainBus(int rxPin, int txPin)
             _chain_encoder_index = id;
             found                = true;
         } else if (deviceType == CHAIN_DEVICE_JOYSTICK && _chain_joystick_index == 0) {
-            _joystick_type        = JoystickType::ChainJoystick;
-            _chain_joystick_index = id;
-            found                 = true;
+            _joystick_type                  = JoystickType::ChainJoystick;
+            _chain_joystick_index           = id;
+            _chain_joystick_center_pending  = true;
+            found                           = true;
         } else if (deviceType == CHAIN_DEVICE_UNIT_CHAINBUS && _chain_bus_index == 0) {
             _chain_bus_index = id;
             if (initChainBusButtons()) {
@@ -729,16 +743,27 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
     }
     _chain_read_failures = 0;
 
-    const int x = static_cast<int8_t>(data[0]);
-    const int y = static_cast<int8_t>(data[1]);
-    if (x < -JOYSTICK2_DEAD_ZONE) {
+    const int rawX = static_cast<int8_t>(data[0]);
+    const int rawY = static_cast<int8_t>(data[1]);
+    if (!_chain_joystick_center_ready || _chain_joystick_center_pending) {
+        _chain_joystick_center_x       = rawX;
+        _chain_joystick_center_y       = rawY;
+        _chain_joystick_center_ready   = true;
+        _chain_joystick_center_pending = false;
+        mclog::tagInfo(TAG, "chain joystick center: x={} y={}", _chain_joystick_center_x,
+                       _chain_joystick_center_y);
+    }
+
+    const int x = rawX - _chain_joystick_center_x;
+    const int y = rawY - _chain_joystick_center_y;
+    if (x < -CHAIN_JOYSTICK_DEAD_ZONE) {
         buttons |= PAD_LEFT;
-    } else if (x > JOYSTICK2_DEAD_ZONE) {
+    } else if (x > CHAIN_JOYSTICK_DEAD_ZONE) {
         buttons |= PAD_RIGHT;
     }
-    if (y < -JOYSTICK2_DEAD_ZONE) {
+    if (y < -CHAIN_JOYSTICK_DEAD_ZONE) {
         buttons |= PAD_UP;
-    } else if (y > JOYSTICK2_DEAD_ZONE) {
+    } else if (y > CHAIN_JOYSTICK_DEAD_ZONE) {
         buttons |= PAD_DOWN;
     }
 

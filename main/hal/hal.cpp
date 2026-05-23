@@ -707,6 +707,10 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
     if (!data || len < 2) {
         return;
     }
+    if (data[0] == 0x04 && len > 2) {
+        data += 1;
+        len -= 1;
+    }
 
     s_advctl_control_ready = true;
     if (data[0] == 0x80) {

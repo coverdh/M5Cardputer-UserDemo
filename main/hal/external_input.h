@@ -26,6 +26,7 @@ public:
     void probe(uint32_t now);
     void setPaused(bool paused);
     void loadSettings(Settings& settings);
+    void calibrateJoystickCenter();
     void setDirectionTransform(bool flipX, bool flipY, bool swapAxes);
     void toggleFlipX();
     void toggleFlipY();
@@ -119,6 +120,8 @@ private:
     uint8_t _chain_joystick_index     = 0;
     uint8_t _chain_encoder_index      = 0;
     uint8_t _chain_bus_index          = 0;
+    int16_t _chain_joystick_center_x  = 0;
+    int16_t _chain_joystick_center_y  = 0;
     uint8_t _buttons                  = 0;
     uint8_t _pressed                  = 0;
     uint8_t _released                 = 0;
@@ -140,6 +143,8 @@ private:
     bool _scan_logged                 = false;
     bool _paused                      = false;
     bool _chain_uart_ready            = false;
+    bool _chain_joystick_center_ready   = false;
+    bool _chain_joystick_center_pending = false;
     bool _flip_x                      = false;
     bool _flip_y                      = false;
     bool _swap_axes                   = false;

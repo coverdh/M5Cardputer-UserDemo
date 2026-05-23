@@ -78,6 +78,24 @@ private func clippedUTF8Bytes(_ string: String, maxBytes: Int) -> [UInt8] {
     return result
 }
 
+private func requestHIDListenAccessIfNeeded() -> Bool {
+    let access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
+    if access == kIOHIDAccessTypeGranted {
+        return true
+    }
+
+    let requested = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    log("Requested HID listen access: current=\(access.rawValue) requested=\(requested)")
+    return IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+}
+
+private func openInputMonitoringPreferences() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else {
+        return
+    }
+    NSWorkspace.shared.open(url)
+}
+
 private func separatorBox() -> NSBox {
     let box = NSBox()
     box.boxType = .separator
@@ -446,6 +464,15 @@ private protocol ADVCtlBridgeDelegate: AnyObject {
 private enum HIDEndpointKind {
     case control
     case keyboard
+    case composite
+
+    var supportsControl: Bool {
+        self == .control || self == .composite
+    }
+
+    var supportsKeyboard: Bool {
+        self == .keyboard || self == .composite
+    }
 }
 
 private final class HIDDeviceRegistration {
@@ -504,15 +531,28 @@ private final class ADVCtlBridge {
         if homeAssistant == nil {
             log("ADVCtl HA disabled; token not configured")
         }
+        let hidAccessGranted = requestHIDListenAccessIfNeeded()
 
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         hidManager = manager
 
-        let matching: [String: Any] = [
+        let vendorProductMatching: [String: Any] = [
             kIOHIDVendorIDKey: advCtlVendorID,
             kIOHIDProductIDKey: advCtlProductID,
         ]
-        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        let productKeyboardMatching: [String: Any] = [
+            kIOHIDProductKey: advCtlProductName,
+            kIOHIDDeviceUsagePageKey: hidUsagePageGenericDesktop,
+            kIOHIDDeviceUsageKey: hidUsageKeyboard,
+        ]
+        let productControlMatching: [String: Any] = [
+            kIOHIDProductKey: advCtlProductName,
+            kIOHIDDeviceUsagePageKey: advCtlUsagePage,
+            kIOHIDDeviceUsageKey: advCtlUsage,
+        ]
+        IOHIDManagerSetDeviceMatchingMultiple(manager, [vendorProductMatching,
+                                                        productKeyboardMatching,
+                                                        productControlMatching] as CFArray)
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, device in
@@ -526,7 +566,15 @@ private final class ADVCtlBridge {
 
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         let status = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        updateMessage(status == kIOReturnSuccess ? "Listening for ADVCtl" : "HID manager open failed: \(status)")
+        if status == kIOReturnSuccess {
+            updateMessage("Listening for ADVCtl")
+        } else if status == kIOReturnNotPermitted || !hidAccessGranted {
+            updateMessage("Grant ADVCtl Input Monitoring, then reopen ADVCtl")
+            openInputMonitoringPreferences()
+            return
+        } else {
+            updateMessage("HID manager open failed: \(status)")
+        }
 
         if let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> {
             devices.forEach(attach)
@@ -686,16 +734,14 @@ private final class ADVCtlBridge {
         if payload.count < advCtlPayloadLength {
             payload.append(contentsOf: repeatElement(0, count: advCtlPayloadLength - payload.count))
         }
+        var reportWithID = [UInt8(advCtlReportID)]
+        reportWithID.append(contentsOf: payload)
         var sent = false
         for registration in hidDevices {
-            guard registration.kind == .control else {
+            guard registration.kind.supportsControl else {
                 continue
             }
-            let status = IOHIDDeviceSetReport(registration.device,
-                                              kIOHIDReportTypeOutput,
-                                              CFIndex(advCtlReportID),
-                                              &payload,
-                                              payload.count)
+            let status = setControlReport(registration.device, payload: &payload, reportWithID: &reportWithID)
             if status == kIOReturnSuccess {
                 sent = true
             } else if status != kIOReturnUnsupported {
@@ -705,6 +751,50 @@ private final class ADVCtlBridge {
         if updateStatus {
             updateMessage(sent ? successMessage : "ADV control endpoint not connected")
         }
+    }
+
+    private func setControlReport(_ device: IOHIDDevice,
+                                  payload: inout [UInt8],
+                                  reportWithID: inout [UInt8]) -> IOReturn {
+        let attempts: [(IOHIDReportType, Bool, CFIndex)] = [
+            (kIOHIDReportTypeFeature, true, 0),
+            (kIOHIDReportTypeOutput, true, 0),
+            (kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID)),
+            (kIOHIDReportTypeOutput, false, CFIndex(advCtlReportID)),
+            (kIOHIDReportTypeFeature, true, CFIndex(advCtlReportID)),
+            (kIOHIDReportTypeOutput, true, CFIndex(advCtlReportID)),
+        ]
+        var lastStatus = kIOReturnUnsupported
+        for (reportType, includeReportID, reportID) in attempts {
+            let status: IOReturn
+            if includeReportID {
+                let reportLength = reportWithID.count
+                status = reportWithID.withUnsafeMutableBytes { buffer in
+                    guard let base = buffer.baseAddress else { return kIOReturnBadArgument }
+                    return IOHIDDeviceSetReport(device,
+                                                reportType,
+                                                reportID,
+                                                base.assumingMemoryBound(to: UInt8.self),
+                                                reportLength)
+                }
+            } else {
+                let reportLength = payload.count
+                status = payload.withUnsafeMutableBytes { buffer in
+                    guard let base = buffer.baseAddress else { return kIOReturnBadArgument }
+                    return IOHIDDeviceSetReport(device,
+                                                reportType,
+                                                reportID,
+                                                base.assumingMemoryBound(to: UInt8.self),
+                                                reportLength)
+                }
+            }
+            if status == kIOReturnSuccess {
+                updateMessage("Sent control payload using \(reportType == kIOHIDReportTypeFeature ? "feature" : "output") report\(includeReportID ? " with id" : "") param=\(reportID)")
+                return status
+            }
+            lastStatus = status
+        }
+        return lastStatus
     }
 
     private func attach(_ device: IOHIDDevice) {
@@ -722,7 +812,7 @@ private final class ADVCtlBridge {
         if usagePage == advCtlUsagePage && usage == advCtlUsage {
             kind = .control
         } else if usagePage == hidUsagePageGenericDesktop && usage == hidUsageKeyboard {
-            kind = .keyboard
+            kind = .composite
         } else {
             updateMessage("Ignoring non-control HID endpoint usagePage=\(usagePage) usage=\(usage)")
             return
@@ -730,6 +820,11 @@ private final class ADVCtlBridge {
 
         let openStatus = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
         if openStatus != kIOReturnSuccess && openStatus != kIOReturnExclusiveAccess {
+            if openStatus == kIOReturnNotPermitted {
+                updateMessage("Grant ADVCtl Input Monitoring, then reopen ADVCtl")
+                openInputMonitoringPreferences()
+                return
+            }
             updateMessage("HID device open failed: \(openStatus)")
             return
         }
@@ -753,7 +848,7 @@ private final class ADVCtlBridge {
         let maxInput = hidProperty(device, kIOHIDMaxInputReportSizeKey as CFString, as: NSNumber.self)?.intValue ?? -1
         updateConnection()
         updateMessage("Attached \(kind) usagePage=\(usagePage) usage=\(usage) maxInput=\(maxInput) openStatus=\(openStatus)")
-        if kind == .control {
+        if kind.supportsControl {
             sendTimeSync()
             requestSettings()
             syncAudioBridgeDemand(forceControl: true)
@@ -775,6 +870,9 @@ private final class ADVCtlBridge {
         case .control:
             handleControlReport(reportID: reportID, report: report, length: length)
         case .keyboard:
+            handleKeyboardReport(reportID: reportID, report: report, length: length)
+        case .composite:
+            handleControlReport(reportID: reportID, report: report, length: length)
             handleKeyboardReport(reportID: reportID, report: report, length: length)
         }
     }
