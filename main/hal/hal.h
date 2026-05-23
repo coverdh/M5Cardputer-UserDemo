@@ -141,6 +141,7 @@ public:
     bool bleMacCtlIsConnected() const;
     bool bleMacCtlTimeSynced() const;
     const MacCtlNowPlayingState& bleMacCtlNowPlaying() const;
+    bool bleMacCtlAudioState(bool active);
     bool bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len);
     bool bleConsumeAudioTestRequest(bool& active);
 
@@ -184,6 +185,7 @@ private:
     bool _is_esp_now_inited         = false;
     bool _is_ir_inited              = false;
     bool _is_ble_keyboard_inited    = false;
+    uint32_t _last_ble_advertising_ensure_ms = 0;
     bool _is_usb_keyboard_inited    = false;
     bool _is_sd_card_mounted        = false;
     bool _fullscreen_mode           = false;

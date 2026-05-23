@@ -71,6 +71,7 @@ private:
     bool _hold_down                = false;
     bool _audio_test_active        = false;
     uint8_t _audio_frame_sequence  = 0;
+    uint32_t _last_audio_error_log = 0;
     uint8_t _knob_mode             = 0;
     std::string _wifi_ssid;
     std::string _wifi_password;
@@ -92,6 +93,7 @@ private:
     static constexpr size_t AUDIO_TEST_LENGTH    = 120;
     static constexpr size_t AUDIO_TEST_RATE      = 16000;
     static constexpr size_t AUDIO_STREAM_PAYLOAD = 60;
+    static constexpr uint32_t AUDIO_ERROR_LOG_MS = 2000;
     static const Action ACTIONS[ACTION_COUNT];
 
     void loadConfig();

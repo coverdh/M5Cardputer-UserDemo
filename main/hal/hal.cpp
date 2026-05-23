@@ -9,6 +9,7 @@
 #include <mooncake_log.h>
 #include <M5Unified.hpp>
 #include <esp_mac.h>
+#include "utils/ble_hid_device/ble_hid_device_helper.h"
 #include <algorithm>
 #include <cstring>
 #include <memory>
@@ -47,6 +48,11 @@ void Hal::update()
     keyboard.update();
     externalInput.update(millis());
     capLora868.update();
+    if (_is_ble_keyboard_inited && !bleKeyboardIsConnected() &&
+        millis() - _last_ble_advertising_ensure_ms > 3000) {
+        _last_ble_advertising_ensure_ms = millis();
+        ble_hid_device_helper_ensure_advertising();
+    }
 }
 
 void Hal::feedTheDog()
@@ -648,8 +654,6 @@ void Hal::irSend(uint8_t addr, uint8_t cmd)
 /* -------------------------------------------------------------------------- */
 /*                                     BLE                                    */
 /* -------------------------------------------------------------------------- */
-#include "utils/ble_hid_device/ble_hid_device_helper.h"
-
 static bool s_advctl_control_ready = false;
 static bool s_advctl_audio_test_pending = false;
 static bool s_advctl_audio_test_active = false;
@@ -810,6 +814,8 @@ bool Hal::bleControlInit()
 {
     if (_is_ble_keyboard_inited) {
         mclog::tagWarn(_tag, "ble hid already initialized");
+        ble_hid_device_helper_set_output_callback(handle_advctl_output_report);
+        ble_hid_device_helper_ensure_advertising();
         return true;
     }
 
@@ -873,12 +879,12 @@ bool Hal::bleKeyboardIsConnected() const
         return false;
     }
 
-    return ble_hid_device_helper_is_ready();
+    return ble_hid_device_helper_get_state() == BLE_HID_DEVICE_STATE_CONNECTED;
 }
 
 void Hal::bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode)
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return;
     }
 
@@ -897,7 +903,7 @@ void Hal::bleKeyboardTap(uint8_t modifier, KeScanCode_t keyCode)
 
 void Hal::bleMouseReport(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return;
     }
 
@@ -911,7 +917,7 @@ void Hal::bleMouseMove(int8_t dx, int8_t dy, int8_t wheel)
 
 void Hal::bleMouseClick(uint8_t buttons)
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return;
     }
 
@@ -922,7 +928,7 @@ void Hal::bleMouseClick(uint8_t buttons)
 
 void Hal::bleConsumerSend(uint16_t usageId)
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return;
     }
 
@@ -931,7 +937,7 @@ void Hal::bleConsumerSend(uint16_t usageId)
 
 bool Hal::bleMacCtlVolumeDelta(int8_t delta)
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return false;
     }
     if (!s_advctl_control_ready) {
@@ -943,7 +949,7 @@ bool Hal::bleMacCtlVolumeDelta(int8_t delta)
 
 bool Hal::bleMacCtlPlayPause()
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return false;
     }
     if (!s_advctl_control_ready) {
@@ -955,7 +961,7 @@ bool Hal::bleMacCtlPlayPause()
 
 bool Hal::bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return false;
     }
 
@@ -964,7 +970,7 @@ bool Hal::bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)
 
 bool Hal::bleMacCtlPowerConfig(uint8_t screenTimeoutSeconds, uint8_t powerSaveTimeoutMinutes)
 {
-    if (!bleKeyboardIsConnected()) {
+    if (!ble_hid_device_helper_is_ready()) {
         return false;
     }
 
@@ -973,7 +979,7 @@ bool Hal::bleMacCtlPowerConfig(uint8_t screenTimeoutSeconds, uint8_t powerSaveTi
 
 bool Hal::bleMacCtlIsConnected() const
 {
-    return bleKeyboardIsConnected() && s_advctl_control_ready;
+    return ble_hid_device_helper_is_ready() && s_advctl_control_ready;
 }
 
 bool Hal::bleMacCtlTimeSynced() const
@@ -986,9 +992,17 @@ const Hal::MacCtlNowPlayingState& Hal::bleMacCtlNowPlaying() const
     return s_advctl_now_playing;
 }
 
+bool Hal::bleMacCtlAudioState(bool active)
+{
+    if (!ble_hid_device_helper_is_ready() || !s_advctl_control_ready) {
+        return false;
+    }
+    return ble_hid_device_helper_send_macctl_audio_state(active);
+}
+
 bool Hal::bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len)
 {
-    if (!bleKeyboardIsConnected() || !s_advctl_control_ready) {
+    if (!ble_hid_device_helper_is_ready() || !s_advctl_control_ready) {
         return false;
     }
     return ble_hid_device_helper_send_macctl_audio(sequence, data, len);
@@ -1012,8 +1026,8 @@ void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
         return;
     }
 
-    // Only forward if BLE keyboard is connected
-    if (!bleKeyboardIsConnected()) {
+    // Only forward once the host subscribed to HID input notifications.
+    if (!ble_hid_device_helper_is_ready()) {
         return;
     }
 

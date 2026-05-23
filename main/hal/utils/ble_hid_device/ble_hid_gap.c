@@ -846,21 +846,8 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
                 } else {
                     ESP_LOGW(TAG, "security initiate skipped/failed: %d", rc);
                 }
-                /* Request connection parameters optimised for a HID keyboard:
-                 * - 15-60 ms interval: responsive without hammering the radio
-                 * - latency: allows the device to skip a few intervals when idle;
-                 *   increases battery life.
-                 * - supervision timeout: tolerates brief radio gaps */
-                struct ble_gap_upd_params conn_params = {
-                    .itvl_min            = 12,  /* 15 ms (units of 1.25 ms) */
-                    .itvl_max            = 48,  /* 60 ms */
-                    .latency             = 8,   /* might skip up to 8 intervals */
-                    .supervision_timeout = 600, /* 6000 ms (units of 10 ms) */
-                    .min_ce_len          = 0,
-                    .max_ce_len          = 0,
-                };
-                ble_gap_update_params(event->connect.conn_handle, &conn_params);
             } else {
+                ble_hid_device_helper_gap_disconnected(BLE_HS_CONN_HANDLE_NONE);
                 esp_hid_ble_gap_adv_start();
             }
             return 0;
@@ -868,6 +855,14 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
             ble_hid_device_helper_gap_disconnected(event->disconnect.conn.conn_handle);
+            if (!ble_gap_adv_active()) {
+                rc = esp_hid_ble_gap_adv_start();
+                if (rc == 0) {
+                    ESP_LOGI(TAG, "advertising restarted after disconnect");
+                } else {
+                    ESP_LOGW(TAG, "advertising restart after disconnect failed: %d", rc);
+                }
+            }
 
             return 0;
         case BLE_GAP_EVENT_CONN_UPDATE:
@@ -904,6 +899,26 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "security state: encrypted=%u authenticated=%u bonded=%u key_size=%u",
                      desc.sec_state.encrypted, desc.sec_state.authenticated, desc.sec_state.bonded,
                      desc.sec_state.key_size);
+            if (event->enc_change.status == 0 && desc.sec_state.encrypted && desc.sec_state.bonded) {
+                ble_hid_device_helper_gap_encrypted(event->enc_change.conn_handle);
+                /* Request HID keyboard parameters only after macOS has restored
+                 * encryption. Updating too early can make macOS abandon a
+                 * paired HID reconnect before input reports are subscribed. */
+                struct ble_gap_upd_params conn_params = {
+                    .itvl_min            = 12,  /* 15 ms (units of 1.25 ms) */
+                    .itvl_max            = 48,  /* 60 ms */
+                    .latency             = 8,   /* might skip up to 8 intervals */
+                    .supervision_timeout = 600, /* 6000 ms (units of 10 ms) */
+                    .min_ce_len          = 0,
+                    .max_ce_len          = 0,
+                };
+                rc = ble_gap_update_params(event->enc_change.conn_handle, &conn_params);
+                if (rc == 0) {
+                    ESP_LOGI(TAG, "connection parameter update requested after security");
+                } else {
+                    ESP_LOGW(TAG, "connection parameter update after security failed: %d", rc);
+                }
+            }
             // ble_hid_task_start_up(); // No task needed, send it myself
             return 0;
 
@@ -924,6 +939,7 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
             /* Delete the old bond. */
             rc = ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
             assert(rc == 0);
+            ESP_LOGW(TAG, "repeat pairing requested; deleting old peer bond and accepting new pairing");
             ble_store_util_delete_peer(&desc.peer_id_addr);
 
             /* Return BLE_GAP_REPEAT_PAIRING_RETRY to indicate that the host should
@@ -987,6 +1003,10 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
     adv_params.itvl_max  = BLE_GAP_ADV_ITVL_MS(50);
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, adv_duration_ms, &adv_params, nimble_hid_gap_event, NULL);
     if (rc != 0) {
+        if (rc == BLE_HS_EALREADY) {
+            MODLOG_DFLT(INFO, "advertisement already active\n");
+            return 0;
+        }
         MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", rc);
         return rc;
     }

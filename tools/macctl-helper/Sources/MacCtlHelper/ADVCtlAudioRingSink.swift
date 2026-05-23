@@ -91,9 +91,9 @@ final class ADVCtlAudioRingSink {
         return mapped.load(fromByteOffset: 12, as: UInt32.self) != 0
     }
 
-    func enqueueULaw(_ data: Data) {
+    @discardableResult func enqueueULaw(_ data: Data) -> Int {
         guard refreshDevice(), !data.isEmpty else {
-            return
+            return 0
         }
         var samples = [Float32]()
         samples.reserveCapacity(data.count * 6)
@@ -104,6 +104,7 @@ final class ADVCtlAudioRingSink {
             }
         }
         write(samples)
+        return samples.count
     }
 
     private func initializeRingIfNeeded() {

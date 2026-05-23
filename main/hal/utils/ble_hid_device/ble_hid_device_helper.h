@@ -22,6 +22,7 @@ typedef void (*ble_hid_device_helper_output_callback_t)(const uint8_t* data, uin
 bool ble_hid_device_helper_init(void);
 void ble_hid_device_helper_stop(void);
 bool ble_hid_device_helper_forget_bonds(void);
+bool ble_hid_device_helper_ensure_advertising(void);
 void ble_hid_device_helper_send(uint8_t* buffer);
 void ble_hid_device_helper_send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel);
 void ble_hid_device_helper_send_consumer(uint16_t usage_id);
@@ -29,12 +30,14 @@ bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta);
 bool ble_hid_device_helper_send_macctl_play_pause(void);
 bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity, uint8_t knob_mode);
 bool ble_hid_device_helper_send_macctl_power_config(uint8_t screen_timeout_s, uint8_t power_save_timeout_min);
+bool ble_hid_device_helper_send_macctl_audio_state(bool active);
 bool ble_hid_device_helper_send_macctl_audio(uint8_t sequence, const uint8_t* data, uint8_t len);
 void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback);
 BleHidDeviceState_t ble_hid_device_helper_get_state(void);
 bool ble_hid_device_helper_is_ready(void);
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle);
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle);
+void ble_hid_device_helper_gap_encrypted(uint16_t conn_handle);
 void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled);
 
 enum {

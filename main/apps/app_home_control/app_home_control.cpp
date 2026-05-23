@@ -428,6 +428,7 @@ void AppHomeControl::handleBleControlRequests()
         return;
     }
 
+    mclog::tagInfo(getAppInfo().name, "audio request consumed: {}", audio_test_active ? "start" : "stop");
     markUserActivity();
     if (audio_test_active) {
         startAudioTest();
@@ -489,8 +490,10 @@ void AppHomeControl::startAudioTest()
     _audio_test_buffer.assign(AUDIO_TEST_LENGTH, 0);
     _audio_stream_buffer.clear();
     _audio_frame_sequence = 0;
+    _last_audio_error_log = 0;
     _audio_test_active = true;
     _mode              = Mode::AudioTest;
+    GetHAL().bleMacCtlAudioState(true);
     setStatus("Recording test active");
     render();
 }
@@ -512,6 +515,7 @@ void AppHomeControl::stopAudioTest()
     _audio_test_buffer.clear();
     _audio_stream_buffer.clear();
     _audio_test_active = false;
+    GetHAL().bleMacCtlAudioState(false);
     setStatus("Recording test stopped");
 }
 
@@ -548,9 +552,16 @@ void AppHomeControl::streamAudioFrame()
         _audio_stream_buffer.push_back(encodeULaw(_audio_test_buffer[i]));
     }
     while (_audio_stream_buffer.size() >= AUDIO_STREAM_PAYLOAD) {
-        GetHAL().bleMacCtlAudioFrame(_audio_frame_sequence++,
-                                     _audio_stream_buffer.data(),
-                                     static_cast<uint8_t>(AUDIO_STREAM_PAYLOAD));
+        const uint8_t sequence = _audio_frame_sequence++;
+        const bool sent = GetHAL().bleMacCtlAudioFrame(sequence,
+                                                       _audio_stream_buffer.data(),
+                                                       static_cast<uint8_t>(AUDIO_STREAM_PAYLOAD));
+        if (sent && (sequence == 0 || (sequence % 100) == 0)) {
+            mclog::tagInfo(getAppInfo().name, "audio frame sent: seq={}", sequence);
+        } else if (!sent && GetHAL().millis() - _last_audio_error_log > AUDIO_ERROR_LOG_MS) {
+            _last_audio_error_log = GetHAL().millis();
+            mclog::tagWarn(getAppInfo().name, "audio frame not sent: ble not ready");
+        }
         _audio_stream_buffer.erase(_audio_stream_buffer.begin(), _audio_stream_buffer.begin() + AUDIO_STREAM_PAYLOAD);
     }
 }
@@ -1048,12 +1059,20 @@ void AppHomeControl::renderAudioTest()
 void AppHomeControl::renderAudioWaveform()
 {
     if (!_audio_test_active || !GetHAL().mic.isEnabled()) {
+        if (_audio_test_active && GetHAL().millis() - _last_audio_error_log > AUDIO_ERROR_LOG_MS) {
+            _last_audio_error_log = GetHAL().millis();
+            mclog::tagWarn(getAppInfo().name, "audio capture waiting: mic disabled");
+        }
         return;
     }
     if (_audio_test_buffer.size() != AUDIO_TEST_LENGTH) {
         _audio_test_buffer.assign(AUDIO_TEST_LENGTH, 0);
     }
     if (!GetHAL().mic.record(_audio_test_buffer.data(), AUDIO_TEST_LENGTH, AUDIO_TEST_RATE)) {
+        if (GetHAL().millis() - _last_audio_error_log > AUDIO_ERROR_LOG_MS) {
+            _last_audio_error_log = GetHAL().millis();
+            mclog::tagWarn(getAppInfo().name, "audio capture failed");
+        }
         return;
     }
     streamAudioFrame();

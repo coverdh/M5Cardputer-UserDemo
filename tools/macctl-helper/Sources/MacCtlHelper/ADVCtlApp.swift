@@ -34,6 +34,8 @@ private let advCtlNowPlayingCommand: UInt8 = 0x87
 private let advCtlNowPlayingTitleCommand: UInt8 = 0x88
 private let advCtlNowPlayingArtistCommand: UInt8 = 0x89
 private let advCtlAudioFrameReport: UInt8 = 0xA0
+private let advCtlAudioStateReport: UInt8 = 0xA1
+private let advCtlAudioAckRetryInterval: TimeInterval = 2.0
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
@@ -256,6 +258,8 @@ private final class ADVCtlBridge {
     private var manualAudioTestActive = false
     private var driverAudioDemandActive = false
     private var advAudioBridgeActive = false
+    private var advAudioStateAcknowledged = true
+    private var lastAudioBridgeCommandAt: TimeInterval = 0
     private var audioFrameCount = 0
     private var lastNowPlayingTextSignature = ""
     weak var delegate: ADVCtlBridgeDelegate?
@@ -455,7 +459,11 @@ private final class ADVCtlBridge {
         if !driverReady {
             audioSink.stop()
         }
-        sendAudioBridgeActive(true, force: forceControl)
+        let retryStart = shouldRetryAudioStart()
+        if retryStart {
+            updateMessage("ADV microphone start not acknowledged; retrying")
+        }
+        sendAudioBridgeActive(true, force: forceControl || retryStart)
 
         let status: String
         if driverAudioDemandActive {
@@ -473,14 +481,24 @@ private final class ADVCtlBridge {
     }
 
     private func sendAudioBridgeActive(_ active: Bool, force: Bool = false, updateStatus: Bool = true) {
-        guard force || advAudioBridgeActive != active else {
+        let stateChanging = advAudioBridgeActive != active
+        guard force || stateChanging else {
             return
         }
         advAudioBridgeActive = active
+        advAudioStateAcknowledged = false
+        lastAudioBridgeCommandAt = Date().timeIntervalSince1970
         sendControlPayload([advCtlAudioTestCommand, active ? 1 : 0, 0, 0],
                            successMessage: active ? "ADV microphone bridge activated" : "ADV microphone bridge stopped",
                            updateStatus: updateStatus)
         sendKeyboardLedAudioControl(active: active)
+    }
+
+    private func shouldRetryAudioStart() -> Bool {
+        guard advAudioBridgeActive && !advAudioStateAcknowledged else {
+            return false
+        }
+        return Date().timeIntervalSince1970 - lastAudioBridgeCommandAt >= advCtlAudioAckRetryInterval
     }
 
     private func sendKeyboardLedAudioControl(active: Bool) {
@@ -666,14 +684,25 @@ private final class ADVCtlBridge {
         } else {
             return
         }
+        if payload.count >= 2, payload[0] == advCtlAudioStateReport {
+            let active = payload[1] != 0
+            advAudioStateAcknowledged = active == advAudioBridgeActive
+            updateMessage(active ? "ADV microphone started" : "ADV microphone stopped")
+            DispatchQueue.main.async {
+                self.delegate?.bridgeDidUpdateAudioStatus(active ? "ADV microphone streaming" : self.audioSink.statusText,
+                                                          active: active)
+            }
+            return
+        }
+
         if payload.count >= 3, payload[0] == advCtlAudioFrameReport {
             let byteCount = min(Int(payload[2]), payload.count - 3)
             if byteCount > 0 {
                 audioFrameCount += 1
+                let writtenFrames = audioSink.enqueueULaw(payload.subdata(in: 3..<(3 + byteCount)))
                 if audioFrameCount == 1 || audioFrameCount % 100 == 0 {
-                    updateMessage("Received ADV audio frames: \(audioFrameCount)")
+                    updateMessage("Received ADV audio frames: \(audioFrameCount), wrote \(writtenFrames) samples")
                 }
-                audioSink.enqueueULaw(payload.subdata(in: 3..<(3 + byteCount)))
             }
             return
         }

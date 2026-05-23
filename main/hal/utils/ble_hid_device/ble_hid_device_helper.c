@@ -110,6 +110,7 @@ static uint32_t s_ble_hid_connection_seq   = 0;
 #define MACCTL_LED_CMD_PREFIX      0x1F
 #define MACCTL_LED_CMD_AUDIO_STOP  0x10
 #define MACCTL_LED_CMD_AUDIO_START 0x11
+#define MACCTL_REPORT_AUDIO_STATE 0xA1
 #define MACCTL_LED_CMD_WINDOW_MS   1000
 
 typedef struct {
@@ -237,16 +238,8 @@ static void ble_hid_device_helper_enumeration_watchdog(void *pvParameters)
         }
 
         handled_seq = s_ble_hid_connection_seq;
-        ESP_LOGW(TAG, "HID did not enumerate after %d ms; clearing BLE bonds and disconnecting",
+        ESP_LOGW(TAG, "HID did not enumerate after %d ms; keeping BLE connection and bonds",
                  BLE_HID_ENUMERATION_TIMEOUT_MS);
-        int rc = ble_store_clear();
-        if (rc != 0) {
-            ESP_LOGW(TAG, "clear BLE bond store after enumeration timeout failed: %d", rc);
-        }
-        rc = ble_gap_terminate(s_ble_hid_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        if (rc != 0) {
-            ESP_LOGW(TAG, "terminate stale BLE HID connection failed: %d", rc);
-        }
     }
 }
 
@@ -868,8 +861,8 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
         }
         case ESP_HIDD_CONNECT_EVENT: {
             ESP_LOGI(TAG, "CONNECT");
-            s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_CONNECTED;
 #if !CONFIG_BT_NIMBLE_ENABLED
+            s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_CONNECTED;
             s_ble_hid_notify_ready     = true;
             s_ble_hid_ready_after_tick = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
 #endif
@@ -1199,15 +1192,10 @@ static void ble_hid_device_helper_migrate_store(void)
         return;
     }
 
-    int rc = ble_store_clear();
-    if (rc == 0) {
-        ESP_LOGW(TAG, "cleared stale BLE bond store for schema v%" PRIu32 " -> v%d", version,
-                 MACCTL_BLE_STORE_SCHEMA_VERSION);
-        ESP_ERROR_CHECK(nvs_set_u32(handle, "store_ver", MACCTL_BLE_STORE_SCHEMA_VERSION));
-        ESP_ERROR_CHECK(nvs_commit(handle));
-    } else {
-        ESP_LOGW(TAG, "BLE bond store clear failed: %d", rc);
-    }
+    ESP_LOGW(TAG, "BLE bond store schema marker v%" PRIu32 " -> v%d; preserving bonds",
+             version, MACCTL_BLE_STORE_SCHEMA_VERSION);
+    ESP_ERROR_CHECK(nvs_set_u32(handle, "store_ver", MACCTL_BLE_STORE_SCHEMA_VERSION));
+    ESP_ERROR_CHECK(nvs_commit(handle));
 
     nvs_close(handle);
 }
@@ -1413,6 +1401,46 @@ bool ble_hid_device_helper_forget_bonds(void)
 #endif
 }
 
+bool ble_hid_device_helper_ensure_advertising(void)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    if (!s_ble_hid_param.hid_dev) {
+        ESP_LOGW(TAG, "skip BLE advertising restart: HID device not initialized");
+        return false;
+    }
+    if (s_ble_hid_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        struct ble_gap_conn_desc desc;
+        int conn_rc = ble_gap_conn_find(s_ble_hid_conn_handle, &desc);
+        if (conn_rc == 0) {
+            return true;
+        }
+        ESP_LOGW(TAG, "clearing stale BLE HID connection handle before advertising: %d", conn_rc);
+        s_ble_hid_conn_handle       = BLE_HS_CONN_HANDLE_NONE;
+        s_ble_hid_connected_tick    = 0;
+        s_ble_hid_notify_ready      = false;
+        s_ble_hid_ready_after_tick = 0;
+        s_ble_hid_keyboard_state    = BLE_HID_DEVICE_STATE_IDLE;
+    } else if (s_ble_hid_keyboard_state == BLE_HID_DEVICE_STATE_CONNECTED) {
+        ESP_LOGW(TAG, "clearing stale BLE HID connected state before advertising");
+        s_ble_hid_keyboard_state   = BLE_HID_DEVICE_STATE_IDLE;
+        s_ble_hid_notify_ready     = false;
+        s_ble_hid_ready_after_tick = 0;
+    }
+    if (ble_gap_adv_active()) {
+        return true;
+    }
+    int rc = esp_hid_ble_gap_adv_start();
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ensure BLE HID advertising failed: %d", rc);
+        return false;
+    }
+    ESP_LOGI(TAG, "ensure BLE HID advertising started");
+    return true;
+#else
+    return true;
+#endif
+}
+
 void ble_hid_device_helper_send(uint8_t *buffer)
 {
     ble_hid_device_helper_queue_report(BLE_HID_MAP_INDEX_KEYBOARD, BLE_HID_RPT_ID_KEYBOARD, buffer, 8, 8);
@@ -1459,6 +1487,12 @@ bool ble_hid_device_helper_send_macctl_power_config(uint8_t screen_timeout_s, ui
     return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
 }
 
+bool ble_hid_device_helper_send_macctl_audio_state(bool active)
+{
+    const uint8_t buffer[4] = {MACCTL_REPORT_AUDIO_STATE, active ? 1 : 0, 0, 0};
+    return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
+}
+
 bool ble_hid_device_helper_send_macctl_audio(uint8_t sequence, const uint8_t* data, uint8_t len)
 {
     uint8_t buffer[BLE_HID_MACCTL_REPORT_LEN] = {0};
@@ -1484,8 +1518,7 @@ BleHidDeviceState_t ble_hid_device_helper_get_state(void)
 
 bool ble_hid_device_helper_is_ready(void)
 {
-    return s_ble_hid_param.hid_dev && s_ble_hid_keyboard_state == BLE_HID_DEVICE_STATE_CONNECTED &&
-           s_ble_hid_notify_ready && xTaskGetTickCount() >= s_ble_hid_ready_after_tick;
+    return s_ble_hid_param.hid_dev && s_ble_hid_keyboard_state == BLE_HID_DEVICE_STATE_CONNECTED;
 }
 
 void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
@@ -1494,6 +1527,7 @@ void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
     s_ble_hid_conn_handle = conn_handle;
     s_ble_hid_connected_tick = xTaskGetTickCount();
     s_ble_hid_connection_seq++;
+    s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_CONNECTED;
 #else
     (void)conn_handle;
 #endif
@@ -1513,6 +1547,30 @@ void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
 #endif
     s_ble_hid_notify_ready     = false;
     s_ble_hid_ready_after_tick = 0;
+    s_ble_hid_keyboard_state   = BLE_HID_DEVICE_STATE_IDLE;
+}
+
+void ble_hid_device_helper_gap_encrypted(uint16_t conn_handle)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    if (s_ble_hid_conn_handle != conn_handle) {
+        return;
+    }
+#else
+    (void)conn_handle;
+#endif
+    if (s_ble_hid_notify_ready) {
+        return;
+    }
+    s_ble_hid_notify_ready     = true;
+    s_ble_hid_ready_after_tick = xTaskGetTickCount() + pdMS_TO_TICKS(BLE_HID_READY_DELAY_MS);
+    if (s_ble_hid_control_report_queue) {
+        xQueueReset(s_ble_hid_control_report_queue);
+    }
+    if (s_ble_hid_best_effort_report_queue) {
+        xQueueReset(s_ble_hid_best_effort_report_queue);
+    }
+    ESP_LOGI(TAG, "hid input notify ready after security");
 }
 
 void ble_hid_device_helper_gap_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify_enabled)

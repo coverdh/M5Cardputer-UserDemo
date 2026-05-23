@@ -129,6 +129,35 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertNotIn("NSTabView()", source)
         self.assertNotIn("SettingsSidebarCell", source)
 
+    def test_adv_audio_stays_speech_oriented_hid_transport(self):
+        source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
+        app = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
+        header = (ROOT / "main/apps/app_home_control/app_home_control.h").read_text()
+        mac = read_mac_helper_sources()
+        agents = (ROOT / "AGENTS.md").read_text()
+
+        self.assertIn("ESP_HID_APPEARANCE_KEYBOARD", source)
+        self.assertIn("GATT_SVR_SVC_HID_UUID 0x1812", (ROOT / "main/hal/utils/ble_hid_device/ble_hid_gap.c").read_text())
+        self.assertIn('.device_name = "ADVCtl"', source)
+        self.assertIn("ble_svc_gap_device_name_set(device_name)", (ROOT / "main/hal/utils/ble_hid_device/ble_hid_gap.c").read_text())
+        self.assertIn("static constexpr size_t AUDIO_TEST_RATE      = 16000", header)
+        self.assertIn("static constexpr size_t AUDIO_STREAM_PAYLOAD = 60", header)
+        self.assertIn("for (size_t i = 0; i < _audio_test_buffer.size(); i += 2)", app)
+        self.assertIn("MACCTL_REPORT_AUDIO_STATE", source)
+        self.assertIn("bool ble_hid_device_helper_send_macctl_audio_state(bool active)", source)
+        self.assertIn("GetHAL().bleMacCtlAudioState(true);", app)
+        self.assertIn("GetHAL().bleMacCtlAudioState(false);", app)
+        self.assertIn("private let advCtlAudioStateReport: UInt8 = 0xA1", mac)
+        self.assertIn("ADV microphone start not acknowledged; retrying", mac)
+        self.assertIn("ADV microphone streaming", mac)
+        self.assertIn("Received ADV audio frames", mac)
+        self.assertIn("audio request consumed", app)
+        self.assertIn("audio frame sent", app)
+        self.assertIn("@discardableResult func enqueueULaw(_ data: Data) -> Int", mac)
+        self.assertIn("speech recognition", agents)
+        self.assertNotIn("A2DP", source)
+        self.assertNotIn("Bluetooth audio", source)
+
     def test_ble_report_queue_splits_control_from_best_effort_reports(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
 
@@ -153,8 +182,10 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("#define BLE_HID_ENUMERATION_TIMEOUT_MS 10000", source)
         self.assertIn("ble_hid_device_helper_enumeration_watchdog", source)
         self.assertIn("HID did not enumerate", source)
-        self.assertIn("ble_store_clear();", source)
-        self.assertIn("ble_gap_terminate", source)
+        watchdog_start = source.index("ble_hid_device_helper_enumeration_watchdog")
+        watchdog_block = source[watchdog_start:source.index("static void ble_hid_device_helper_ensure_enumeration_watchdog", watchdog_start)]
+        self.assertNotIn("ble_store_clear()", watchdog_block)
+        self.assertNotIn("ble_gap_terminate", watchdog_block)
 
         defaults = (ROOT / "sdkconfig.defaults").read_text()
         self.assertIn("CONFIG_BT_NIMBLE_ENABLED=y", defaults)
@@ -209,7 +240,46 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertNotIn("#define GATT_SVR_SVC_ADVCTL_UUID", gap_source)
         self.assertIn("fields.num_uuids16         = 1", gap_source)
         self.assertIn("ble_gap_security_initiate(event->connect.conn_handle)", gap_source)
+        failed_connect_block = gap_source[gap_source.index("} else {", gap_source.index("BLE_GAP_EVENT_CONNECT:")):gap_source.index("return 0;", gap_source.index("BLE_GAP_EVENT_CONNECT:"))]
+        self.assertIn("ble_hid_device_helper_gap_disconnected(BLE_HS_CONN_HANDLE_NONE)", failed_connect_block)
+        self.assertIn("esp_hid_ble_gap_adv_start()", failed_connect_block)
         self.assertIn("security state: encrypted=%u authenticated=%u bonded=%u", gap_source)
+        self.assertNotIn("ble_store_util_bonded_peers", gap_source)
+        self.assertNotIn("BLE_GAP_CONN_MODE_DIR", gap_source)
+        self.assertIn("ble_hid_device_helper_ensure_advertising", source)
+        self.assertIn("ensure BLE HID advertising started", source)
+        self.assertIn("ble_gap_conn_find(s_ble_hid_conn_handle", source)
+        self.assertIn("clearing stale BLE HID connection handle before advertising", source)
+        hal_source = (ROOT / "main/hal/hal.cpp").read_text()
+        update_block = hal_source[hal_source.index("void Hal::update()"):hal_source.index("void Hal::feedTheDog()")]
+        self.assertIn("_is_ble_keyboard_inited && !bleKeyboardIsConnected()", update_block)
+        self.assertIn("ble_hid_device_helper_ensure_advertising();", update_block)
+        ble_connected = hal_source[hal_source.index("bool Hal::bleKeyboardIsConnected() const"):hal_source.index("void Hal::bleKeyboardSendReport")]
+        self.assertIn("ble_hid_device_helper_get_state() == BLE_HID_DEVICE_STATE_CONNECTED", ble_connected)
+        self.assertNotIn("ble_hid_device_helper_is_ready()", ble_connected)
+        send_report = hal_source[hal_source.index("void Hal::bleKeyboardSendReport"):hal_source.index("void Hal::bleKeyboardTap")]
+        self.assertIn("ble_hid_device_helper_is_ready()", send_report)
+        self.assertNotIn("bleControlEnsureAdvertising", (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text())
+        self.assertIn("connection parameter update requested after security", gap_source)
+        self.assertLess(
+            gap_source.index("security state: encrypted=%u authenticated=%u bonded=%u"),
+            gap_source.index("ble_gap_update_params(event->enc_change.conn_handle"),
+        )
+        disconnect_block = gap_source[gap_source.index("case BLE_GAP_EVENT_DISCONNECT:"):gap_source.index("case BLE_GAP_EVENT_CONN_UPDATE:")]
+        self.assertIn("esp_hid_ble_gap_adv_start()", disconnect_block)
+        self.assertIn("advertising restarted after disconnect", disconnect_block)
+        helper_disconnect = source[source.index("void ble_hid_device_helper_gap_disconnected"):source.index("void ble_hid_device_helper_gap_subscribe")]
+        self.assertIn("s_ble_hid_keyboard_state   = BLE_HID_DEVICE_STATE_IDLE;", helper_disconnect)
+        helper_connect = source[source.index("void ble_hid_device_helper_gap_connected"):source.index("void ble_hid_device_helper_gap_disconnected")]
+        self.assertIn("s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_CONNECTED;", helper_connect)
+        helper_ready = source[source.index("bool ble_hid_device_helper_is_ready"):source.index("void ble_hid_device_helper_gap_connected")]
+        self.assertIn("s_ble_hid_keyboard_state == BLE_HID_DEVICE_STATE_CONNECTED", helper_ready)
+        self.assertNotIn("s_ble_hid_notify_ready", helper_ready)
+        self.assertIn("keeping BLE connection and bonds", source)
+        watchdog_start = source.index("ble_hid_device_helper_enumeration_watchdog")
+        watchdog_block = source[watchdog_start:source.index("static void ble_hid_device_helper_ensure_enumeration_watchdog", watchdog_start)]
+        self.assertNotIn("ble_store_clear()", watchdog_block)
+        self.assertNotIn("ble_gap_terminate", watchdog_block)
 
     def test_ble_report_policy_keeps_audio_from_starving_controls(self):
         clang = shutil.which("clang") or shutil.which("cc")
