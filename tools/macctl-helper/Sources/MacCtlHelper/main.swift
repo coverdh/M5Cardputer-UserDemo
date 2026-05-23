@@ -1815,11 +1815,16 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     }
 
     private func buildStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = nil
-        item.button?.title = "✦"
-        item.button?.imagePosition = .noImage
-        item.button?.font = .systemFont(ofSize: 15, weight: .semibold)
+        let item = NSStatusBar.system.statusItem(withLength: 64)
+        if let image = NSImage(systemSymbolName: "dot.radiowaves.left.and.right",
+                               accessibilityDescription: "ADVCtl") {
+            image.isTemplate = true
+            item.button?.image = image
+        }
+        item.button?.title = "ADV"
+        item.button?.imagePosition = .imageLeft
+        item.button?.font = .systemFont(ofSize: 12, weight: .semibold)
+        item.button?.toolTip = "ADVCtl"
 
         let menu = NSMenu()
         menu.addItem(connectionMenuItem)
