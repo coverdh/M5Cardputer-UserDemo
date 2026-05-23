@@ -39,18 +39,13 @@ private let macKeyF14: UInt16 = 0x6B
 private let macKeyF15: UInt16 = 0x71
 private let systemDefinedKeyDownSubtype: Int16 = 8
 private let systemDefinedKeyStateDown = 0x0A
-private let advCtlAudioRingPath = "/tmp/advctl_audio_pcm.ring"
-private let advCtlAudioRingMagic: UInt32 = 0x41445641
-private let advCtlAudioRingVersion: UInt32 = 1
-private let advCtlAudioRingHeaderSize = 64
-private let advCtlAudioRingCapacityFrames = 48_000 * 5
 private let nxKeyTypeBrightnessDown = 3
 private let nxKeyTypeBrightnessUp = 2
 private let advCtlTimeSyncEpoch: TimeInterval = 1_704_067_200
 private let advCtlLogURL = URL(fileURLWithPath: NSHomeDirectory())
     .appendingPathComponent(".config/karabiner/advctl.log")
 
-private func log(_ message: String) {
+func log(_ message: String) {
     let line = "\(Date()) \(message)\n"
     let data = Data(line.utf8)
     FileHandle.standardOutput.write(data)
@@ -97,12 +92,6 @@ private func openInputMonitoringPreferences() {
         return
     }
     NSWorkspace.shared.open(url)
-}
-
-private func separatorBox() -> NSBox {
-    let box = NSBox()
-    box.boxType = .separator
-    return box
 }
 
 private struct HelperConfig {
@@ -186,274 +175,6 @@ private struct NowPlayingSnapshot: Equatable {
     }
 }
 
-private final class ADVCtlAudioRingSink {
-    private var mapped: UnsafeMutableRawPointer?
-    private var mappedSize = 0
-    private var fileHandle: FileHandle?
-    private var ringDevice: UInt64 = 0
-    private var ringInode: UInt64 = 0
-
-    var isRunning: Bool {
-        isInputRequested()
-    }
-
-    var statusText: String {
-        if isInputRequested() {
-            return "ADVCtlAudio is requesting input"
-        }
-        return isMapped ? "ADVCtlAudio driver idle" : "ADVCtlAudio driver not loaded"
-    }
-
-    private var isMapped: Bool {
-        mapped != nil
-    }
-
-    init() {
-        refreshDevice()
-    }
-
-    deinit {
-        unmapRing()
-    }
-
-    @discardableResult func refreshDevice() -> Bool {
-        if mapped != nil, isCurrentRingFileMapped() {
-            return true
-        }
-        if mapped != nil {
-            log("ADVCtlAudio ring file changed; remapping")
-            unmapRing()
-        }
-        mappedSize = advCtlAudioRingHeaderSize + advCtlAudioRingCapacityFrames * MemoryLayout<Float32>.size
-        if !FileManager.default.fileExists(atPath: advCtlAudioRingPath) {
-            return false
-        }
-        guard let handle = try? FileHandle(forUpdating: URL(fileURLWithPath: advCtlAudioRingPath)) else {
-            log("ADVCtlAudio open ring file failed: \(advCtlAudioRingPath)")
-            return false
-        }
-        do {
-            try handle.truncate(atOffset: UInt64(mappedSize))
-        } catch {
-            log("ADVCtlAudio truncate ring failed: \(error)")
-            try? handle.close()
-            return false
-        }
-        let fd = handle.fileDescriptor
-        let pointer = mmap(nil, mappedSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
-        guard pointer != MAP_FAILED else {
-            log("ADVCtlAudio mmap failed: \(errno)")
-            try? handle.close()
-            return false
-        }
-        var fileStat = stat()
-        if fstat(fd, &fileStat) == 0 {
-            ringDevice = UInt64(fileStat.st_dev)
-            ringInode = UInt64(fileStat.st_ino)
-        }
-        fileHandle = handle
-        mapped = pointer
-        initializeRingIfNeeded()
-        return true
-    }
-
-    @discardableResult func start() -> Bool {
-        refreshDevice()
-    }
-
-    func stop() {}
-
-    func isInputRequested() -> Bool {
-        guard refreshDevice(), let mapped else {
-            return false
-        }
-        return mapped.load(fromByteOffset: 12, as: UInt32.self) != 0
-    }
-
-    func enqueueULaw(_ data: Data) {
-        guard refreshDevice(), !data.isEmpty else {
-            return
-        }
-        var samples = [Float32]()
-        samples.reserveCapacity(data.count * 6)
-        for byte in data {
-            let decoded = Float32(Self.decodeULaw(byte)) / 32768.0
-            for _ in 0..<6 {
-                samples.append(decoded)
-            }
-        }
-        write(samples)
-    }
-
-    private func initializeRingIfNeeded() {
-        guard let mapped else {
-            return
-        }
-        let magic = mapped.load(fromByteOffset: 0, as: UInt32.self)
-        let version = mapped.load(fromByteOffset: 4, as: UInt32.self)
-        let capacity = mapped.load(fromByteOffset: 8, as: UInt32.self)
-        guard magic != advCtlAudioRingMagic ||
-              version != advCtlAudioRingVersion ||
-              capacity != UInt32(advCtlAudioRingCapacityFrames) else {
-            return
-        }
-        memset(mapped, 0, mappedSize)
-        mapped.storeBytes(of: advCtlAudioRingMagic, toByteOffset: 0, as: UInt32.self)
-        mapped.storeBytes(of: advCtlAudioRingVersion, toByteOffset: 4, as: UInt32.self)
-        mapped.storeBytes(of: UInt32(advCtlAudioRingCapacityFrames), toByteOffset: 8, as: UInt32.self)
-    }
-
-    private func isCurrentRingFileMapped() -> Bool {
-        guard ringDevice != 0 || ringInode != 0 else {
-            return true
-        }
-        var pathStat = stat()
-        guard stat(advCtlAudioRingPath, &pathStat) == 0 else {
-            return false
-        }
-        return UInt64(pathStat.st_dev) == ringDevice && UInt64(pathStat.st_ino) == ringInode
-    }
-
-    private func unmapRing() {
-        if let mapped {
-            munmap(mapped, mappedSize)
-            self.mapped = nil
-        }
-        try? fileHandle?.close()
-        fileHandle = nil
-        ringDevice = 0
-        ringInode = 0
-    }
-
-    private func write(_ samples: [Float32]) {
-        guard let mapped, !samples.isEmpty else {
-            return
-        }
-        let capacity = Int(mapped.load(fromByteOffset: 8, as: UInt32.self))
-        guard capacity > 0 else {
-            return
-        }
-
-        var writeIndex = mapped.load(fromByteOffset: 32, as: UInt64.self)
-        var readIndex = mapped.load(fromByteOffset: 40, as: UInt64.self)
-        let available = writeIndex >= readIndex ? Int(writeIndex - readIndex) : 0
-        if available + samples.count > capacity {
-            let newRead = writeIndex + UInt64(samples.count - capacity)
-            readIndex = newRead
-            mapped.storeBytes(of: readIndex, toByteOffset: 40, as: UInt64.self)
-            let overrun = mapped.load(fromByteOffset: 56, as: UInt64.self) + 1
-            mapped.storeBytes(of: overrun, toByteOffset: 56, as: UInt64.self)
-        }
-
-        for (offset, sample) in samples.enumerated() {
-            let frame = Int((writeIndex + UInt64(offset)) % UInt64(capacity))
-            mapped.storeBytes(of: sample,
-                              toByteOffset: advCtlAudioRingHeaderSize + frame * MemoryLayout<Float32>.size,
-                              as: Float32.self)
-        }
-        writeIndex += UInt64(samples.count)
-        mapped.storeBytes(of: writeIndex, toByteOffset: 32, as: UInt64.self)
-    }
-
-    private static func decodeULaw(_ byte: UInt8) -> Int16 {
-        let value = ~byte
-        var sample = Int16(((Int(value & 0x0F) << 3) + 0x84) << Int((value & 0x70) >> 4))
-        sample -= 0x84
-        return (value & 0x80) != 0 ? -sample : sample
-    }
-}
-
-private final class JoystickSettings {
-    private let defaults = UserDefaults.standard
-
-    var swapAxes: Bool {
-        get { defaults.bool(forKey: "advctl.swapAxes") }
-        set { defaults.set(newValue, forKey: "advctl.swapAxes") }
-    }
-
-    var invertX: Bool {
-        get { defaults.bool(forKey: "advctl.invertX") }
-        set { defaults.set(newValue, forKey: "advctl.invertX") }
-    }
-
-    var invertY: Bool {
-        get { defaults.bool(forKey: "advctl.invertY") }
-        set { defaults.set(newValue, forKey: "advctl.invertY") }
-    }
-
-    var sensitivity: Int {
-        get {
-            let saved = defaults.integer(forKey: "advctl.sensitivityHalfStep")
-            if saved >= 2 {
-                return min(6, max(2, saved))
-            }
-            let legacySaved = defaults.integer(forKey: "advctl.sensitivity")
-            return legacySaved == 0 ? 2 : min(6, max(2, legacySaved * 2))
-        }
-        set { defaults.set(min(6, max(2, newValue)), forKey: "advctl.sensitivityHalfStep") }
-    }
-
-    var flags: UInt8 {
-        var value: UInt8 = 0
-        if swapAxes { value |= 0x01 }
-        if invertX { value |= 0x02 }
-        if invertY { value |= 0x04 }
-        return value
-    }
-
-    var sensitivityLabel: String {
-        sensitivity.isMultiple(of: 2) ? "\(sensitivity / 2)x" : "\(sensitivity / 2).5x"
-    }
-
-    var knobMode: Int {
-        get { defaults.object(forKey: "advctl.knobMode") as? Int ?? 0 }
-        set { defaults.set(min(2, max(0, newValue)), forKey: "advctl.knobMode") }
-    }
-
-    var knobModeLabel: String {
-        switch knobMode {
-        case 1: return "HomePod"
-        case 2: return "Disabled"
-        default: return "System volume"
-        }
-    }
-
-    var screenTimeoutSeconds: Int {
-        get {
-            let saved = defaults.integer(forKey: "advctl.screenTimeoutSeconds")
-            return saved == 0 ? 30 : min(255, max(5, saved))
-        }
-        set { defaults.set(min(255, max(5, newValue)), forKey: "advctl.screenTimeoutSeconds") }
-    }
-
-    var powerSaveTimeoutMinutes: Int {
-        get {
-            let saved = defaults.integer(forKey: "advctl.powerSaveTimeoutMinutes")
-            return saved == 0 ? 3 : min(255, max(1, saved))
-        }
-        set { defaults.set(min(255, max(1, newValue)), forKey: "advctl.powerSaveTimeoutMinutes") }
-    }
-
-    func applyHardware(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
-        swapAxes = (flags & 0x01) != 0
-        invertX = (flags & 0x02) != 0
-        invertY = (flags & 0x04) != 0
-        self.sensitivity = Int(sensitivity)
-        self.knobMode = Int(knobMode)
-        synchronize()
-    }
-
-    func applyPower(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8) {
-        self.screenTimeoutSeconds = Int(screenTimeoutSeconds)
-        self.powerSaveTimeoutMinutes = Int(powerSaveTimeoutMinutes)
-        synchronize()
-    }
-
-    func synchronize() {
-        defaults.synchronize()
-    }
-}
-
 private protocol ADVCtlBridgeDelegate: AnyObject {
     func bridgeDidUpdateConnection(deviceCount: Int)
     func bridgeDidReceive(command: MacCtlCommand)
@@ -466,7 +187,6 @@ private protocol ADVCtlBridgeDelegate: AnyObject {
 
 private enum HIDEndpointKind {
     case control
-    case keyboard
     case composite
 
     var supportsControl: Bool {
@@ -474,7 +194,7 @@ private enum HIDEndpointKind {
     }
 
     var supportsKeyboard: Bool {
-        self == .keyboard || self == .composite
+        self == .composite
     }
 }
 
@@ -901,8 +621,6 @@ private final class ADVCtlBridge {
         switch registration.kind {
         case .control:
             handleControlReport(reportID: reportID, report: report, length: length)
-        case .keyboard:
-            handleKeyboardReport(reportID: reportID, report: report, length: length)
         case .composite:
             handleControlReport(reportID: reportID, report: report, length: length)
             handleKeyboardReport(reportID: reportID, report: report, length: length)
@@ -1040,95 +758,6 @@ private final class ADVCtlBridge {
         log(message)
         DispatchQueue.main.async {
             self.delegate?.bridgeDidUpdateMessage(message)
-        }
-    }
-}
-
-private final class WaveformView: NSView {
-    var isActive = false {
-        didSet {
-            if isActive {
-                phase = 0
-                startTimer()
-            } else {
-                stopTimer()
-            }
-            needsDisplay = true
-        }
-    }
-
-    private var phase: Double = 0
-    private var timer: Timer?
-
-    deinit {
-        stopTimer()
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72).cgColor
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    private func startTimer() {
-        guard timer == nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.phase += 0.18
-            self.needsDisplay = true
-        }
-    }
-
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-
-        let rect = bounds.insetBy(dx: 16, dy: 14)
-        guard rect.width > 1, rect.height > 1 else { return }
-
-        NSColor.separatorColor.withAlphaComponent(0.35).setStroke()
-        let mid = rect.midY
-        let centerLine = NSBezierPath()
-        centerLine.move(to: NSPoint(x: rect.minX, y: mid))
-        centerLine.line(to: NSPoint(x: rect.maxX, y: mid))
-        centerLine.lineWidth = 1
-        centerLine.stroke()
-
-        let path = NSBezierPath()
-        let samples = max(64, Int(rect.width / 3))
-        for index in 0...samples {
-            let x = rect.minX + CGFloat(index) / CGFloat(samples) * rect.width
-            let t = Double(index) / Double(samples)
-            let envelope = isActive ? (0.35 + 0.45 * abs(sin(phase * 0.7 + t * 5.0))) : 0.05
-            let wave = sin(t * 38.0 + phase) * 0.55 + sin(t * 77.0 + phase * 1.6) * 0.25
-            let y = mid + CGFloat(wave * envelope) * rect.height * 0.46
-            if index == 0 {
-                path.move(to: NSPoint(x: x, y: y))
-            } else {
-                path.line(to: NSPoint(x: x, y: y))
-            }
-        }
-        NSColor.systemBlue.setStroke()
-        path.lineWidth = 2.2
-        path.stroke()
-
-        if !isActive {
-            let label = "Idle"
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]
-            let size = label.size(withAttributes: attrs)
-            label.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attrs)
         }
     }
 }

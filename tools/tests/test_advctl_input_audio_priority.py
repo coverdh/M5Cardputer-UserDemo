@@ -10,6 +10,11 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
+def read_mac_helper_sources() -> str:
+    source_dir = ROOT / "tools/macctl-helper/Sources/MacCtlHelper"
+    return "\n".join(path.read_text() for path in sorted(source_dir.glob("*.swift")))
+
+
 class AdvCtlInputAudioPriorityTests(unittest.TestCase):
     def test_audio_test_polls_external_input_before_streaming_audio(self):
         source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
@@ -43,7 +48,7 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertNotIn("externalInput.setPaused(true)", power_save)
 
     def test_mac_helper_treats_keyboard_hid_endpoint_as_composite_control(self):
-        source = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/main.swift").read_text()
+        source = read_mac_helper_sources()
 
         self.assertIn("IOHIDManagerSetDeviceMatchingMultiple", source)
         self.assertIn("kIOHIDProductKey: advCtlProductName", source)
