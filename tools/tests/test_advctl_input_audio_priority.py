@@ -89,6 +89,33 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("handleControlReport", composite_case)
         self.assertIn("handleKeyboardReport", composite_case)
 
+    def test_mac_helper_settings_use_system_sidebar_and_install_guide(self):
+        source = read_mac_helper_sources()
+
+        self.assertIn("import SwiftUI", source)
+        self.assertIn("NavigationSplitView", source)
+        self.assertIn("List(selection: $model.selectedPage)", source)
+        self.assertIn("window.titlebarAppearsTransparent = true", source)
+        self.assertIn("window.titleVisibility = .hidden", source)
+        self.assertIn("window.title = \"\"", source)
+        self.assertIn(".listStyle(.sidebar)", source)
+        self.assertIn("safeAreaInset(edge: .top)", source)
+        self.assertIn(".ignoresSafeArea(.container, edges: .top)", source)
+        self.assertIn("ADVCtlInstallGuideView", source)
+        self.assertIn("安装向导", source)
+        self.assertIn("ADVCtlSettingsPage.allCases", source)
+        self.assertIn("NSImage(systemSymbolName: \"waveform\"", source)
+        self.assertIn("打开 ADVCtl", source)
+        self.assertIn("runningApplications(withBundleIdentifier: advCtlBundleIdentifier)", source)
+        self.assertIn("DistributedNotificationCenter.default().postNotificationName", source)
+        self.assertIn("handleShowSettingsNotification", source)
+        self.assertNotIn("menu.addItem(connectionMenuItem)", source)
+        self.assertNotIn("menu.addItem(knobMenuItem)", source)
+        self.assertNotIn("menu.addItem(messageMenuItem)", source)
+        self.assertNotIn("sidebarTable = NSTableView()", source)
+        self.assertNotIn("NSTabView()", source)
+        self.assertNotIn("SettingsSidebarCell", source)
+
     def test_ble_report_queue_splits_control_from_best_effort_reports(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
 

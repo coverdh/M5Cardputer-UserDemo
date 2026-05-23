@@ -6,11 +6,14 @@ import Darwin
 import Foundation
 import IOKit.hid
 import MacCtlCore
+import SwiftUI
 
 private let advCtlVendorID = 0x16C0
 private let advCtlProductID = 0x05DF
 private let advCtlProductName = "ADVCtl"
 private let advCtlBundleIdentifier = "dev.cardputer.advctl"
+private let advCtlShowSettingsNotification = Notification.Name("dev.cardputer.advctl.showSettings")
+private let advCtlShowInstallNotification = Notification.Name("dev.cardputer.advctl.showInstall")
 private let advCtlInstalledAppURL = URL(fileURLWithPath: "/Applications/ADVCtl.app", isDirectory: true)
 private let advCtlLaunchAgentLabel = "dev.cardputer.advctl"
 private let advCtlAudioDriverURL = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/ADVCtlAudio.driver", isDirectory: true)
@@ -922,17 +925,47 @@ private enum ADVCtlInstaller {
     }
 }
 
-private final class SettingsWindowController: NSWindowController {
-    private struct SettingsSection {
-        let identifier: String
-        let sidebarTitle: String
-        let symbol: String
-        let pageTitle: String
-        let pageSubtitle: String
-        let groups: [NSView]
+private enum ADVCtlSettingsPage: Hashable, CaseIterable {
+    case install
+    case general
+    case adv
+    case pointer
+    case knob
+    case audio
+    case power
+    case privacy
+
+    var title: String {
+        switch self {
+        case .install: return "安装向导"
+        case .general: return "通用"
+        case .adv: return "ADV"
+        case .pointer: return "指针"
+        case .knob: return "旋钮"
+        case .audio: return "音频"
+        case .power: return "省电"
+        case .privacy: return "隐私与安全性"
+        }
     }
 
+    var symbol: String {
+        switch self {
+        case .install: return "externaldrive.badge.checkmark"
+        case .general: return "gearshape"
+        case .adv: return "dot.radiowaves.left.and.right"
+        case .pointer: return "cursorarrow.motionlines"
+        case .knob: return "dial.low"
+        case .audio: return "waveform"
+        case .power: return "battery.75percent"
+        case .privacy: return "hand.raised.fill"
+        }
+    }
+}
+
+private final class ADVCtlSettingsViewModel: ObservableObject {
     private let settings: JoystickSettings
+    let waveformView = WaveformView(frame: .zero)
+
     var onSettingsChanged: (() -> Void)?
     var onPowerSettingsChanged: (() -> Void)?
     var onAudioTestChanged: ((Bool) -> Void)?
@@ -946,625 +979,153 @@ private final class SettingsWindowController: NSWindowController {
     var onRequestMicrophone: (() -> Void)?
     var onOpenBluetooth: (() -> Void)?
 
-    private let appInstallStatusLabel = NSTextField(labelWithString: "检查中")
-    private let audioDriverStatusLabel = NSTextField(labelWithString: "检查中")
-    private let loginStartupStatusLabel = NSTextField(labelWithString: "检查中")
-    private let inputMonitoringStatusLabel = NSTextField(labelWithString: "检查中")
-    private let accessibilityStatusLabel = NSTextField(labelWithString: "检查中")
-    private let microphonePermissionStatusLabel = NSTextField(labelWithString: "检查中")
-    private let bluetoothStatusLabel = NSTextField(labelWithString: "蓝牙设置")
-    private let installAppButton = NSButton(title: "安装到 /Applications", target: nil, action: nil)
-    private let installAudioDriverButton = NSButton(title: "安装音频驱动", target: nil, action: nil)
-    private let launchAtLoginButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let inputMonitoringButton = NSButton(title: "设置", target: nil, action: nil)
-    private let accessibilityButton = NSButton(title: "设置", target: nil, action: nil)
-    private let microphonePermissionButton = NSButton(title: "设置", target: nil, action: nil)
-    private let bluetoothButton = NSButton(title: "打开蓝牙", target: nil, action: nil)
-    private let connectionValueLabel = NSTextField(labelWithString: "未连接")
-    private let knobValueLabel = NSTextField(labelWithString: "无输入")
-    private let messageValueLabel = NSTextField(labelWithString: "启动中")
-    private let audioStateLabel = NSTextField(labelWithString: "未激活")
-    private let microphoneStatusLabel = NSTextField(labelWithString: "检查 ADVCtlAudio")
-    private let swapAxesButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let invertXButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let invertYButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let sensitivitySlider = NSSlider()
-    private let sensitivityValueLabel = NSTextField(labelWithString: "1x")
-    private let knobModePopup = NSPopUpButton()
-    private let resetButton = NSButton(title: "恢复硬件默认值", target: nil, action: nil)
-    private let refreshButton = NSButton(title: "从 ADV 刷新", target: nil, action: nil)
-    private let waveformView = WaveformView(frame: .zero)
-    private let recordButton = NSButton(title: "启用 ADV 麦克风", target: nil, action: nil)
-    private let screenTimeoutSlider = NSSlider()
-    private let screenTimeoutValueLabel = NSTextField(labelWithString: "30s")
-    private let powerSaveSlider = NSSlider()
-    private let powerSaveValueLabel = NSTextField(labelWithString: "3m")
-    private let searchField = NSSearchField()
-    private let sidebarTable = NSTableView()
-    private let sidebarScrollView = NSScrollView()
-    private let tabView = NSTabView()
-    private var sections: [SettingsSection] = []
-    private var audioTestActive = false
+    @Published var selectedPage: ADVCtlSettingsPage = .install
+    @Published var appInstallStatus = "检查中"
+    @Published var appInstalled = false
+    @Published var audioDriverStatus = "检查中"
+    @Published var audioDriverInstalled = false
+    @Published var loginStartupStatus = "检查中"
+    @Published var launchAtLoginEnabled = true
+    @Published var launchAtLoginLoaded = false
+    @Published var inputMonitoringStatus = "检查中"
+    @Published var inputMonitoringGranted = false
+    @Published var accessibilityStatus = "检查中"
+    @Published var accessibilityGranted = false
+    @Published var microphonePermissionStatus = "检查中"
+    @Published var microphonePermissionGranted = false
+    @Published var connectionStatus = "未连接"
+    @Published var connected = false
+    @Published var knobStatus = "无输入"
+    @Published var messageStatus = "启动中"
+    @Published var microphoneStatus = "检查 ADVCtlAudio"
+    @Published var audioTestActive = false
+    @Published var swapAxes = false
+    @Published var invertX = false
+    @Published var invertY = false
+    @Published var sensitivity = 2
+    @Published var knobMode = 0
+    @Published var screenTimeoutSeconds = 30
+    @Published var powerSaveTimeoutMinutes = 3
 
     init(settings: JoystickSettings) {
         self.settings = settings
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 768),
-                              styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
-                              backing: .buffered,
-                              defer: false)
-        window.title = "ADVCtl"
-        window.isReleasedWhenClosed = false
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        super.init(window: window)
-        buildContent()
         refresh()
     }
 
-    required init?(coder: NSCoder) {
-        nil
+    var needsInstallGuide: Bool {
+        !appInstalled || !audioDriverInstalled || !launchAtLoginEnabled ||
+            !inputMonitoringGranted || !accessibilityGranted || !microphonePermissionGranted
+    }
+
+    var sensitivityLabel: String {
+        sensitivity.isMultiple(of: 2) ? "\(sensitivity / 2)x" : "\(sensitivity / 2).5x"
+    }
+
+    var audioStateText: String {
+        audioTestActive ? "已激活" : "未激活"
+    }
+
+    var launchAtLoginDetail: String {
+        if launchAtLoginEnabled {
+            return launchAtLoginLoaded ? "已开启，ADVCtl 会在登录后自动启动。" : "已开启，下次登录生效。"
+        }
+        return "已关闭。建议保持开启，让状态栏控制和音频驱动自动可用。"
+    }
+
+    func refresh() {
+        appInstalled = FileManager.default.fileExists(atPath: advCtlInstalledAppURL.path)
+        appInstallStatus = appInstalled ? "已安装在 /Applications" : "未安装"
+
+        audioDriverInstalled = FileManager.default.fileExists(atPath: advCtlAudioDriverURL.path)
+        audioDriverStatus = audioDriverInstalled ? "已安装" : "未安装"
+
+        launchAtLoginEnabled = ADVCtlInstaller.isLaunchAtLoginEnabled()
+        launchAtLoginLoaded = ADVCtlInstaller.isLaunchAtLoginLoaded()
+        loginStartupStatus = launchAtLoginEnabled ? (launchAtLoginLoaded ? "已开启" : "已开启，下次登录生效") : "已关闭"
+
+        inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        inputMonitoringStatus = inputMonitoringGranted ? "已允许" : "需要设置"
+
+        accessibilityGranted = AXIsProcessTrusted()
+        accessibilityStatus = accessibilityGranted ? "已允许" : "需要设置"
+
+        let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        microphonePermissionGranted = microphoneStatus == .authorized
+        switch microphoneStatus {
+        case .authorized:
+            microphonePermissionStatus = "已允许"
+        case .denied:
+            microphonePermissionStatus = "已拒绝"
+        case .restricted:
+            microphonePermissionStatus = "受限制"
+        case .notDetermined:
+            microphonePermissionStatus = "未请求"
+        @unknown default:
+            microphonePermissionStatus = "未知"
+        }
+
+        swapAxes = settings.swapAxes
+        invertX = settings.invertX
+        invertY = settings.invertY
+        sensitivity = settings.sensitivity
+        knobMode = settings.knobMode
+        screenTimeoutSeconds = settings.screenTimeoutSeconds
+        powerSaveTimeoutMinutes = settings.powerSaveTimeoutMinutes
+        waveformView.isActive = audioTestActive
     }
 
     func updateStatus(connected: Bool, knobStatus: String) {
-        connectionValueLabel.stringValue = connected ? "已连接" : "未连接"
-        connectionValueLabel.textColor = connected ? .systemGreen : .secondaryLabelColor
-        knobValueLabel.stringValue = knobStatus
+        self.connected = connected
+        connectionStatus = connected ? "已连接" : "未连接"
+        self.knobStatus = knobStatus
             .replacingOccurrences(of: "Knob: ", with: "")
             .replacingOccurrences(of: "旋钮：", with: "")
     }
 
     func updateMessage(_ message: String) {
-        messageValueLabel.stringValue = message
+        messageStatus = message
     }
 
     func updateAudioStatus(_ message: String, active: Bool) {
-        microphoneStatusLabel.stringValue = message
-        microphoneStatusLabel.textColor = active ? .systemGreen : .secondaryLabelColor
+        microphoneStatus = message
         audioTestActive = active
+        waveformView.isActive = active
         refresh()
     }
 
-    private func buildContent() {
-        guard let contentView = window?.contentView else { return }
-
-        contentView.wantsLayer = true
-        contentView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-
-        let root = NSStackView()
-        root.orientation = .horizontal
-        root.spacing = 0
-        root.translatesAutoresizingMaskIntoConstraints = false
-
-        let sidebarEffect = NSVisualEffectView()
-        sidebarEffect.material = .sidebar
-        sidebarEffect.blendingMode = .withinWindow
-        sidebarEffect.state = .active
-        sidebarEffect.translatesAutoresizingMaskIntoConstraints = false
-
-        let sidebarStack = NSStackView()
-        sidebarStack.orientation = .vertical
-        sidebarStack.alignment = .leading
-        sidebarStack.spacing = 10
-        sidebarStack.edgeInsets = NSEdgeInsets(top: 72, left: 12, bottom: 18, right: 10)
-        sidebarStack.translatesAutoresizingMaskIntoConstraints = false
-        sidebarEffect.addSubview(sidebarStack)
-
-        searchField.placeholderString = "搜索"
-        searchField.font = .systemFont(ofSize: 13)
-        searchField.translatesAutoresizingMaskIntoConstraints = false
-        sidebarStack.addArrangedSubview(searchField)
-
-        sections = makeSections()
-        configureSidebarTable()
-        sidebarStack.addArrangedSubview(sidebarScrollView)
-
-        let contentEffect = NSVisualEffectView()
-        contentEffect.material = .contentBackground
-        contentEffect.blendingMode = .withinWindow
-        contentEffect.state = .active
-        contentEffect.translatesAutoresizingMaskIntoConstraints = false
-
-        tabView.tabViewType = .noTabsNoBorder
-        tabView.translatesAutoresizingMaskIntoConstraints = false
-        sections.forEach { tabView.addTabViewItem(tabItem($0)) }
-        sidebarTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        contentEffect.addSubview(tabView)
-        root.addArrangedSubview(sidebarEffect)
-        root.addArrangedSubview(contentEffect)
-        contentView.addSubview(root)
-
-        installAppButton.target = self
-        installAppButton.action = #selector(installApp)
-        installAudioDriverButton.target = self
-        installAudioDriverButton.action = #selector(installAudioDriver)
-        launchAtLoginButton.target = self
-        launchAtLoginButton.action = #selector(toggleLaunchAtLogin)
-        inputMonitoringButton.target = self
-        inputMonitoringButton.action = #selector(requestInputMonitoring)
-        accessibilityButton.target = self
-        accessibilityButton.action = #selector(requestAccessibility)
-        microphonePermissionButton.target = self
-        microphonePermissionButton.action = #selector(requestMicrophone)
-        bluetoothButton.target = self
-        bluetoothButton.action = #selector(openBluetooth)
-
-        swapAxesButton.target = self
-        swapAxesButton.action = #selector(settingsChanged)
-        invertXButton.target = self
-        invertXButton.action = #selector(settingsChanged)
-        invertYButton.target = self
-        invertYButton.action = #selector(settingsChanged)
-        knobModePopup.addItems(withTitles: ["系统音量", "HomePod 音量", "禁用"])
-        knobModePopup.target = self
-        knobModePopup.action = #selector(settingsChanged)
-        resetButton.target = self
-        resetButton.action = #selector(resetHardwareDefaults)
-        refreshButton.target = self
-        refreshButton.action = #selector(refreshHardwareSettings)
-        sensitivitySlider.minValue = 2
-        sensitivitySlider.maxValue = 6
-        sensitivitySlider.numberOfTickMarks = 5
-        sensitivitySlider.allowsTickMarkValuesOnly = true
-        sensitivitySlider.target = self
-        sensitivitySlider.action = #selector(settingsChanged)
-        screenTimeoutSlider.minValue = 5
-        screenTimeoutSlider.maxValue = 120
-        screenTimeoutSlider.numberOfTickMarks = 24
-        screenTimeoutSlider.allowsTickMarkValuesOnly = true
-        screenTimeoutSlider.target = self
-        screenTimeoutSlider.action = #selector(powerSettingsChanged)
-        powerSaveSlider.minValue = 1
-        powerSaveSlider.maxValue = 30
-        powerSaveSlider.numberOfTickMarks = 30
-        powerSaveSlider.allowsTickMarkValuesOnly = true
-        powerSaveSlider.target = self
-        powerSaveSlider.action = #selector(powerSettingsChanged)
-        recordButton.target = self
-        recordButton.action = #selector(toggleAudioTest)
-
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            root.topAnchor.constraint(equalTo: contentView.topAnchor),
-            root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            sidebarEffect.widthAnchor.constraint(equalToConstant: 260),
-            sidebarStack.leadingAnchor.constraint(equalTo: sidebarEffect.leadingAnchor),
-            sidebarStack.trailingAnchor.constraint(equalTo: sidebarEffect.trailingAnchor),
-            sidebarStack.topAnchor.constraint(equalTo: sidebarEffect.topAnchor),
-            sidebarStack.bottomAnchor.constraint(equalTo: sidebarEffect.bottomAnchor),
-            searchField.widthAnchor.constraint(equalToConstant: 224),
-            searchField.heightAnchor.constraint(equalToConstant: 32),
-            sidebarScrollView.widthAnchor.constraint(equalToConstant: 232),
-            sidebarScrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
-            sidebarScrollView.bottomAnchor.constraint(equalTo: sidebarStack.bottomAnchor),
-            tabView.leadingAnchor.constraint(equalTo: contentEffect.leadingAnchor),
-            tabView.trailingAnchor.constraint(equalTo: contentEffect.trailingAnchor),
-            tabView.topAnchor.constraint(equalTo: contentEffect.topAnchor),
-            tabView.bottomAnchor.constraint(equalTo: contentEffect.bottomAnchor),
-        ])
+    func setSwapAxes(_ value: Bool) {
+        swapAxes = value
+        commitInputSettings()
     }
 
-    private func configureSidebarTable() {
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("settings"))
-        column.resizingMask = .autoresizingMask
-        sidebarTable.addTableColumn(column)
-        sidebarTable.headerView = nil
-        sidebarTable.style = .sourceList
-        sidebarTable.rowHeight = 40
-        sidebarTable.intercellSpacing = NSSize(width: 0, height: 2)
-        sidebarTable.backgroundColor = .clear
-        sidebarTable.delegate = self
-        sidebarTable.dataSource = self
-        sidebarTable.translatesAutoresizingMaskIntoConstraints = false
-
-        sidebarScrollView.documentView = sidebarTable
-        sidebarScrollView.drawsBackground = false
-        sidebarScrollView.hasVerticalScroller = true
-        sidebarScrollView.borderType = .noBorder
-        sidebarScrollView.translatesAutoresizingMaskIntoConstraints = false
-
-        sidebarTable.reloadData()
+    func setInvertX(_ value: Bool) {
+        invertX = value
+        commitInputSettings()
     }
 
-    private func makeSections() -> [SettingsSection] {
-        [
-            SettingsSection(identifier: "general",
-                            sidebarTitle: "通用",
-                            symbol: "gearshape",
-                            pageTitle: "通用",
-                            pageSubtitle: "管理 ADVCtl 的安装位置、登录启动和蓝牙配对入口。",
-                            groups: [
-                                group("ADVCtl", rows: [
-                                    valueRow("ADVCtl.app", appInstallStatusLabel),
-                                    controlRow("安装位置", installAppButton),
-                                    valueRow("登录启动", loginStartupStatusLabel),
-                                    controlRow("登录后自动启动", launchAtLoginButton),
-                                    permissionRow("蓝牙", bluetoothStatusLabel, bluetoothButton),
-                                ]),
-                            ]),
-            SettingsSection(identifier: "status",
-                            sidebarTitle: "ADV",
-                            symbol: "dot.radiowaves.left.and.right",
-                            pageTitle: "ADV",
-                            pageSubtitle: "查看 ADV 蓝牙连接、旋钮输入和最近的硬件同步状态。",
-                            groups: [
-                                group("连接", rows: [
-                                    valueRow("ADV", connectionValueLabel),
-                                    valueRow("旋钮", knobValueLabel),
-                                    valueRow("最近消息", messageValueLabel),
-                                    controlRow("硬件配置", refreshButton),
-                                ]),
-                            ]),
-            SettingsSection(identifier: "pointer",
-                            sidebarTitle: "指针",
-                            symbol: "cursorarrow.motionlines",
-                            pageTitle: "指针",
-                            pageSubtitle: "调整摇杆方向、轴映射和鼠标移动速度。这些设置会写入 ADV 固件。",
-                            groups: [
-                                group("指针", rows: [
-                                    controlRow("交换 X/Y 轴", swapAxesButton),
-                                    controlRow("反转左右", invertXButton),
-                                    controlRow("反转上下", invertYButton),
-                                    sensitivityRow(),
-                                ]),
-                            ]),
-            SettingsSection(identifier: "knob",
-                            sidebarTitle: "旋钮",
-                            symbol: "dial.low",
-                            pageTitle: "旋钮",
-                            pageSubtitle: "设置旋转行为。HomePod 音量由 ADVCtl 通过 Home Assistant 执行。",
-                            groups: [
-                                group("旋钮", rows: [
-                                    controlRow("旋转", knobModePopup),
-                                    valueRow("按下", NSTextField(labelWithString: "系统模式静音，HomePod 模式发送 F15")),
-                                    controlRow("默认值", resetButton),
-                                ]),
-                            ]),
-            SettingsSection(identifier: "audio",
-                            sidebarTitle: "音频",
-                            symbol: "waveform",
-                            pageTitle: "音频",
-                            pageSubtitle: "系统应用读取 ADVCtlAudio 麦克风时自动激活 ADV，并通过本地环形缓冲传输音频。",
-                            groups: [
-                                group("系统音频驱动", rows: [
-                                    valueRow("ADVCtlAudio", audioDriverStatusLabel),
-                                    controlRow("驱动", installAudioDriverButton),
-                                ]),
-                                group("音频", rows: [
-                                    valueRow("录制测试", audioStateLabel),
-                                    valueRow("系统麦克风", microphoneStatusLabel),
-                                    waveformRow(),
-                                ]),
-                            ]),
-            SettingsSection(identifier: "power",
-                            sidebarTitle: "省电",
-                            symbol: "battery.75percent",
-                            pageTitle: "省电",
-                            pageSubtitle: "配置屏幕关闭和深度省电时间。深度省电会关闭 BLE，按键后自动恢复连接。",
-                            groups: [
-                                group("省电", rows: [
-                                    screenTimeoutRow(),
-                                    powerSaveTimeoutRow(),
-                                ]),
-                            ]),
-            SettingsSection(identifier: "privacy",
-                            sidebarTitle: "隐私与安全性",
-                            symbol: "hand.raised.fill",
-                            pageTitle: "隐私与安全性",
-                            pageSubtitle: "集中管理 ADVCtl 需要的 macOS 权限。",
-                            groups: [
-                                group("权限", rows: [
-                                    permissionRow("输入监听", inputMonitoringStatusLabel, inputMonitoringButton),
-                                    permissionRow("辅助功能", accessibilityStatusLabel, accessibilityButton),
-                                    permissionRow("麦克风", microphonePermissionStatusLabel, microphonePermissionButton),
-                                ]),
-                            ]),
-        ]
+    func setInvertY(_ value: Bool) {
+        invertY = value
+        commitInputSettings()
     }
 
-    private func tabItem(_ section: SettingsSection) -> NSTabViewItem {
-        let item = NSTabViewItem(identifier: section.identifier)
-        item.label = section.sidebarTitle
-        item.view = tabPage(title: section.pageTitle, subtitle: section.pageSubtitle, groups: section.groups)
-        return item
+    func setSensitivity(_ value: Double) {
+        sensitivity = Int(round(value))
+        commitInputSettings()
     }
 
-    private func tabPage(title: String, subtitle: String, groups: [NSView]) -> NSView {
-        let page = NSView()
-        page.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 28, right: 24)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        stack.addArrangedSubview(pageHeader(title: title, subtitle: subtitle))
-        groups.forEach { stack.addArrangedSubview($0) }
-
-        page.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: page.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: page.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: page.topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: page.bottomAnchor),
-        ])
-        return page
+    func setKnobMode(_ value: Int) {
+        knobMode = value
+        commitInputSettings()
     }
 
-    func selectInstallPage() {
-        selectPage("general")
+    func setScreenTimeout(_ value: Double) {
+        screenTimeoutSeconds = Int(round(value))
+        commitPowerSettings()
     }
 
-    private func selectPage(_ identifier: String) {
-        tabView.selectTabViewItem(withIdentifier: identifier)
-        if let index = sections.firstIndex(where: { $0.identifier == identifier }) {
-            sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        }
-    }
-
-    private func pageHeader(title: String, subtitle: String) -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
-        titleLabel.textColor = .labelColor
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(titleLabel)
-
-        let subtitleLabel = NSTextField(wrappingLabelWithString: subtitle)
-        subtitleLabel.font = .systemFont(ofSize: 13)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(subtitleLabel)
-
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 520),
-            container.heightAnchor.constraint(equalToConstant: 72),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor),
-            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-        ])
-        return container
-    }
-
-    private func group(_ title: String, rows: [NSView]) -> NSView {
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
-
-        let cardStack = NSStackView()
-        cardStack.orientation = .vertical
-        cardStack.alignment = .leading
-        cardStack.spacing = 0
-        cardStack.translatesAutoresizingMaskIntoConstraints = false
-
-        for (index, row) in rows.enumerated() {
-            cardStack.addArrangedSubview(row)
-            if index < rows.count - 1 {
-                cardStack.addArrangedSubview(separator())
-            }
-        }
-
-        let card = NSView()
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 12
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72).cgColor
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(cardStack)
-
-        let wrapper = NSStackView()
-        wrapper.orientation = .vertical
-        wrapper.alignment = .leading
-        wrapper.spacing = 6
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addArrangedSubview(titleLabel)
-        wrapper.addArrangedSubview(card)
-
-        NSLayoutConstraint.activate([
-            wrapper.widthAnchor.constraint(equalToConstant: 532),
-            card.widthAnchor.constraint(equalTo: wrapper.widthAnchor),
-            cardStack.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            cardStack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            cardStack.topAnchor.constraint(equalTo: card.topAnchor),
-            cardStack.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-        ])
-        return wrapper
-    }
-
-    private func separator() -> NSView {
-        let line = NSBox()
-        line.boxType = .separator
-        line.translatesAutoresizingMaskIntoConstraints = false
-        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        return line
-    }
-
-    private func valueRow(_ title: String, _ value: NSTextField) -> NSView {
-        value.font = .systemFont(ofSize: 13)
-        value.textColor = .secondaryLabelColor
-        value.lineBreakMode = .byTruncatingMiddle
-        return row(title, trailing: value)
-    }
-
-    private func controlRow(_ title: String, _ control: NSControl) -> NSView {
-        return row(title, trailing: control)
-    }
-
-    private func permissionRow(_ title: String, _ status: NSTextField, _ button: NSButton) -> NSView {
-        status.font = .systemFont(ofSize: 13)
-        status.textColor = .secondaryLabelColor
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 10
-        stack.addArrangedSubview(status)
-        stack.addArrangedSubview(button)
-        status.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
-        return row(title, trailing: stack)
-    }
-
-    private func sensitivityRow() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 10
-        stack.addArrangedSubview(sensitivitySlider)
-        stack.addArrangedSubview(sensitivityValueLabel)
-        sensitivitySlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
-        sensitivityValueLabel.widthAnchor.constraint(equalToConstant: 34).isActive = true
-        return row("指针速度", trailing: stack)
-    }
-
-    private func screenTimeoutRow() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 10
-        stack.addArrangedSubview(screenTimeoutSlider)
-        stack.addArrangedSubview(screenTimeoutValueLabel)
-        screenTimeoutSlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
-        screenTimeoutValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        return row("关闭屏幕", trailing: stack)
-    }
-
-    private func powerSaveTimeoutRow() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 10
-        stack.addArrangedSubview(powerSaveSlider)
-        stack.addArrangedSubview(powerSaveValueLabel)
-        powerSaveSlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
-        powerSaveValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        return row("深度省电", trailing: stack)
-    }
-
-    private func waveformRow() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.addArrangedSubview(waveformView)
-        stack.addArrangedSubview(recordButton)
-        waveformView.widthAnchor.constraint(equalToConstant: 330).isActive = true
-        waveformView.heightAnchor.constraint(equalToConstant: 118).isActive = true
-        return row("ADV 麦克风", trailing: stack, minHeight: 162)
-    }
-
-    private func row(_ title: String, trailing: NSView, minHeight: CGFloat = 44) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13.5)
-        label.textColor = .labelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        trailing.translatesAutoresizingMaskIntoConstraints = false
-
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-        container.addSubview(trailing)
-        NSLayoutConstraint.activate([
-            container.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 14),
-            trailing.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            trailing.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            trailing.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 18),
-        ])
-        return container
-    }
-
-    func refresh() {
-        let appInstalled = FileManager.default.fileExists(atPath: advCtlInstalledAppURL.path)
-        setStatus(appInstallStatusLabel,
-                  appInstalled ? "已安装在 /Applications" : "未安装",
-                  ok: appInstalled)
-
-        let driverInstalled = FileManager.default.fileExists(atPath: advCtlAudioDriverURL.path)
-        setStatus(audioDriverStatusLabel,
-                  driverInstalled ? "已安装" : "未安装",
-                  ok: driverInstalled)
-
-        let launchAtLoginEnabled = ADVCtlInstaller.isLaunchAtLoginEnabled()
-        let launchAtLoginLoaded = ADVCtlInstaller.isLaunchAtLoginLoaded()
-        launchAtLoginButton.state = launchAtLoginEnabled ? .on : .off
-        setStatus(loginStartupStatusLabel,
-                  launchAtLoginEnabled ? (launchAtLoginLoaded ? "已开启" : "已开启，下次登录生效") : "已关闭",
-                  ok: launchAtLoginEnabled)
-
-        let inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
-        setStatus(inputMonitoringStatusLabel,
-                  inputMonitoringGranted ? "已允许" : "需要设置",
-                  ok: inputMonitoringGranted)
-
-        let accessibilityGranted = AXIsProcessTrusted()
-        setStatus(accessibilityStatusLabel,
-                  accessibilityGranted ? "已允许" : "需要设置",
-                  ok: accessibilityGranted)
-
-        let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        let microphoneGranted = microphoneStatus == .authorized
-        let microphoneText: String
-        switch microphoneStatus {
-        case .authorized:
-            microphoneText = "已允许"
-        case .denied:
-            microphoneText = "已拒绝"
-        case .restricted:
-            microphoneText = "受限制"
-        case .notDetermined:
-            microphoneText = "未请求"
-        @unknown default:
-            microphoneText = "未知"
-        }
-        setStatus(microphonePermissionStatusLabel, microphoneText, ok: microphoneGranted)
-
-        setStatus(bluetoothStatusLabel, "配对 ADVCtl", ok: true)
-
-        swapAxesButton.state = settings.swapAxes ? .on : .off
-        invertXButton.state = settings.invertX ? .on : .off
-        invertYButton.state = settings.invertY ? .on : .off
-        sensitivitySlider.integerValue = settings.sensitivity
-        sensitivityValueLabel.stringValue = settings.sensitivityLabel
-        knobModePopup.selectItem(at: settings.knobMode)
-        screenTimeoutSlider.integerValue = settings.screenTimeoutSeconds
-        screenTimeoutValueLabel.stringValue = "\(settings.screenTimeoutSeconds)s"
-        powerSaveSlider.integerValue = settings.powerSaveTimeoutMinutes
-        powerSaveValueLabel.stringValue = "\(settings.powerSaveTimeoutMinutes)m"
-        audioStateLabel.stringValue = audioTestActive ? "已激活" : "未激活"
-        audioStateLabel.textColor = audioTestActive ? .systemBlue : .secondaryLabelColor
-        recordButton.title = audioTestActive ? "停止 ADV 麦克风" : "启用 ADV 麦克风"
-        waveformView.isActive = audioTestActive
-    }
-
-    private func setStatus(_ label: NSTextField, _ text: String, ok: Bool) {
-        label.stringValue = text
-        label.textColor = ok ? .systemGreen : .secondaryLabelColor
-    }
-
-    @objc private func settingsChanged() {
-        settings.swapAxes = swapAxesButton.state == .on
-        settings.invertX = invertXButton.state == .on
-        settings.invertY = invertYButton.state == .on
-        settings.sensitivity = Int(round(sensitivitySlider.doubleValue))
-        settings.knobMode = knobModePopup.indexOfSelectedItem
-        settings.synchronize()
-        refresh()
-        onSettingsChanged?()
-    }
-
-    @objc private func powerSettingsChanged() {
-        settings.screenTimeoutSeconds = Int(round(screenTimeoutSlider.doubleValue))
-        settings.powerSaveTimeoutMinutes = Int(round(powerSaveSlider.doubleValue))
-        settings.synchronize()
-        refresh()
-        onPowerSettingsChanged?()
+    func setPowerSaveTimeout(_ value: Double) {
+        powerSaveTimeoutMinutes = Int(round(value))
+        commitPowerSettings()
     }
 
     func applyHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
@@ -1577,109 +1138,709 @@ private final class SettingsWindowController: NSWindowController {
         refresh()
     }
 
-    @objc private func refreshHardwareSettings() {
-        onRefreshSettings?()
+    private func commitInputSettings() {
+        settings.swapAxes = swapAxes
+        settings.invertX = invertX
+        settings.invertY = invertY
+        settings.sensitivity = sensitivity
+        settings.knobMode = knobMode
+        settings.synchronize()
+        refresh()
+        onSettingsChanged?()
     }
 
-    @objc private func resetHardwareDefaults() {
-        onResetHardwareSettings?()
-    }
-
-    @objc private func toggleAudioTest() {
-        onAudioTestChanged?(!audioTestActive)
-    }
-
-    @objc private func installApp() {
-        onInstallApp?()
-    }
-
-    @objc private func installAudioDriver() {
-        onInstallAudioDriver?()
-    }
-
-    @objc private func toggleLaunchAtLogin() {
-        onLaunchAtLoginChanged?(launchAtLoginButton.state == .on)
-    }
-
-    @objc private func requestInputMonitoring() {
-        onRequestInputMonitoring?()
-    }
-
-    @objc private func requestAccessibility() {
-        onRequestAccessibility?()
-    }
-
-    @objc private func requestMicrophone() {
-        onRequestMicrophone?()
-    }
-
-    @objc private func openBluetooth() {
-        onOpenBluetooth?()
+    private func commitPowerSettings() {
+        settings.screenTimeoutSeconds = screenTimeoutSeconds
+        settings.powerSaveTimeoutMinutes = powerSaveTimeoutMinutes
+        settings.synchronize()
+        refresh()
+        onPowerSettingsChanged?()
     }
 }
 
-extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        sections.count
+private final class SettingsWindowController: NSWindowController {
+    private let viewModel: ADVCtlSettingsViewModel
+
+    var onSettingsChanged: (() -> Void)? {
+        get { viewModel.onSettingsChanged }
+        set { viewModel.onSettingsChanged = newValue }
+    }
+    var onPowerSettingsChanged: (() -> Void)? {
+        get { viewModel.onPowerSettingsChanged }
+        set { viewModel.onPowerSettingsChanged = newValue }
+    }
+    var onAudioTestChanged: ((Bool) -> Void)? {
+        get { viewModel.onAudioTestChanged }
+        set { viewModel.onAudioTestChanged = newValue }
+    }
+    var onRefreshSettings: (() -> Void)? {
+        get { viewModel.onRefreshSettings }
+        set { viewModel.onRefreshSettings = newValue }
+    }
+    var onResetHardwareSettings: (() -> Void)? {
+        get { viewModel.onResetHardwareSettings }
+        set { viewModel.onResetHardwareSettings = newValue }
+    }
+    var onInstallApp: (() -> Void)? {
+        get { viewModel.onInstallApp }
+        set { viewModel.onInstallApp = newValue }
+    }
+    var onInstallAudioDriver: (() -> Void)? {
+        get { viewModel.onInstallAudioDriver }
+        set { viewModel.onInstallAudioDriver = newValue }
+    }
+    var onLaunchAtLoginChanged: ((Bool) -> Void)? {
+        get { viewModel.onLaunchAtLoginChanged }
+        set { viewModel.onLaunchAtLoginChanged = newValue }
+    }
+    var onRequestInputMonitoring: (() -> Void)? {
+        get { viewModel.onRequestInputMonitoring }
+        set { viewModel.onRequestInputMonitoring = newValue }
+    }
+    var onRequestAccessibility: (() -> Void)? {
+        get { viewModel.onRequestAccessibility }
+        set { viewModel.onRequestAccessibility = newValue }
+    }
+    var onRequestMicrophone: (() -> Void)? {
+        get { viewModel.onRequestMicrophone }
+        set { viewModel.onRequestMicrophone = newValue }
+    }
+    var onOpenBluetooth: (() -> Void)? {
+        get { viewModel.onOpenBluetooth }
+        set { viewModel.onOpenBluetooth = newValue }
     }
 
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        38
+    init(settings: JoystickSettings) {
+        viewModel = ADVCtlSettingsViewModel(settings: settings)
+        let rootView = ADVCtlSettingsRootView(model: viewModel)
+            .frame(minWidth: 840, minHeight: 620)
+        let hostingController = NSHostingController(rootView: rootView)
+        let window = NSWindow(contentViewController: hostingController)
+        window.setContentSize(NSSize(width: 900, height: 680))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        window.title = ""
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.title = ""
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        refresh()
     }
 
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row >= 0, row < sections.count else {
-            return nil
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func updateStatus(connected: Bool, knobStatus: String) {
+        viewModel.updateStatus(connected: connected, knobStatus: knobStatus)
+    }
+
+    func updateMessage(_ message: String) {
+        viewModel.updateMessage(message)
+    }
+
+    func updateAudioStatus(_ message: String, active: Bool) {
+        viewModel.updateAudioStatus(message, active: active)
+    }
+
+    func refresh() {
+        viewModel.refresh()
+    }
+
+    func applyHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
+        viewModel.applyHardwareSettings(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
+    }
+
+    func applyPowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8) {
+        viewModel.applyPowerSettings(screenTimeoutSeconds: screenTimeoutSeconds,
+                                     powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
+    }
+
+    func selectInstallPage() {
+        viewModel.selectedPage = .install
+    }
+}
+
+private struct ADVCtlSettingsRootView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $model.selectedPage) {
+                ForEach(ADVCtlSettingsPage.allCases, id: \.self) { page in
+                    Label(page.title, systemImage: page.symbol)
+                        .tag(page)
+                }
+            }
+            .listStyle(.sidebar)
+            .safeAreaInset(edge: .top) {
+                Color.clear.frame(height: 28)
+            }
+            .ignoresSafeArea(.container, edges: .top)
+            .navigationSplitViewColumnWidth(180)
+        } detail: {
+            ADVCtlSettingsDetailView(model: model)
         }
-        let identifier = NSUserInterfaceItemIdentifier("SettingsSidebarCell")
-        let section = sections[row]
+        .onAppear {
+            model.refresh()
+        }
+    }
+}
 
-        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? {
-            let cell = NSTableCellView()
-            cell.identifier = identifier
+private struct ADVCtlSettingsDetailView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
 
-            let imageView = NSImageView()
-            imageView.translatesAutoresizingMaskIntoConstraints = false
-            imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-            imageView.contentTintColor = .labelColor
+    var body: some View {
+        switch model.selectedPage {
+        case .install:
+            ADVCtlInstallGuideView(model: model)
+        case .general:
+            ADVCtlGeneralView(model: model)
+        case .adv:
+            ADVCtlStatusView(model: model)
+        case .pointer:
+            ADVCtlPointerView(model: model)
+        case .knob:
+            ADVCtlKnobView(model: model)
+        case .audio:
+            ADVCtlAudioView(model: model)
+        case .power:
+            ADVCtlPowerView(model: model)
+        case .privacy:
+            ADVCtlPrivacyView(model: model)
+        }
+    }
+}
 
-            let textField = NSTextField(labelWithString: "")
-            textField.translatesAutoresizingMaskIntoConstraints = false
-            textField.font = .systemFont(ofSize: 13)
-            textField.lineBreakMode = .byTruncatingTail
+private struct ADVCtlInstallGuideView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
 
-            cell.addSubview(imageView)
-            cell.addSubview(textField)
-            cell.imageView = imageView
-            cell.textField = textField
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "安装向导",
+                           subtitle: "ADVCtl 会在应用、音频驱动或系统权限缺失时打开这里，按顺序完成本机安装和 macOS 权限。")
 
-            NSLayoutConstraint.activate([
-                imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
-                imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                imageView.widthAnchor.constraint(equalToConstant: 22),
-                imageView.heightAnchor.constraint(equalToConstant: 22),
-                textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 8),
-                textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            if model.needsInstallGuide {
+                SettingsCallout(title: "设置未完成",
+                                message: "完成本页项目后，状态栏应用、ADV 输入控制和虚拟麦克风会在登录后自动可用。",
+                                symbol: "exclamationmark.triangle.fill")
+            }
+
+            StatusGrid(items: [
+                ("应用", model.appInstallStatus, model.appInstalled),
+                ("音频驱动", model.audioDriverStatus, model.audioDriverInstalled),
+                ("系统权限", permissionsSummary(model), permissionsReady(model)),
             ])
-            return cell
-        }()
 
-        cell.textField?.stringValue = section.sidebarTitle
-        cell.imageView?.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.sidebarTitle)
-        return cell
+            SettingsGroup("安装") {
+                ActionStatusRow(title: "ADVCtl.app",
+                                detail: model.appInstallStatus,
+                                symbol: model.appInstalled ? "checkmark.circle.fill" : "app.badge",
+                                ok: model.appInstalled,
+                                buttonTitle: "安装到 /Applications",
+                                action: { model.onInstallApp?() })
+                ActionStatusRow(title: "ADVCtlAudio.driver",
+                                detail: model.audioDriverStatus,
+                                symbol: model.audioDriverInstalled ? "checkmark.circle.fill" : "waveform.badge.mic",
+                                ok: model.audioDriverInstalled,
+                                buttonTitle: model.audioDriverInstalled ? "重新安装驱动" : "安装音频驱动",
+                                action: { model.onInstallAudioDriver?() })
+                ToggleStatusRow(title: "登录启动",
+                                detail: model.launchAtLoginDetail,
+                                symbol: "power.circle.fill",
+                                isOn: Binding(get: { model.launchAtLoginEnabled },
+                                              set: { model.onLaunchAtLoginChanged?($0) }))
+            }
+
+            SettingsGroup("权限") {
+                PermissionStatusRow(title: "输入监听",
+                                    detail: model.inputMonitoringStatus,
+                                    ok: model.inputMonitoringGranted,
+                                    action: { model.onRequestInputMonitoring?() })
+                PermissionStatusRow(title: "辅助功能",
+                                    detail: model.accessibilityStatus,
+                                    ok: model.accessibilityGranted,
+                                    action: { model.onRequestAccessibility?() })
+                PermissionStatusRow(title: "麦克风",
+                                    detail: model.microphonePermissionStatus,
+                                    ok: model.microphonePermissionGranted,
+                                    action: { model.onRequestMicrophone?() })
+                ActionStatusRow(title: "蓝牙",
+                                detail: "配对 ADVCtl",
+                                symbol: "dot.radiowaves.left.and.right",
+                                ok: true,
+                                buttonTitle: "打开蓝牙",
+                                action: { model.onOpenBluetooth?() })
+            }
+
+            HStack {
+                Button {
+                    model.refresh()
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+            }
+        }
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        let row = sidebarTable.selectedRow
-        guard row >= 0, row < sections.count else {
-            return
+    private func permissionsSummary(_ model: ADVCtlSettingsViewModel) -> String {
+        let missing = [
+            model.inputMonitoringGranted ? nil : "输入监听",
+            model.accessibilityGranted ? nil : "辅助功能",
+            model.microphonePermissionGranted ? nil : "麦克风",
+        ].compactMap { $0 }
+        return missing.isEmpty ? "已允许" : "缺少 \(missing.joined(separator: "、"))"
+    }
+
+    private func permissionsReady(_ model: ADVCtlSettingsViewModel) -> Bool {
+        model.inputMonitoringGranted && model.accessibilityGranted && model.microphonePermissionGranted
+    }
+}
+
+private struct ADVCtlGeneralView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "通用", subtitle: "管理 ADVCtl 的安装位置、登录启动和蓝牙配对入口。")
+            SettingsGroup("ADVCtl") {
+                StatusRow(title: "ADVCtl.app", detail: model.appInstallStatus, ok: model.appInstalled)
+                ActionRow(title: "安装位置", buttonTitle: "安装到 /Applications") {
+                    model.onInstallApp?()
+                }
+                StatusRow(title: "登录启动", detail: model.loginStartupStatus, ok: model.launchAtLoginEnabled)
+                ToggleStatusRow(title: "登录后自动启动",
+                                detail: model.launchAtLoginDetail,
+                                symbol: "power.circle.fill",
+                                isOn: Binding(get: { model.launchAtLoginEnabled },
+                                              set: { model.onLaunchAtLoginChanged?($0) }))
+                ActionRow(title: "蓝牙配对", buttonTitle: "打开蓝牙") {
+                    model.onOpenBluetooth?()
+                }
+            }
         }
-        let identifier = sections[row].identifier
-        guard tabView.indexOfTabViewItem(withIdentifier: identifier) != NSNotFound else {
-            return
+    }
+}
+
+private struct ADVCtlStatusView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "ADV", subtitle: "查看 ADV 蓝牙连接、旋钮输入和最近的硬件同步状态。")
+            StatusGrid(items: [
+                ("ADV", model.connectionStatus, model.connected),
+                ("旋钮", model.knobStatus, model.connected),
+                ("消息", model.messageStatus, true),
+            ])
+            SettingsGroup("连接") {
+                StatusRow(title: "ADV", detail: model.connectionStatus, ok: model.connected)
+                StatusRow(title: "旋钮", detail: model.knobStatus, ok: model.connected)
+                StatusRow(title: "最近消息", detail: model.messageStatus, ok: true)
+                ActionRow(title: "硬件配置", buttonTitle: "从 ADV 刷新") {
+                    model.onRefreshSettings?()
+                }
+            }
         }
-        tabView.selectTabViewItem(withIdentifier: identifier)
+    }
+}
+
+private struct ADVCtlPointerView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "指针", subtitle: "调整摇杆方向、轴映射和鼠标移动速度。这些设置会写入 ADV 固件。")
+            SettingsGroup("指针") {
+                ToggleRow(title: "交换 X/Y 轴",
+                          isOn: Binding(get: { model.swapAxes }, set: { model.setSwapAxes($0) }))
+                ToggleRow(title: "反转左右",
+                          isOn: Binding(get: { model.invertX }, set: { model.setInvertX($0) }))
+                ToggleRow(title: "反转上下",
+                          isOn: Binding(get: { model.invertY }, set: { model.setInvertY($0) }))
+                SliderRow(title: "指针速度",
+                          valueText: model.sensitivityLabel,
+                          value: Binding(get: { Double(model.sensitivity) }, set: { model.setSensitivity($0) }),
+                          range: 2...6,
+                          step: 1)
+            }
+        }
+    }
+}
+
+private struct ADVCtlKnobView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "旋钮", subtitle: "设置旋转行为。HomePod 音量由 ADVCtl 通过 Home Assistant 执行。")
+            SettingsGroup("旋钮") {
+                PickerRow(title: "旋转",
+                          selection: Binding(get: { model.knobMode }, set: { model.setKnobMode($0) }),
+                          options: ["系统音量", "HomePod 音量", "禁用"])
+                StatusRow(title: "按下", detail: "系统模式静音，HomePod 模式发送 F15", ok: true)
+                ActionRow(title: "默认值", buttonTitle: "恢复硬件默认值") {
+                    model.onResetHardwareSettings?()
+                }
+            }
+        }
+    }
+}
+
+private struct ADVCtlAudioView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "音频", subtitle: "系统应用读取 ADVCtlAudio 麦克风时自动激活 ADV，并通过本地环形缓冲传输音频。")
+            SettingsGroup("系统音频驱动") {
+                StatusRow(title: "ADVCtlAudio", detail: model.audioDriverStatus, ok: model.audioDriverInstalled)
+                ActionRow(title: "驱动", buttonTitle: model.audioDriverInstalled ? "重新安装驱动" : "安装音频驱动") {
+                    model.onInstallAudioDriver?()
+                }
+            }
+            SettingsGroup("音频") {
+                StatusRow(title: "录制测试", detail: model.audioStateText, ok: model.audioTestActive)
+                StatusRow(title: "系统麦克风", detail: model.microphoneStatus, ok: model.audioTestActive)
+                VStack(alignment: .leading, spacing: 10) {
+                    ADVCtlWaveformHost(model: model)
+                        .frame(width: 360, height: 118)
+                    Button {
+                        model.onAudioTestChanged?(!model.audioTestActive)
+                    } label: {
+                        Label(model.audioTestActive ? "停止 ADV 麦克风" : "启用 ADV 麦克风",
+                              systemImage: model.audioTestActive ? "stop.circle" : "mic.circle")
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+    }
+}
+
+private struct ADVCtlPowerView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "省电", subtitle: "配置屏幕关闭和深度省电时间。深度省电会关闭 BLE，按键后自动恢复连接。")
+            SettingsGroup("省电") {
+                SliderRow(title: "关闭屏幕",
+                          valueText: "\(model.screenTimeoutSeconds)s",
+                          value: Binding(get: { Double(model.screenTimeoutSeconds) },
+                                         set: { model.setScreenTimeout($0) }),
+                          range: 5...120,
+                          step: 5)
+                SliderRow(title: "深度省电",
+                          valueText: "\(model.powerSaveTimeoutMinutes)m",
+                          value: Binding(get: { Double(model.powerSaveTimeoutMinutes) },
+                                         set: { model.setPowerSaveTimeout($0) }),
+                          range: 1...30,
+                          step: 1)
+            }
+        }
+    }
+}
+
+private struct ADVCtlPrivacyView: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsScrollPage {
+            SettingsHeader(title: "隐私与安全性", subtitle: "集中管理 ADVCtl 需要的 macOS 权限。")
+            SettingsGroup("权限") {
+                PermissionStatusRow(title: "输入监听",
+                                    detail: model.inputMonitoringStatus,
+                                    ok: model.inputMonitoringGranted,
+                                    action: { model.onRequestInputMonitoring?() })
+                PermissionStatusRow(title: "辅助功能",
+                                    detail: model.accessibilityStatus,
+                                    ok: model.accessibilityGranted,
+                                    action: { model.onRequestAccessibility?() })
+                PermissionStatusRow(title: "麦克风",
+                                    detail: model.microphonePermissionStatus,
+                                    ok: model.microphonePermissionGranted,
+                                    action: { model.onRequestMicrophone?() })
+            }
+        }
+    }
+}
+
+private struct SettingsScrollPage<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                content()
+            }
+            .padding(28)
+            .frame(maxWidth: 680, alignment: .leading)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct SettingsHeader: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.largeTitle.weight(.semibold))
+            Text(subtitle)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.bottom, 2)
+    }
+}
+
+private struct SettingsCallout: View {
+    let title: String
+    let message: String
+    let symbol: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: symbol)
+                .font(.title3)
+                .foregroundStyle(.orange)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct StatusGrid: View {
+    let items: [(title: String, detail: String, ok: Bool)]
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
+            ForEach(items, id: \.title) { item in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 7) {
+                        Image(systemName: item.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(item.ok ? .green : .orange)
+                        Text(item.title)
+                            .font(.headline)
+                    }
+                    Text(item.detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+                .background(.quaternary.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+}
+
+private struct SettingsGroup<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    init(_ title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.headline)
+            VStack(spacing: 0) {
+                content()
+            }
+            .padding(.vertical, 2)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+}
+
+private struct StatusRow: View {
+    let title: String
+    let detail: String
+    let ok: Bool
+
+    var body: some View {
+        SettingsRow(title: title) {
+            Text(detail)
+                .foregroundStyle(ok ? .green : .secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+private struct ActionRow: View {
+    let title: String
+    let buttonTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        SettingsRow(title: title) {
+            Button(buttonTitle, action: action)
+        }
+    }
+}
+
+private struct ActionStatusRow: View {
+    let title: String
+    let detail: String
+    let symbol: String
+    let ok: Bool
+    let buttonTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        SettingsRow(title: title) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .foregroundStyle(ok ? .green : .orange)
+                Text(detail)
+                    .foregroundStyle(ok ? .green : .secondary)
+                Button(buttonTitle, action: action)
+            }
+        }
+    }
+}
+
+private struct ToggleRow: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        SettingsRow(title: title) {
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+        }
+    }
+}
+
+private struct ToggleStatusRow: View {
+    let title: String
+    let detail: String
+    let symbol: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        SettingsRow(title: title) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .foregroundStyle(isOn ? .green : .secondary)
+                Text(detail)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Toggle("", isOn: $isOn)
+                    .labelsHidden()
+            }
+        }
+    }
+}
+
+private struct PermissionStatusRow: View {
+    let title: String
+    let detail: String
+    let ok: Bool
+    let action: () -> Void
+
+    var body: some View {
+        SettingsRow(title: title) {
+            HStack(spacing: 12) {
+                Image(systemName: ok ? "checkmark.circle.fill" : "lock.open.trianglebadge.exclamationmark")
+                    .foregroundStyle(ok ? .green : .orange)
+                Text(detail)
+                    .foregroundStyle(ok ? .green : .secondary)
+                    .frame(minWidth: 72, alignment: .trailing)
+                Button(ok ? "已设置" : "设置", action: action)
+                    .disabled(ok)
+            }
+        }
+    }
+}
+
+private struct SliderRow: View {
+    let title: String
+    let valueText: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+
+    var body: some View {
+        SettingsRow(title: title) {
+            HStack(spacing: 10) {
+                Slider(value: $value, in: range, step: step)
+                    .frame(width: 190)
+                Text(valueText)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 42, alignment: .trailing)
+            }
+        }
+    }
+}
+
+private struct PickerRow: View {
+    let title: String
+    @Binding var selection: Int
+    let options: [String]
+
+    var body: some View {
+        SettingsRow(title: title) {
+            Picker("", selection: $selection) {
+                ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                    Text(option).tag(index)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 180)
+        }
+    }
+}
+
+private struct SettingsRow<Trailing: View>: View {
+    let title: String
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 18) {
+            Text(title)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 24)
+            trailing()
+                .font(.callout)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(minHeight: 44)
+    }
+}
+
+private struct ADVCtlWaveformHost: NSViewRepresentable {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    func makeNSView(context: Context) -> WaveformView {
+        model.waveformView
+    }
+
+    func updateNSView(_ nsView: WaveformView, context: Context) {
+        nsView.isActive = model.audioTestActive
     }
 }
 
@@ -1710,6 +1871,11 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         let launchArgumentText = ProcessInfo.processInfo.arguments.joined(separator: " ")
         let shouldOpenInstallGuide = launchArgumentText.contains("--show-install")
         let shouldOpenSettings = launchArgumentText.contains("--show-settings")
+        if handOffToRunningInstance(showInstallGuide: shouldOpenInstallGuide,
+                                    showSettings: shouldOpenSettings) {
+            return
+        }
+        registerSingleInstanceNotifications()
         settingsWindow.onSettingsChanged = { [weak self] in
             guard let self else { return }
             self.bridge.sendSettings(self.settings)
@@ -1771,6 +1937,7 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        DistributedNotificationCenter.default().removeObserver(self)
         bridge.sendAudioTest(active: false)
     }
 
@@ -1834,7 +2001,7 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
             return
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let image = NSImage(systemSymbolName: "dot.radiowaves.left.and.right",
+        if let image = NSImage(systemSymbolName: "waveform",
                                accessibilityDescription: "ADVCtl") {
             image.isTemplate = true
             item.button?.image = image
@@ -1844,19 +2011,15 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         item.button?.toolTip = "ADVCtl"
 
         let menu = NSMenu()
-        menu.addItem(connectionMenuItem)
-        menu.addItem(knobMenuItem)
-        menu.addItem(messageMenuItem)
-        menu.addItem(.separator())
+        let openItem = NSMenuItem(title: "打开 ADVCtl", action: #selector(openSettings), keyEquivalent: "")
+        openItem.target = self
+        menu.addItem(openItem)
 
-        let installItem = NSMenuItem(title: "安装向导...", action: #selector(openInstallGuide), keyEquivalent: "i")
+        let installItem = NSMenuItem(title: "安装向导", action: #selector(openInstallGuide), keyEquivalent: "")
         installItem.target = self
         menu.addItem(installItem)
 
-        let settingsItem = NSMenuItem(title: "设置...", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-
+        menu.addItem(.separator())
         let quitItem = NSMenuItem(title: "退出 ADVCtl", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -1864,6 +2027,40 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         item.menu = menu
         statusItem = item
         log("ADVCtl status item installed")
+    }
+
+    private func handOffToRunningInstance(showInstallGuide: Bool, showSettings: Bool) -> Bool {
+        let otherInstances = NSRunningApplication
+            .runningApplications(withBundleIdentifier: advCtlBundleIdentifier)
+            .filter { $0.processIdentifier != getpid() }
+        guard let runningApp = otherInstances.first else {
+            return false
+        }
+
+        let notificationName = showInstallGuide ? advCtlShowInstallNotification : advCtlShowSettingsNotification
+        DistributedNotificationCenter.default().postNotificationName(notificationName, object: nil)
+        runningApp.activate(options: [.activateIgnoringOtherApps])
+        NSApp.terminate(nil)
+        return true
+    }
+
+    private func registerSingleInstanceNotifications() {
+        DistributedNotificationCenter.default().addObserver(self,
+                                                           selector: #selector(handleShowSettingsNotification),
+                                                           name: advCtlShowSettingsNotification,
+                                                           object: nil)
+        DistributedNotificationCenter.default().addObserver(self,
+                                                           selector: #selector(handleShowInstallNotification),
+                                                           name: advCtlShowInstallNotification,
+                                                           object: nil)
+    }
+
+    @objc private func handleShowSettingsNotification(_ notification: Notification) {
+        openSettings()
+    }
+
+    @objc private func handleShowInstallNotification(_ notification: Notification) {
+        openInstallGuide()
     }
 
     private func applyDefaultLaunchAtLogin() {
