@@ -103,6 +103,10 @@ static TickType_t s_ble_hid_last_drop_log    = 0;
 
 #define MACCTL_CMD_VOLUME_DELTA 1
 #define MACCTL_CMD_PLAY_PAUSE   2
+#define MACCTL_LED_CMD_PREFIX      0x1F
+#define MACCTL_LED_CMD_AUDIO_STOP  0x10
+#define MACCTL_LED_CMD_AUDIO_START 0x11
+#define MACCTL_LED_CMD_WINDOW_MS   1000
 
 typedef struct {
     TaskHandle_t task_hdl;
@@ -230,6 +234,32 @@ static bool ble_hid_device_helper_queue_macctl_command(uint8_t command, int8_t v
         ESP_LOGW(TAG, "macctl command dropped: command=%u value=%d", command, value);
     }
     return queued;
+}
+
+static void ble_hid_device_helper_handle_keyboard_output(const uint8_t* data, uint8_t len)
+{
+    static TickType_t s_led_command_prefix_tick = 0;
+    if (!data || len == 0) {
+        return;
+    }
+
+    const uint8_t value = data[0] & 0x1F;
+    const TickType_t now = xTaskGetTickCount();
+    if (value == MACCTL_LED_CMD_PREFIX) {
+        s_led_command_prefix_tick = now;
+        return;
+    }
+
+    if (!s_ble_hid_output_callback || s_led_command_prefix_tick == 0 ||
+        now - s_led_command_prefix_tick > pdMS_TO_TICKS(MACCTL_LED_CMD_WINDOW_MS)) {
+        return;
+    }
+
+    if (value == MACCTL_LED_CMD_AUDIO_START || value == MACCTL_LED_CMD_AUDIO_STOP) {
+        uint8_t command[4] = {0x82, value == MACCTL_LED_CMD_AUDIO_START ? 1 : 0, 0, 0};
+        s_led_command_prefix_tick = 0;
+        s_ble_hid_output_callback(command, sizeof(command));
+    }
 }
 
 const unsigned char mediaReportMap[] = {
@@ -821,6 +851,9 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
             ESP_LOGI(TAG, "OUTPUT[%u]: %8s ID: %2u, Len: %d, Data:", param->output.map_index,
                      esp_hid_usage_str(param->output.usage), param->output.report_id, param->output.length);
             ESP_LOG_BUFFER_HEX(TAG, param->output.data, param->output.length);
+            if (param->output.report_id == BLE_HID_RPT_ID_KEYBOARD) {
+                ble_hid_device_helper_handle_keyboard_output(param->output.data, param->output.length);
+            }
             if (param->output.report_id == BLE_HID_RPT_ID_MACCTL && s_ble_hid_output_callback) {
                 s_ble_hid_output_callback(param->output.data, param->output.length);
             }

@@ -28,6 +28,9 @@ private let advCtlAudioFrameReport: UInt8 = 0xA0
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
+private let advCtlKeyboardLedAudioPrefix: UInt8 = 0x1F
+private let advCtlKeyboardLedAudioStop: UInt8 = 0x10
+private let advCtlKeyboardLedAudioStart: UInt8 = 0x11
 private let hidKeyF13: UInt8 = 0x68
 private let hidKeyF14: UInt8 = 0x69
 private let hidKeyF15: UInt8 = 0x6A
@@ -727,6 +730,35 @@ private final class ADVCtlBridge {
         sendControlPayload([advCtlAudioTestCommand, active ? 1 : 0, 0, 0],
                            successMessage: active ? "ADV microphone bridge activated" : "ADV microphone bridge stopped",
                            updateStatus: updateStatus)
+        sendKeyboardLedAudioControl(active: active)
+    }
+
+    private func sendKeyboardLedAudioControl(active: Bool) {
+        for registration in hidDevices where registration.kind.supportsKeyboard {
+            let prefixStatus = setKeyboardOutputReport(registration.device, value: advCtlKeyboardLedAudioPrefix)
+            let commandStatus = setKeyboardOutputReport(registration.device,
+                                                        value: active ? advCtlKeyboardLedAudioStart : advCtlKeyboardLedAudioStop)
+            if prefixStatus == kIOReturnSuccess && commandStatus == kIOReturnSuccess {
+                updateMessage("Sent ADV microphone \(active ? "start" : "stop") via keyboard output")
+                return
+            }
+            if prefixStatus != kIOReturnUnsupported || commandStatus != kIOReturnUnsupported {
+                updateMessage("Keyboard output audio control failed: \(prefixStatus)/\(commandStatus)")
+            }
+        }
+    }
+
+    private func setKeyboardOutputReport(_ device: IOHIDDevice, value: UInt8) -> IOReturn {
+        var report = [value]
+        let reportLength = report.count
+        return report.withUnsafeMutableBytes { buffer in
+            guard let base = buffer.baseAddress else { return kIOReturnBadArgument }
+            return IOHIDDeviceSetReport(device,
+                                        kIOHIDReportTypeOutput,
+                                        CFIndex(advCtlKeyboardReportID),
+                                        base.assumingMemoryBound(to: UInt8.self),
+                                        reportLength)
+        }
     }
 
     private func sendControlPayload(_ bytes: [UInt8], successMessage: String, updateStatus: Bool = true) {

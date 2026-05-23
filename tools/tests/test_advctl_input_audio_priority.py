@@ -57,6 +57,9 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("registration.kind.supportsControl", source)
         self.assertIn("kIOHIDReportTypeFeature", source)
         self.assertIn("reportWithID.append(contentsOf: payload)", source)
+        self.assertIn("sendKeyboardLedAudioControl(active: active)", source)
+        self.assertIn("kIOHIDReportTypeOutput", source[source.index("private func setKeyboardOutputReport"):])
+        self.assertIn("CFIndex(advCtlKeyboardReportID)", source[source.index("private func setKeyboardOutputReport"):])
         attempts = source[source.index("let attempts: [(IOHIDReportType, Bool, CFIndex)]"):source.index("var lastStatus", source.index("let attempts: [(IOHIDReportType, Bool, CFIndex)]"))]
         self.assertLess(attempts.index("kIOHIDReportTypeFeature"), attempts.index("kIOHIDReportTypeOutput"))
         self.assertIn("(kIOHIDReportTypeFeature, true, 0)", attempts)
@@ -87,6 +90,10 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("0xB1, 0x02", source)
         feature_case = source[source.index("case ESP_HIDD_FEATURE_EVENT:"):source.index("case ESP_HIDD_DISCONNECT_EVENT:")]
         self.assertIn("s_ble_hid_output_callback(param->feature.data, param->feature.length)", feature_case)
+        output_case = source[source.index("case ESP_HIDD_OUTPUT_EVENT:"):source.index("case ESP_HIDD_FEATURE_EVENT:")]
+        self.assertIn("ble_hid_device_helper_handle_keyboard_output(param->output.data, param->output.length)", output_case)
+        self.assertIn("MACCTL_LED_CMD_AUDIO_START", source)
+        self.assertIn("uint8_t command[4] = {0x82", source)
 
     def test_keyboard_report_map_keeps_output_byte_aligned(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
