@@ -926,7 +926,6 @@ private final class SettingsWindowController: NSWindowController {
         let identifier: String
         let sidebarTitle: String
         let symbol: String
-        let accent: NSColor
         let pageTitle: String
         let pageSubtitle: String
         let groups: [NSView]
@@ -946,42 +945,44 @@ private final class SettingsWindowController: NSWindowController {
     var onRequestMicrophone: (() -> Void)?
     var onOpenBluetooth: (() -> Void)?
 
-    private let appInstallStatusLabel = NSTextField(labelWithString: "Checking")
-    private let audioDriverStatusLabel = NSTextField(labelWithString: "Checking")
-    private let loginStartupStatusLabel = NSTextField(labelWithString: "Checking")
-    private let inputMonitoringStatusLabel = NSTextField(labelWithString: "Checking")
-    private let accessibilityStatusLabel = NSTextField(labelWithString: "Checking")
-    private let microphonePermissionStatusLabel = NSTextField(labelWithString: "Checking")
-    private let bluetoothStatusLabel = NSTextField(labelWithString: "Bluetooth Settings")
-    private let installAppButton = NSButton(title: "Install to /Applications", target: nil, action: nil)
-    private let installAudioDriverButton = NSButton(title: "Install Audio Driver", target: nil, action: nil)
+    private let appInstallStatusLabel = NSTextField(labelWithString: "检查中")
+    private let audioDriverStatusLabel = NSTextField(labelWithString: "检查中")
+    private let loginStartupStatusLabel = NSTextField(labelWithString: "检查中")
+    private let inputMonitoringStatusLabel = NSTextField(labelWithString: "检查中")
+    private let accessibilityStatusLabel = NSTextField(labelWithString: "检查中")
+    private let microphonePermissionStatusLabel = NSTextField(labelWithString: "检查中")
+    private let bluetoothStatusLabel = NSTextField(labelWithString: "蓝牙设置")
+    private let installAppButton = NSButton(title: "安装到 /Applications", target: nil, action: nil)
+    private let installAudioDriverButton = NSButton(title: "安装音频驱动", target: nil, action: nil)
     private let launchAtLoginButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let inputMonitoringButton = NSButton(title: "Request", target: nil, action: nil)
-    private let accessibilityButton = NSButton(title: "Request", target: nil, action: nil)
-    private let microphonePermissionButton = NSButton(title: "Request", target: nil, action: nil)
-    private let bluetoothButton = NSButton(title: "Open Bluetooth", target: nil, action: nil)
-    private let connectionValueLabel = NSTextField(labelWithString: "Disconnected")
-    private let knobValueLabel = NSTextField(labelWithString: "No input")
-    private let messageValueLabel = NSTextField(labelWithString: "Starting")
-    private let audioStateLabel = NSTextField(labelWithString: "Inactive")
-    private let microphoneStatusLabel = NSTextField(labelWithString: "Checking ADVCtlAudio")
+    private let inputMonitoringButton = NSButton(title: "设置", target: nil, action: nil)
+    private let accessibilityButton = NSButton(title: "设置", target: nil, action: nil)
+    private let microphonePermissionButton = NSButton(title: "设置", target: nil, action: nil)
+    private let bluetoothButton = NSButton(title: "打开蓝牙", target: nil, action: nil)
+    private let connectionValueLabel = NSTextField(labelWithString: "未连接")
+    private let knobValueLabel = NSTextField(labelWithString: "无输入")
+    private let messageValueLabel = NSTextField(labelWithString: "启动中")
+    private let audioStateLabel = NSTextField(labelWithString: "未激活")
+    private let microphoneStatusLabel = NSTextField(labelWithString: "检查 ADVCtlAudio")
     private let swapAxesButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let invertXButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let invertYButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let sensitivitySlider = NSSlider()
     private let sensitivityValueLabel = NSTextField(labelWithString: "1x")
     private let knobModePopup = NSPopUpButton()
-    private let resetButton = NSButton(title: "Reset Hardware Defaults", target: nil, action: nil)
-    private let refreshButton = NSButton(title: "Refresh from ADV", target: nil, action: nil)
+    private let resetButton = NSButton(title: "恢复硬件默认值", target: nil, action: nil)
+    private let refreshButton = NSButton(title: "从 ADV 刷新", target: nil, action: nil)
     private let waveformView = WaveformView(frame: .zero)
-    private let recordButton = NSButton(title: "Activate ADV Microphone", target: nil, action: nil)
+    private let recordButton = NSButton(title: "启用 ADV 麦克风", target: nil, action: nil)
     private let screenTimeoutSlider = NSSlider()
     private let screenTimeoutValueLabel = NSTextField(labelWithString: "30s")
     private let powerSaveSlider = NSSlider()
     private let powerSaveValueLabel = NSTextField(labelWithString: "3m")
     private let searchField = NSSearchField()
+    private let sidebarTable = NSTableView()
+    private let sidebarScrollView = NSScrollView()
     private let tabView = NSTabView()
-    private var sidebarButtons: [NSButton] = []
+    private var sections: [SettingsSection] = []
     private var audioTestActive = false
 
     init(settings: JoystickSettings) {
@@ -991,6 +992,7 @@ private final class SettingsWindowController: NSWindowController {
                               backing: .buffered,
                               defer: false)
         window.title = "ADVCtl"
+        window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
@@ -1004,9 +1006,11 @@ private final class SettingsWindowController: NSWindowController {
     }
 
     func updateStatus(connected: Bool, knobStatus: String) {
-        connectionValueLabel.stringValue = connected ? "Connected" : "Disconnected"
+        connectionValueLabel.stringValue = connected ? "已连接" : "未连接"
         connectionValueLabel.textColor = connected ? .systemGreen : .secondaryLabelColor
-        knobValueLabel.stringValue = knobStatus.replacingOccurrences(of: "Knob: ", with: "")
+        knobValueLabel.stringValue = knobStatus
+            .replacingOccurrences(of: "Knob: ", with: "")
+            .replacingOccurrences(of: "旋钮：", with: "")
     }
 
     func updateMessage(_ message: String) {
@@ -1037,26 +1041,22 @@ private final class SettingsWindowController: NSWindowController {
         sidebarEffect.state = .active
         sidebarEffect.translatesAutoresizingMaskIntoConstraints = false
 
-        let sidebar = NSStackView()
-        sidebar.orientation = .vertical
-        sidebar.alignment = .centerX
-        sidebar.spacing = 5
-        sidebar.edgeInsets = NSEdgeInsets(top: 70, left: 12, bottom: 18, right: 12)
-        sidebar.translatesAutoresizingMaskIntoConstraints = false
-        sidebarEffect.addSubview(sidebar)
+        let sidebarStack = NSStackView()
+        sidebarStack.orientation = .vertical
+        sidebarStack.alignment = .leading
+        sidebarStack.spacing = 10
+        sidebarStack.edgeInsets = NSEdgeInsets(top: 72, left: 12, bottom: 18, right: 10)
+        sidebarStack.translatesAutoresizingMaskIntoConstraints = false
+        sidebarEffect.addSubview(sidebarStack)
 
         searchField.placeholderString = "搜索"
         searchField.font = .systemFont(ofSize: 13)
         searchField.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addArrangedSubview(searchField)
-        sidebar.setCustomSpacing(10, after: searchField)
+        sidebarStack.addArrangedSubview(searchField)
 
-        let sections = makeSections()
-        for (index, section) in sections.enumerated() {
-            let button = sidebarButton(section, selected: index == 0)
-            sidebarButtons.append(button)
-            sidebar.addArrangedSubview(button)
-        }
+        sections = makeSections()
+        configureSidebarTable()
+        sidebarStack.addArrangedSubview(sidebarScrollView)
 
         let contentEffect = NSVisualEffectView()
         contentEffect.material = .contentBackground
@@ -1093,7 +1093,7 @@ private final class SettingsWindowController: NSWindowController {
         invertXButton.action = #selector(settingsChanged)
         invertYButton.target = self
         invertYButton.action = #selector(settingsChanged)
-        knobModePopup.addItems(withTitles: ["System volume", "HomePod volume", "Disabled"])
+        knobModePopup.addItems(withTitles: ["系统音量", "HomePod 音量", "禁用"])
         knobModePopup.target = self
         knobModePopup.action = #selector(settingsChanged)
         resetButton.target = self
@@ -1127,12 +1127,15 @@ private final class SettingsWindowController: NSWindowController {
             root.topAnchor.constraint(equalTo: contentView.topAnchor),
             root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             sidebarEffect.widthAnchor.constraint(equalToConstant: 260),
-            sidebar.leadingAnchor.constraint(equalTo: sidebarEffect.leadingAnchor),
-            sidebar.trailingAnchor.constraint(equalTo: sidebarEffect.trailingAnchor),
-            sidebar.topAnchor.constraint(equalTo: sidebarEffect.topAnchor),
-            sidebar.bottomAnchor.constraint(lessThanOrEqualTo: sidebarEffect.bottomAnchor),
+            sidebarStack.leadingAnchor.constraint(equalTo: sidebarEffect.leadingAnchor),
+            sidebarStack.trailingAnchor.constraint(equalTo: sidebarEffect.trailingAnchor),
+            sidebarStack.topAnchor.constraint(equalTo: sidebarEffect.topAnchor),
+            sidebarStack.bottomAnchor.constraint(equalTo: sidebarEffect.bottomAnchor),
             searchField.widthAnchor.constraint(equalToConstant: 224),
             searchField.heightAnchor.constraint(equalToConstant: 32),
+            sidebarScrollView.widthAnchor.constraint(equalToConstant: 232),
+            sidebarScrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
+            sidebarScrollView.bottomAnchor.constraint(equalTo: sidebarStack.bottomAnchor),
             tabView.leadingAnchor.constraint(equalTo: contentEffect.leadingAnchor),
             tabView.trailingAnchor.constraint(equalTo: contentEffect.trailingAnchor),
             tabView.topAnchor.constraint(equalTo: contentEffect.topAnchor),
@@ -1140,35 +1143,49 @@ private final class SettingsWindowController: NSWindowController {
         ])
     }
 
+    private func configureSidebarTable() {
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("settings"))
+        column.resizingMask = .autoresizingMask
+        sidebarTable.addTableColumn(column)
+        sidebarTable.headerView = nil
+        sidebarTable.style = .sourceList
+        sidebarTable.rowHeight = 40
+        sidebarTable.intercellSpacing = NSSize(width: 0, height: 2)
+        sidebarTable.backgroundColor = .clear
+        sidebarTable.delegate = self
+        sidebarTable.dataSource = self
+        sidebarTable.translatesAutoresizingMaskIntoConstraints = false
+
+        sidebarScrollView.documentView = sidebarTable
+        sidebarScrollView.drawsBackground = false
+        sidebarScrollView.hasVerticalScroller = true
+        sidebarScrollView.borderType = .noBorder
+        sidebarScrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        sidebarTable.reloadData()
+        sidebarTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+    }
+
     private func makeSections() -> [SettingsSection] {
         [
-            SettingsSection(identifier: "install",
-                            sidebarTitle: "安装",
-                            symbol: "externaldrive.badge.checkmark",
-                            accent: .systemIndigo,
-                            pageTitle: "安装",
-                            pageSubtitle: "安装 ADVCtl、音频驱动、登录启动项，并集中处理 macOS 权限。",
+            SettingsSection(identifier: "general",
+                            sidebarTitle: "通用",
+                            symbol: "gearshape",
+                            pageTitle: "通用",
+                            pageSubtitle: "管理 ADVCtl 的安装位置、登录启动和蓝牙配对入口。",
                             groups: [
-                                group("应用与驱动", rows: [
+                                group("ADVCtl", rows: [
                                     valueRow("ADVCtl.app", appInstallStatusLabel),
                                     controlRow("安装位置", installAppButton),
-                                    valueRow("ADVCtlAudio", audioDriverStatusLabel),
-                                    controlRow("系统音频驱动", installAudioDriverButton),
                                     valueRow("登录启动", loginStartupStatusLabel),
                                     controlRow("登录后自动启动", launchAtLoginButton),
-                                ]),
-                                group("权限", rows: [
-                                    permissionRow("输入监听", inputMonitoringStatusLabel, inputMonitoringButton),
-                                    permissionRow("辅助功能", accessibilityStatusLabel, accessibilityButton),
-                                    permissionRow("麦克风", microphonePermissionStatusLabel, microphonePermissionButton),
                                     permissionRow("蓝牙", bluetoothStatusLabel, bluetoothButton),
                                 ]),
                             ]),
             SettingsSection(identifier: "status",
-                            sidebarTitle: "状态",
+                            sidebarTitle: "ADV",
                             symbol: "dot.radiowaves.left.and.right",
-                            accent: .systemBlue,
-                            pageTitle: "状态",
+                            pageTitle: "ADV",
                             pageSubtitle: "查看 ADV 蓝牙连接、旋钮输入和最近的硬件同步状态。",
                             groups: [
                                 group("连接", rows: [
@@ -1181,7 +1198,6 @@ private final class SettingsWindowController: NSWindowController {
             SettingsSection(identifier: "pointer",
                             sidebarTitle: "指针",
                             symbol: "cursorarrow.motionlines",
-                            accent: .systemPurple,
                             pageTitle: "指针",
                             pageSubtitle: "调整摇杆方向、轴映射和鼠标移动速度。这些设置会写入 ADV 固件。",
                             groups: [
@@ -1195,7 +1211,6 @@ private final class SettingsWindowController: NSWindowController {
             SettingsSection(identifier: "knob",
                             sidebarTitle: "旋钮",
                             symbol: "dial.low",
-                            accent: .systemOrange,
                             pageTitle: "旋钮",
                             pageSubtitle: "设置旋转行为。HomePod 音量由 ADVCtl 通过 Home Assistant 执行。",
                             groups: [
@@ -1205,10 +1220,25 @@ private final class SettingsWindowController: NSWindowController {
                                     controlRow("默认值", resetButton),
                                 ]),
                             ]),
+            SettingsSection(identifier: "audio",
+                            sidebarTitle: "音频",
+                            symbol: "waveform",
+                            pageTitle: "音频",
+                            pageSubtitle: "系统应用读取 ADVCtlAudio 麦克风时自动激活 ADV，并通过本地环形缓冲传输音频。",
+                            groups: [
+                                group("系统音频驱动", rows: [
+                                    valueRow("ADVCtlAudio", audioDriverStatusLabel),
+                                    controlRow("驱动", installAudioDriverButton),
+                                ]),
+                                group("音频", rows: [
+                                    valueRow("录制测试", audioStateLabel),
+                                    valueRow("系统麦克风", microphoneStatusLabel),
+                                    waveformRow(),
+                                ]),
+                            ]),
             SettingsSection(identifier: "power",
                             sidebarTitle: "省电",
                             symbol: "battery.75percent",
-                            accent: .systemGreen,
                             pageTitle: "省电",
                             pageSubtitle: "配置屏幕关闭和深度省电时间。深度省电会关闭 BLE，按键后自动恢复连接。",
                             groups: [
@@ -1217,44 +1247,19 @@ private final class SettingsWindowController: NSWindowController {
                                     powerSaveTimeoutRow(),
                                 ]),
                             ]),
-            SettingsSection(identifier: "audio",
-                            sidebarTitle: "音频",
-                            symbol: "waveform",
-                            accent: .systemPink,
-                            pageTitle: "音频",
-                            pageSubtitle: "系统应用读取 ADVCtlAudio 麦克风时自动激活 ADV，并通过本地环形缓冲传输音频。",
+            SettingsSection(identifier: "privacy",
+                            sidebarTitle: "隐私与安全性",
+                            symbol: "hand.raised.fill",
+                            pageTitle: "隐私与安全性",
+                            pageSubtitle: "集中管理 ADVCtl 需要的 macOS 权限。",
                             groups: [
-                                group("音频", rows: [
-                                    valueRow("录制测试", audioStateLabel),
-                                    valueRow("系统麦克风", microphoneStatusLabel),
-                                    waveformRow(),
+                                group("权限", rows: [
+                                    permissionRow("输入监听", inputMonitoringStatusLabel, inputMonitoringButton),
+                                    permissionRow("辅助功能", accessibilityStatusLabel, accessibilityButton),
+                                    permissionRow("麦克风", microphonePermissionStatusLabel, microphonePermissionButton),
                                 ]),
                             ]),
         ]
-    }
-
-    private func sidebarButton(_ section: SettingsSection, selected: Bool) -> NSButton {
-        let button = NSButton(title: section.sidebarTitle, target: self, action: #selector(selectSettingsTab(_:)))
-        if let image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.sidebarTitle) {
-            button.image = image
-            button.imagePosition = .imageLeft
-        }
-        button.bezelStyle = .regularSquare
-        button.isBordered = false
-        button.alignment = .left
-        button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-        button.contentTintColor = selected ? section.accent : .labelColor
-        button.setButtonType(.momentaryPushIn)
-        button.identifier = NSUserInterfaceItemIdentifier(section.identifier)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 8
-        button.layer?.backgroundColor = selected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.20).cgColor : NSColor.clear.cgColor
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 224),
-            button.heightAnchor.constraint(equalToConstant: 36),
-        ])
-        return button
     }
 
     private func tabItem(_ section: SettingsSection) -> NSTabViewItem {
@@ -1288,45 +1293,20 @@ private final class SettingsWindowController: NSWindowController {
         return page
     }
 
-    @objc private func selectSettingsTab(_ sender: NSButton) {
-        guard let identifier = sender.identifier?.rawValue else { return }
-        selectPage(identifier)
-    }
-
     func selectInstallPage() {
-        selectPage("install")
+        selectPage("general")
     }
 
     private func selectPage(_ identifier: String) {
         tabView.selectTabViewItem(withIdentifier: identifier)
-        for button in sidebarButtons {
-            let selected = button.identifier?.rawValue == identifier
-            button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-            button.contentTintColor = selected ? .controlAccentColor : .labelColor
-            button.layer?.backgroundColor = selected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.20).cgColor : NSColor.clear.cgColor
+        if let index = sections.firstIndex(where: { $0.identifier == identifier }) {
+            sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         }
     }
 
     private func pageHeader(title: String, subtitle: String) -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
-
-        let backButton = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back") ?? NSImage(),
-                                  target: nil,
-                                  action: nil)
-        let forwardButton = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Forward") ?? NSImage(),
-                                     target: nil,
-                                     action: nil)
-        [backButton, forwardButton].forEach { button in
-            button.isEnabled = false
-            button.isBordered = false
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 17
-            button.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.80).cgColor
-            button.contentTintColor = .tertiaryLabelColor
-            button.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(button)
-        }
 
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
@@ -1342,20 +1322,12 @@ private final class SettingsWindowController: NSWindowController {
 
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: 520),
-            container.heightAnchor.constraint(equalToConstant: 86),
-            backButton.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            backButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
-            backButton.widthAnchor.constraint(equalToConstant: 34),
-            backButton.heightAnchor.constraint(equalToConstant: 34),
-            forwardButton.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 4),
-            forwardButton.topAnchor.constraint(equalTo: backButton.topAnchor),
-            forwardButton.widthAnchor.constraint(equalToConstant: 34),
-            forwardButton.heightAnchor.constraint(equalToConstant: 34),
-            titleLabel.leadingAnchor.constraint(equalTo: forwardButton.trailingAnchor, constant: 18),
-            titleLabel.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            container.heightAnchor.constraint(equalToConstant: 72),
+            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            titleLabel.topAnchor.constraint(equalTo: container.topAnchor),
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             subtitleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
         ])
         return container
     }
@@ -1380,8 +1352,8 @@ private final class SettingsWindowController: NSWindowController {
 
         let card = NSView()
         card.wantsLayer = true
-            card.layer?.cornerRadius = 12
-            card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72).cgColor
+        card.layer?.cornerRadius = 12
+        card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72).cgColor
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(cardStack)
 
@@ -1446,7 +1418,7 @@ private final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(sensitivityValueLabel)
         sensitivitySlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
         sensitivityValueLabel.widthAnchor.constraint(equalToConstant: 34).isActive = true
-        return row("Pointer speed", trailing: stack)
+        return row("指针速度", trailing: stack)
     }
 
     private func screenTimeoutRow() -> NSView {
@@ -1458,7 +1430,7 @@ private final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(screenTimeoutValueLabel)
         screenTimeoutSlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
         screenTimeoutValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        return row("Turn display off", trailing: stack)
+        return row("关闭屏幕", trailing: stack)
     }
 
     private func powerSaveTimeoutRow() -> NSView {
@@ -1470,7 +1442,7 @@ private final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(powerSaveValueLabel)
         powerSaveSlider.widthAnchor.constraint(equalToConstant: 170).isActive = true
         powerSaveValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        return row("Power save", trailing: stack)
+        return row("深度省电", trailing: stack)
     }
 
     private func waveformRow() -> NSView {
@@ -1482,7 +1454,7 @@ private final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(recordButton)
         waveformView.widthAnchor.constraint(equalToConstant: 330).isActive = true
         waveformView.heightAnchor.constraint(equalToConstant: 118).isActive = true
-        return row("ADV microphone", trailing: stack, minHeight: 162)
+        return row("ADV 麦克风", trailing: stack, minHeight: 162)
     }
 
     private func row(_ title: String, trailing: NSView, minHeight: CGFloat = 44) -> NSView {
@@ -1510,29 +1482,29 @@ private final class SettingsWindowController: NSWindowController {
     func refresh() {
         let appInstalled = FileManager.default.fileExists(atPath: advCtlInstalledAppURL.path)
         setStatus(appInstallStatusLabel,
-                  appInstalled ? "Installed in /Applications" : "Not installed",
+                  appInstalled ? "已安装在 /Applications" : "未安装",
                   ok: appInstalled)
 
         let driverInstalled = FileManager.default.fileExists(atPath: advCtlAudioDriverURL.path)
         setStatus(audioDriverStatusLabel,
-                  driverInstalled ? "Installed" : "Not installed",
+                  driverInstalled ? "已安装" : "未安装",
                   ok: driverInstalled)
 
         let launchAtLoginEnabled = ADVCtlInstaller.isLaunchAtLoginEnabled()
         let launchAtLoginLoaded = ADVCtlInstaller.isLaunchAtLoginLoaded()
         launchAtLoginButton.state = launchAtLoginEnabled ? .on : .off
         setStatus(loginStartupStatusLabel,
-                  launchAtLoginEnabled ? (launchAtLoginLoaded ? "Enabled" : "Enabled, loads next login") : "Disabled",
+                  launchAtLoginEnabled ? (launchAtLoginLoaded ? "已开启" : "已开启，下次登录生效") : "已关闭",
                   ok: launchAtLoginEnabled)
 
         let inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
         setStatus(inputMonitoringStatusLabel,
-                  inputMonitoringGranted ? "Granted" : "Required",
+                  inputMonitoringGranted ? "已允许" : "需要设置",
                   ok: inputMonitoringGranted)
 
         let accessibilityGranted = AXIsProcessTrusted()
         setStatus(accessibilityStatusLabel,
-                  accessibilityGranted ? "Granted" : "Required",
+                  accessibilityGranted ? "已允许" : "需要设置",
                   ok: accessibilityGranted)
 
         let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -1540,19 +1512,19 @@ private final class SettingsWindowController: NSWindowController {
         let microphoneText: String
         switch microphoneStatus {
         case .authorized:
-            microphoneText = "Granted"
+            microphoneText = "已允许"
         case .denied:
-            microphoneText = "Denied"
+            microphoneText = "已拒绝"
         case .restricted:
-            microphoneText = "Restricted"
+            microphoneText = "受限制"
         case .notDetermined:
-            microphoneText = "Not requested"
+            microphoneText = "未请求"
         @unknown default:
-            microphoneText = "Unknown"
+            microphoneText = "未知"
         }
         setStatus(microphonePermissionStatusLabel, microphoneText, ok: microphoneGranted)
 
-        setStatus(bluetoothStatusLabel, "Pair ADVCtl", ok: true)
+        setStatus(bluetoothStatusLabel, "配对 ADVCtl", ok: true)
 
         swapAxesButton.state = settings.swapAxes ? .on : .off
         invertXButton.state = settings.invertX ? .on : .off
@@ -1564,9 +1536,9 @@ private final class SettingsWindowController: NSWindowController {
         screenTimeoutValueLabel.stringValue = "\(settings.screenTimeoutSeconds)s"
         powerSaveSlider.integerValue = settings.powerSaveTimeoutMinutes
         powerSaveValueLabel.stringValue = "\(settings.powerSaveTimeoutMinutes)m"
-        audioStateLabel.stringValue = audioTestActive ? "Active" : "Inactive"
+        audioStateLabel.stringValue = audioTestActive ? "已激活" : "未激活"
         audioStateLabel.textColor = audioTestActive ? .systemBlue : .secondaryLabelColor
-        recordButton.title = audioTestActive ? "Stop ADV Microphone" : "Activate ADV Microphone"
+        recordButton.title = audioTestActive ? "停止 ADV 麦克风" : "启用 ADV 麦克风"
         waveformView.isActive = audioTestActive
     }
 
@@ -1645,21 +1617,85 @@ private final class SettingsWindowController: NSWindowController {
     }
 }
 
+extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        sections.count
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        38
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row >= 0, row < sections.count else {
+            return nil
+        }
+        let identifier = NSUserInterfaceItemIdentifier("SettingsSidebarCell")
+        let section = sections[row]
+
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? {
+            let cell = NSTableCellView()
+            cell.identifier = identifier
+
+            let imageView = NSImageView()
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+            imageView.contentTintColor = .labelColor
+
+            let textField = NSTextField(labelWithString: "")
+            textField.translatesAutoresizingMaskIntoConstraints = false
+            textField.font = .systemFont(ofSize: 13)
+            textField.lineBreakMode = .byTruncatingTail
+
+            cell.addSubview(imageView)
+            cell.addSubview(textField)
+            cell.imageView = imageView
+            cell.textField = textField
+
+            NSLayoutConstraint.activate([
+                imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+                imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                imageView.widthAnchor.constraint(equalToConstant: 22),
+                imageView.heightAnchor.constraint(equalToConstant: 22),
+                textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 8),
+                textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+            return cell
+        }()
+
+        cell.textField?.stringValue = section.sidebarTitle
+        cell.imageView?.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.sidebarTitle)
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        let row = sidebarTable.selectedRow
+        guard row >= 0, row < sections.count else {
+            return
+        }
+        tabView.selectTabViewItem(withIdentifier: sections[row].identifier)
+    }
+}
+
 private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBridgeDelegate {
     private let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
     private let settings = JoystickSettings()
     private lazy var bridge = ADVCtlBridge(config: HelperConfig.load())
     private lazy var settingsWindow = SettingsWindowController(settings: settings)
     private var statusItem: NSStatusItem?
-    private let connectionMenuItem = NSMenuItem(title: "Disconnected", action: nil, keyEquivalent: "")
-    private let knobMenuItem = NSMenuItem(title: "Knob: none", action: nil, keyEquivalent: "")
-    private let messageMenuItem = NSMenuItem(title: "Starting", action: nil, keyEquivalent: "")
+    private let connectionMenuItem = NSMenuItem(title: "未连接", action: nil, keyEquivalent: "")
+    private let knobMenuItem = NSMenuItem(title: "旋钮：无输入", action: nil, keyEquivalent: "")
+    private let messageMenuItem = NSMenuItem(title: "启动中", action: nil, keyEquivalent: "")
     private var connected = false
-    private var knobStatus = "Knob: none"
+    private var knobStatus = "旋钮：无输入"
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let launchArgumentText = ProcessInfo.processInfo.arguments.joined(separator: " ")
+        let shouldOpenInstallGuide = launchArgumentText.contains("--show-install")
+        let shouldOpenSettings = launchArgumentText.contains("--show-settings")
         NSApp.setActivationPolicy(.accessory)
         settingsWindow.onSettingsChanged = { [weak self] in
             guard let self else { return }
@@ -1700,10 +1736,23 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
             openBluetoothPreferences()
         }
         buildStatusItem()
-        applyDefaultLaunchAtLogin()
+        if !shouldOpenInstallGuide && !shouldOpenSettings {
+            applyDefaultLaunchAtLogin()
+        }
         bridge.delegate = self
         installKeyMonitors()
         bridge.start()
+        if shouldOpenInstallGuide {
+            DispatchQueue.main.async { [weak self] in
+                log("Opening install guide from launch argument: \(CommandLine.arguments)")
+                self?.openInstallGuide()
+            }
+        } else if shouldOpenSettings {
+            DispatchQueue.main.async { [weak self] in
+                log("Opening settings from launch argument: \(CommandLine.arguments)")
+                self?.openSettings()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1712,16 +1761,16 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
 
     func bridgeDidUpdateConnection(deviceCount: Int) {
         connected = deviceCount > 0
-        connectionMenuItem.title = connected ? "Connected (\(deviceCount))" : "Disconnected"
+        connectionMenuItem.title = connected ? "已连接 (\(deviceCount))" : "未连接"
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
     }
 
     func bridgeDidReceive(command: MacCtlCommand) {
         switch command {
         case .volumeDelta(let delta):
-            knobStatus = delta > 0 ? "Knob: volume +\(delta)" : "Knob: volume \(delta)"
+            knobStatus = delta > 0 ? "旋钮：音量 +\(delta)" : "旋钮：音量 \(delta)"
         case .playPause:
-            knobStatus = "Knob: press"
+            knobStatus = "旋钮：按下"
         }
         knobMenuItem.title = knobStatus
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
@@ -1730,13 +1779,13 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     func bridgeDidReceiveKnobKey(_ keyCode: UInt8) {
         switch keyCode {
         case hidKeyF13:
-            knobStatus = "Knob: F13 -> HomePod up"
+            knobStatus = "旋钮：F13 -> HomePod 增大音量"
         case hidKeyF14:
-            knobStatus = "Knob: F14 -> HomePod down"
+            knobStatus = "旋钮：F14 -> HomePod 减小音量"
         case hidKeyF15:
-            knobStatus = "Knob: F15 button"
+            knobStatus = "旋钮：F15 按键"
         default:
-            knobStatus = "Knob: key \(keyCode)"
+            knobStatus = "旋钮：按键 \(keyCode)"
         }
         knobMenuItem.title = knobStatus
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
@@ -1745,14 +1794,14 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
         settings.applyHardware(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
         settingsWindow.applyHardwareSettings(flags: flags, sensitivity: sensitivity, knobMode: knobMode)
-        messageMenuItem.title = "Hardware settings received"
+        messageMenuItem.title = "已收到硬件设置"
     }
 
     func bridgeDidReceivePowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8) {
         settings.applyPower(screenTimeoutSeconds: screenTimeoutSeconds, powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
         settingsWindow.applyPowerSettings(screenTimeoutSeconds: screenTimeoutSeconds,
                                           powerSaveTimeoutMinutes: powerSaveTimeoutMinutes)
-        messageMenuItem.title = "Power settings received"
+        messageMenuItem.title = "已收到省电设置"
     }
 
     func bridgeDidUpdateAudioStatus(_ message: String, active: Bool) {
@@ -1778,15 +1827,15 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         menu.addItem(messageMenuItem)
         menu.addItem(.separator())
 
-        let installItem = NSMenuItem(title: "Install Guide...", action: #selector(openInstallGuide), keyEquivalent: "i")
+        let installItem = NSMenuItem(title: "安装向导...", action: #selector(openInstallGuide), keyEquivalent: "i")
         installItem.target = self
         menu.addItem(installItem)
 
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: "设置...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let quitItem = NSMenuItem(title: "Quit ADVCtl", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "退出 ADVCtl", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
@@ -1867,6 +1916,8 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settingsWindow.refresh()
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
         settingsWindow.showWindow(nil)
+        settingsWindow.window?.makeKeyAndOrderFront(nil)
+        settingsWindow.window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -1882,9 +1933,9 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     private func installApp() {
         do {
             try ADVCtlInstaller.installAppToApplications()
-            messageMenuItem.title = "Installed ADVCtl.app"
+            messageMenuItem.title = "已安装 ADVCtl.app"
         } catch {
-            messageMenuItem.title = "App install failed"
+            messageMenuItem.title = "应用安装失败"
             log("App install failed: \(error.localizedDescription)")
         }
         settingsWindow.refresh()
@@ -1893,9 +1944,9 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     private func installAudioDriver() {
         do {
             try ADVCtlInstaller.installAudioDriver()
-            messageMenuItem.title = "Installed ADVCtlAudio"
+            messageMenuItem.title = "已安装 ADVCtlAudio"
         } catch {
-            messageMenuItem.title = "Audio driver install failed"
+            messageMenuItem.title = "音频驱动安装失败"
             log("Audio driver install failed: \(error.localizedDescription)")
         }
         settingsWindow.refresh()
@@ -1905,9 +1956,9 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         UserDefaults.standard.set(enabled, forKey: launchAtLoginDefaultsKey)
         do {
             try ADVCtlInstaller.setLaunchAtLogin(enabled)
-            messageMenuItem.title = enabled ? "Launch at Login enabled" : "Launch at Login disabled"
+            messageMenuItem.title = enabled ? "登录启动已开启" : "登录启动已关闭"
         } catch {
-            messageMenuItem.title = "Launch at Login failed"
+            messageMenuItem.title = "登录启动设置失败"
             log("Launch at Login update failed: \(error.localizedDescription)")
         }
         settingsWindow.refresh()
