@@ -158,9 +158,9 @@ final class ADVCtlAudioRingSink {
         var writeIndex = mapped.load(fromByteOffset: 32, as: UInt64.self)
         var readIndex = mapped.load(fromByteOffset: 40, as: UInt64.self)
         let available = writeIndex >= readIndex ? Int(writeIndex - readIndex) : 0
-        if available + samples.count > capacity {
-            let newRead = writeIndex + UInt64(samples.count - capacity)
-            readIndex = newRead
+        let overflow = max(0, available + samples.count - capacity)
+        if overflow > 0 {
+            readIndex += UInt64(overflow)
             mapped.storeBytes(of: readIndex, toByteOffset: 40, as: UInt64.self)
             let overrun = mapped.load(fromByteOffset: 56, as: UInt64.self) + 1
             mapped.storeBytes(of: overrun, toByteOffset: 56, as: UInt64.self)

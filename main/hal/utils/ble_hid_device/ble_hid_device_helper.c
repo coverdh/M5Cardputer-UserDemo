@@ -75,14 +75,18 @@ typedef struct {
 static QueueHandle_t s_ble_hid_control_report_queue     = NULL;
 static QueueHandle_t s_ble_hid_best_effort_report_queue = NULL;
 static TaskHandle_t s_ble_hid_report_task               = NULL;
+static TaskHandle_t s_ble_hid_enumeration_watchdog_task = NULL;
 static ble_hid_device_helper_output_callback_t s_ble_hid_output_callback = NULL;
 #if CONFIG_BT_NIMBLE_ENABLED
-static TickType_t s_ble_hid_last_drop_log    = 0;
+static TickType_t s_ble_hid_last_drop_log  = 0;
+static TickType_t s_ble_hid_connected_tick = 0;
+static uint32_t s_ble_hid_connection_seq   = 0;
 #endif
 
 #define BLE_HID_READY_DELAY_MS 2000
+#define BLE_HID_ENUMERATION_TIMEOUT_MS 10000
 
-#define MACCTL_BLE_STORE_SCHEMA_VERSION 2
+#define MACCTL_BLE_STORE_SCHEMA_VERSION 4
 
 #if CONFIG_BT_NIMBLE_ENABLED
 #define BLE_HID_MAP_INDEX_KEYBOARD 0
@@ -214,6 +218,46 @@ static void ble_hid_device_helper_ensure_report_task(void)
                                 &s_ble_hid_report_task, CONFIG_BT_NIMBLE_PINNED_TO_CORE);
     }
 }
+
+#if CONFIG_BT_NIMBLE_ENABLED
+static void ble_hid_device_helper_enumeration_watchdog(void *pvParameters)
+{
+    (void)pvParameters;
+    uint32_t handled_seq = 0;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (s_ble_hid_conn_handle == BLE_HS_CONN_HANDLE_NONE || s_ble_hid_notify_ready ||
+            s_ble_hid_connected_tick == 0 || handled_seq == s_ble_hid_connection_seq) {
+            continue;
+        }
+
+        const TickType_t elapsed = xTaskGetTickCount() - s_ble_hid_connected_tick;
+        if (elapsed < pdMS_TO_TICKS(BLE_HID_ENUMERATION_TIMEOUT_MS)) {
+            continue;
+        }
+
+        handled_seq = s_ble_hid_connection_seq;
+        ESP_LOGW(TAG, "HID did not enumerate after %d ms; clearing BLE bonds and disconnecting",
+                 BLE_HID_ENUMERATION_TIMEOUT_MS);
+        int rc = ble_store_clear();
+        if (rc != 0) {
+            ESP_LOGW(TAG, "clear BLE bond store after enumeration timeout failed: %d", rc);
+        }
+        rc = ble_gap_terminate(s_ble_hid_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "terminate stale BLE HID connection failed: %d", rc);
+        }
+    }
+}
+
+static void ble_hid_device_helper_ensure_enumeration_watchdog(void)
+{
+    if (!s_ble_hid_enumeration_watchdog_task) {
+        xTaskCreatePinnedToCore(ble_hid_device_helper_enumeration_watchdog, "ble_hid_enum_wd", 3072, NULL, 2,
+                                &s_ble_hid_enumeration_watchdog_task, CONFIG_BT_NIMBLE_PINNED_TO_CORE);
+    }
+}
+#endif
 
 static bool ble_hid_device_helper_queue_macctl_report(const uint8_t *buffer, uint8_t len)
 {
@@ -873,7 +917,13 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
                      esp_hid_disconnect_reason_str(esp_hidd_dev_transport_get(param->disconnect.dev),
                                                    param->disconnect.reason));
             ble_hid_task_shut_down();
+#if CONFIG_BT_NIMBLE_ENABLED
+            if (!ble_gap_adv_active()) {
+                esp_hid_ble_gap_adv_start();
+            }
+#else
             esp_hid_ble_gap_adv_start();
+#endif
             s_ble_hid_notify_ready     = false;
             s_ble_hid_ready_after_tick = 0;
             s_ble_hid_keyboard_state = BLE_HID_DEVICE_STATE_IDLE;
@@ -1220,6 +1270,9 @@ bool _demo_app_main(void)
         ESP_LOGI(TAG, "ble hid device already initialized");
         return true;
     }
+#if CONFIG_BT_NIMBLE_ENABLED
+    ble_hid_device_helper_ensure_enumeration_watchdog();
+#endif
     ESP_LOGI(TAG, "setting ble device");
     ret = esp_hidd_dev_init(&ble_hid_config, ESP_HID_TRANSPORT_BLE, ble_hidd_event_callback, &s_ble_hid_param.hid_dev);
     if (ret != ESP_OK) {
@@ -1320,10 +1373,13 @@ bool ble_hid_device_helper_forget_bonds(void)
     }
 
     ESP_LOGW(TAG, "forget BLE bonds and restart pairing");
+    bool terminating_connection = false;
     if (s_ble_hid_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         int term_rc = ble_gap_terminate(s_ble_hid_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         if (term_rc != 0) {
             ESP_LOGW(TAG, "terminate BLE connection failed: %d", term_rc);
+        } else {
+            terminating_connection = true;
         }
     }
 
@@ -1343,7 +1399,7 @@ bool ble_hid_device_helper_forget_bonds(void)
         ESP_LOGW(TAG, "clear BLE bond store failed: %d", rc);
         return false;
     }
-    if (s_ble_hid_param.hid_dev && !ble_gap_adv_active()) {
+    if (s_ble_hid_param.hid_dev && !terminating_connection && !ble_gap_adv_active()) {
         rc = esp_hid_ble_gap_adv_start();
         if (rc != 0) {
             ESP_LOGW(TAG, "restart BLE advertising failed: %d", rc);
@@ -1436,14 +1492,13 @@ void ble_hid_device_helper_gap_connected(uint16_t conn_handle)
 {
 #if CONFIG_BT_NIMBLE_ENABLED
     s_ble_hid_conn_handle = conn_handle;
+    s_ble_hid_connected_tick = xTaskGetTickCount();
+    s_ble_hid_connection_seq++;
 #else
     (void)conn_handle;
 #endif
-    if (s_ble_hid_notify_ready) {
-        s_ble_hid_ready_after_tick = xTaskGetTickCount();
-    } else {
-        s_ble_hid_ready_after_tick = 0;
-    }
+    s_ble_hid_notify_ready     = false;
+    s_ble_hid_ready_after_tick = 0;
 }
 
 void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
@@ -1452,6 +1507,7 @@ void ble_hid_device_helper_gap_disconnected(uint16_t conn_handle)
     if (s_ble_hid_conn_handle == conn_handle) {
         s_ble_hid_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     }
+    s_ble_hid_connected_tick = 0;
 #else
     (void)conn_handle;
 #endif

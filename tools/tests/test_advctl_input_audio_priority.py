@@ -65,6 +65,8 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("case composite", source)
         self.assertIn("var supportsControl: Bool", source)
         self.assertIn("registration.kind.supportsControl", source)
+        self.assertNotIn("import CoreBluetooth", source)
+        self.assertNotIn("ADVCtlBLEControlClient", source)
         self.assertIn("kIOHIDReportTypeFeature", source)
         self.assertIn("reportWithID.append(contentsOf: payload)", source)
         self.assertIn("sendKeyboardLedAudioControl(active: active)", source)
@@ -104,10 +106,26 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("ble_hid_device_helper_handle_keyboard_output(param->output.data, param->output.length)", output_case)
         self.assertIn("MACCTL_LED_CMD_AUDIO_START", source)
         self.assertIn("uint8_t command[4] = {0x82", source)
+        self.assertNotIn("ADVCTL_GATT_SERVICE_UUID", source)
+        self.assertNotIn("ble_gatts_notify_custom", source)
+        self.assertNotIn("ble_hid_device_helper_register_advctl_gatt", source)
+        self.assertIn("#define MACCTL_BLE_STORE_SCHEMA_VERSION 4", source)
+        self.assertIn("#define BLE_HID_ENUMERATION_TIMEOUT_MS 10000", source)
+        self.assertIn("ble_hid_device_helper_enumeration_watchdog", source)
+        self.assertIn("HID did not enumerate", source)
+        self.assertIn("ble_store_clear();", source)
+        self.assertIn("ble_gap_terminate", source)
 
         defaults = (ROOT / "sdkconfig.defaults").read_text()
         self.assertIn("CONFIG_BT_NIMBLE_ENABLED=y", defaults)
         self.assertNotIn("CONFIG_BT_CLASSIC_ENABLED=y", defaults)
+
+    def test_audio_ring_overrun_does_not_convert_negative_counts_to_uint(self):
+        source = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlAudioRingSink.swift").read_text()
+
+        self.assertIn("let overflow = max(0, available + samples.count - capacity)", source)
+        self.assertIn("readIndex += UInt64(overflow)", source)
+        self.assertNotIn("UInt64(samples.count - capacity)", source)
 
     def test_keyboard_report_map_keeps_output_byte_aligned(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
@@ -145,6 +163,13 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         maps_block = source[maps_start:source.index("};", maps_start)]
         self.assertIn("#if CONFIG_EXAMPLE_HID_DEVICE_ROLE == 2 && CONFIG_BT_NIMBLE_ENABLED", maps_block)
         self.assertIn("{.data = compositeReportMap, .len = sizeof(compositeReportMap)}", maps_block)
+
+        gap_source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_gap.c").read_text()
+        self.assertIn("#define GATT_SVR_SVC_HID_UUID 0x1812", gap_source)
+        self.assertNotIn("#define GATT_SVR_SVC_ADVCTL_UUID", gap_source)
+        self.assertIn("fields.num_uuids16         = 1", gap_source)
+        self.assertIn("ble_gap_security_initiate(event->connect.conn_handle)", gap_source)
+        self.assertIn("security state: encrypted=%u authenticated=%u bonded=%u", gap_source)
 
     def test_ble_report_policy_keeps_audio_from_starving_controls(self):
         clang = shutil.which("clang") or shutil.which("cc")

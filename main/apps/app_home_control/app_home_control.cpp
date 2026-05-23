@@ -768,7 +768,7 @@ void AppHomeControl::renderSetup()
 
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
     canvas.printf("BLE:  %s\n",
-                  GetHAL().bleKeyboardIsConnected() ? "paired" : (_ble_start_requested ? "pair ADVCtl" : "stopped"));
+                  GetHAL().bleKeyboardIsConnected() ? "ready" : (_ble_start_requested ? "pair ADVCtl" : "stopped"));
     canvas.println("HA:   ADVCtl app");
 
     canvas.setTextColor(TFT_CYAN, THEME_COLOR_BG);
@@ -841,7 +841,7 @@ void AppHomeControl::renderDashboard()
     }
 
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
-    canvas.printf("BLE: %s\n", GetHAL().bleKeyboardIsConnected() ? "paired" : "advertising");
+    canvas.printf("BLE: %s\n", GetHAL().bleKeyboardIsConnected() ? "connected" : "advertising");
     canvas.printf("Mac App: %s\n", GetHAL().bleMacCtlIsConnected() ? "connected" : "waiting");
     canvas.printf("Time: %s\n", GetHAL().bleMacCtlTimeSynced() ? "synced" : "waiting");
     canvas.printf("Knob: %s %s\n", input.isEncoderConnected() ? "ready" : "missing", knobMode);
@@ -970,7 +970,7 @@ void AppHomeControl::renderKeyboard()
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
     canvas.println("Typing forwards to macOS");
     canvas.println("Fn+Esc: dashboard");
-    canvas.printf("BLE: %s\n", GetHAL().bleKeyboardIsConnected() ? "paired" : "advertising");
+    canvas.printf("BLE: %s\n", GetHAL().bleKeyboardIsConnected() ? "connected" : "advertising");
     renderStatusBar();
     GetHAL().pushCanvas();
 }

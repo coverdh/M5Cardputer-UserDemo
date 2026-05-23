@@ -663,7 +663,6 @@ private final class ADVCtlBridge {
         } else {
             return
         }
-
         if payload.count >= 3, payload[0] == advCtlAudioFrameReport {
             let byteCount = min(Int(payload[2]), payload.count - 3)
             if byteCount > 0 {

@@ -22,6 +22,7 @@
 #include "host/ble_hs_adv.h"
 #include "nimble/ble.h"
 #include "host/ble_sm.h"
+#include "services/gap/ble_svc_gap.h"
 #else
 #include "esp_bt_device.h"
 #endif
@@ -773,7 +774,7 @@ static struct ble_hs_adv_fields fields;
 
 esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
 {
-    ble_uuid16_t *uuid16, *uuid16_1;
+    ble_uuid16_t *uuid16;
     /**
      *  Set the advertisement data included in our advertisements:
      *     o Flags (indicates advertisement type and other general info).
@@ -803,10 +804,13 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
     fields.name             = (uint8_t *)device_name;
     fields.name_len         = strlen(device_name);
     fields.name_is_complete = 1;
+    ble_svc_gap_device_name_set(device_name);
 
-    uuid16   = (ble_uuid16_t *)malloc(sizeof(ble_uuid16_t));
-    uuid16_1 = (ble_uuid16_t[]){BLE_UUID16_INIT(GATT_SVR_SVC_HID_UUID)};
-    memcpy(uuid16, uuid16_1, sizeof(ble_uuid16_t));
+    uuid16 = (ble_uuid16_t *)malloc(sizeof(ble_uuid16_t));
+    if (!uuid16) {
+        return ESP_ERR_NO_MEM;
+    }
+    uuid16[0] = (ble_uuid16_t)BLE_UUID16_INIT(GATT_SVR_SVC_HID_UUID);
     fields.uuids16             = uuid16;
     fields.num_uuids16         = 1;
     fields.uuids16_is_complete = 1;
@@ -836,6 +840,12 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
                      event->connect.status);
             if (event->connect.status == 0) {
                 ble_hid_device_helper_gap_connected(event->connect.conn_handle);
+                rc = ble_gap_security_initiate(event->connect.conn_handle);
+                if (rc == 0) {
+                    ESP_LOGI(TAG, "security initiated");
+                } else {
+                    ESP_LOGW(TAG, "security initiate skipped/failed: %d", rc);
+                }
                 /* Request connection parameters optimised for a HID keyboard:
                  * - 15-60 ms interval: responsive without hammering the radio
                  * - latency: allows the device to skip a few intervals when idle;
@@ -888,9 +898,12 @@ static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
 
         case BLE_GAP_EVENT_ENC_CHANGE:
             /* Encryption has been enabled or disabled for this connection. */
-            MODLOG_DFLT(INFO, "encryption change event; status=%d ", event->enc_change.status);
+            ESP_LOGI(TAG, "encryption change; status=%d", event->enc_change.status);
             rc = ble_gap_conn_find(event->enc_change.conn_handle, &desc);
             assert(rc == 0);
+            ESP_LOGI(TAG, "security state: encrypted=%u authenticated=%u bonded=%u key_size=%u",
+                     desc.sec_state.encrypted, desc.sec_state.authenticated, desc.sec_state.bonded,
+                     desc.sec_state.key_size);
             // ble_hid_task_start_up(); // No task needed, send it myself
             return 0;
 
