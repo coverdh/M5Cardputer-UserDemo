@@ -870,11 +870,11 @@ private enum ADVCtlInstaller {
             <string>\(advCtlLaunchAgentLabel)</string>
             <key>ProgramArguments</key>
             <array>
-                <string>/Applications/ADVCtl.app/Contents/MacOS/ADVCtl</string>
+                <string>/usr/bin/open</string>
+                <string>-gj</string>
+                <string>/Applications/ADVCtl.app</string>
             </array>
             <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
             <true/>
         </dict>
         </plist>
@@ -889,6 +889,8 @@ private enum ADVCtlInstaller {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
             process.waitUntilExit()
@@ -1067,6 +1069,7 @@ private final class SettingsWindowController: NSWindowController {
         tabView.tabViewType = .noTabsNoBorder
         tabView.translatesAutoresizingMaskIntoConstraints = false
         sections.forEach { tabView.addTabViewItem(tabItem($0)) }
+        sidebarTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         contentEffect.addSubview(tabView)
         root.addArrangedSubview(sidebarEffect)
         root.addArrangedSubview(contentEffect)
@@ -1163,7 +1166,6 @@ private final class SettingsWindowController: NSWindowController {
         sidebarScrollView.translatesAutoresizingMaskIntoConstraints = false
 
         sidebarTable.reloadData()
-        sidebarTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
     }
 
     private func makeSections() -> [SettingsSection] {
@@ -1674,7 +1676,11 @@ extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
         guard row >= 0, row < sections.count else {
             return
         }
-        tabView.selectTabViewItem(withIdentifier: sections[row].identifier)
+        let identifier = sections[row].identifier
+        guard tabView.indexOfTabViewItem(withIdentifier: identifier) != NSNotFound else {
+            return
+        }
+        tabView.selectTabViewItem(withIdentifier: identifier)
     }
 }
 
@@ -1691,12 +1697,20 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     private var knobStatus = "旋钮：无输入"
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
+    private var didCompleteLaunchSetup = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        start()
+    }
+
+    func start() {
+        guard !didCompleteLaunchSetup else {
+            return
+        }
+        didCompleteLaunchSetup = true
         let launchArgumentText = ProcessInfo.processInfo.arguments.joined(separator: " ")
         let shouldOpenInstallGuide = launchArgumentText.contains("--show-install")
         let shouldOpenSettings = launchArgumentText.contains("--show-settings")
-        NSApp.setActivationPolicy(.accessory)
         settingsWindow.onSettingsChanged = { [weak self] in
             guard let self else { return }
             self.bridge.sendSettings(self.settings)
@@ -1735,7 +1749,9 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settingsWindow.onOpenBluetooth = {
             openBluetoothPreferences()
         }
-        buildStatusItem()
+        DispatchQueue.main.async { [weak self] in
+            self?.buildStatusItem()
+        }
         if !shouldOpenInstallGuide && !shouldOpenSettings {
             applyDefaultLaunchAtLogin()
         }
@@ -1815,14 +1831,13 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
     }
 
     private func buildStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: 64)
-        if let image = NSImage(systemSymbolName: "dot.radiowaves.left.and.right",
-                               accessibilityDescription: "ADVCtl") {
-            image.isTemplate = true
-            item.button?.image = image
+        guard statusItem == nil else {
+            return
         }
-        item.button?.title = "ADV"
-        item.button?.imagePosition = .imageLeft
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.image = nil
+        item.button?.title = "ADVCtl"
+        item.button?.imagePosition = .noImage
         item.button?.font = .systemFont(ofSize: 12, weight: .semibold)
         item.button?.toolTip = "ADVCtl"
 
@@ -1846,6 +1861,7 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
 
         item.menu = menu
         statusItem = item
+        log("ADVCtl status item installed")
     }
 
     private func applyDefaultLaunchAtLogin() {
@@ -1998,4 +2014,5 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
 let app = NSApplication.shared
 private let delegate = ADVCtlAppDelegate()
 app.delegate = delegate
+delegate.start()
 app.run()
