@@ -3,8 +3,9 @@ set -eu
 
 CONFIGURATION="${1:-release}"
 BUILD_APP_DIR=".build/${CONFIGURATION}/ADVCtl.app"
-APP_DIR="${ADVCTL_APP_DIR:-${HOME}/Applications/ADVCtl.app}"
+APP_DIR="${ADVCTL_APP_DIR:-/Applications/ADVCtl.app}"
 EXECUTABLE=".build/${CONFIGURATION}/ADVCtl"
+DRIVER_PATH="$(./AudioDriver/build-driver.sh "${CONFIGURATION}")"
 
 export CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/advctl-clang-module-cache"
 
@@ -13,6 +14,16 @@ swift build -c "${CONFIGURATION}"
 if [ "${ADVCTL_CODESIGN_IDENTITY:-}" ]; then
     CODESIGN_IDENTITY="${ADVCTL_CODESIGN_IDENTITY}"
 else
+    CODESIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
+        | /usr/bin/sed -n 's/.*"\(Apple Development: cover_dh@qq.com (PHXBQGMZS8)\)".*/\1/p' \
+        | /usr/bin/head -n 1)"
+fi
+if [ -z "${CODESIGN_IDENTITY}" ]; then
+    CODESIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
+        | /usr/bin/sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' \
+        | /usr/bin/head -n 1)"
+fi
+if [ -z "${CODESIGN_IDENTITY}" ]; then
     CODESIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
         | /usr/bin/sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' \
         | /usr/bin/head -n 1)"
@@ -23,14 +34,20 @@ if [ -z "${CODESIGN_IDENTITY}" ]; then
 fi
 
 rm -rf "${BUILD_APP_DIR}"
-mkdir -p "${BUILD_APP_DIR}/Contents/MacOS"
+mkdir -p "${BUILD_APP_DIR}/Contents/MacOS" "${BUILD_APP_DIR}/Contents/Resources"
 cp "${EXECUTABLE}" "${BUILD_APP_DIR}/Contents/MacOS/ADVCtl"
 cp Sources/MacCtlHelper/Info.plist "${BUILD_APP_DIR}/Contents/Info.plist"
+cp -R "${DRIVER_PATH}" "${BUILD_APP_DIR}/Contents/Resources/ADVCtlAudio.driver"
+/usr/bin/codesign --force --sign "${CODESIGN_IDENTITY}" "${BUILD_APP_DIR}/Contents/Resources/ADVCtlAudio.driver" >/dev/null
 /usr/bin/codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${BUILD_APP_DIR}" >/dev/null
 
 mkdir -p "$(dirname "${APP_DIR}")"
-rm -rf "${APP_DIR}"
-cp -R "${BUILD_APP_DIR}" "${APP_DIR}"
+if [ -w "$(dirname "${APP_DIR}")" ]; then
+    rm -rf "${APP_DIR}"
+    cp -R "${BUILD_APP_DIR}" "${APP_DIR}"
+else
+    /usr/bin/osascript -e "do shell script \"rm -rf '${APP_DIR}' && ditto '${BUILD_APP_DIR}' '${APP_DIR}'\" with administrator privileges"
+fi
 
 echo "${APP_DIR}"
 

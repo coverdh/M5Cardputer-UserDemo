@@ -6,7 +6,29 @@ DRIVER_PATH="$("${ROOT_DIR}/build-driver.sh" "${1:-debug}")"
 INSTALL_DIR="/Library/Audio/Plug-Ins/HAL"
 INSTALL_PATH="${INSTALL_DIR}/ADVCtlAudio.driver"
 
-codesign --force --sign - "${DRIVER_PATH}"
+if [ "${ADVCTL_CODESIGN_IDENTITY:-}" ]; then
+    CODESIGN_IDENTITY="${ADVCTL_CODESIGN_IDENTITY}"
+else
+    CODESIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
+        | /usr/bin/sed -n 's/.*"\(Apple Development: cover_dh@qq.com (PHXBQGMZS8)\)".*/\1/p' \
+        | /usr/bin/head -n 1)"
+fi
+if [ -z "${CODESIGN_IDENTITY}" ]; then
+    CODESIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
+        | /usr/bin/sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' \
+        | /usr/bin/head -n 1)"
+fi
+if [ -z "${CODESIGN_IDENTITY}" ]; then
+    CODESIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
+        | /usr/bin/sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' \
+        | /usr/bin/head -n 1)"
+fi
+if [ -z "${CODESIGN_IDENTITY}" ]; then
+    CODESIGN_IDENTITY="-"
+    echo "warning: using ad-hoc code signature for ADVCtlAudio.driver" >&2
+fi
+
+codesign --force --sign "${CODESIGN_IDENTITY}" "${DRIVER_PATH}"
 
 install_with_sudo() {
     sudo mkdir -p "${INSTALL_DIR}"

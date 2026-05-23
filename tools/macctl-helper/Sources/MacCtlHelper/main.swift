@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import AVFoundation
 import CoreAudio
 import Darwin
 import Foundation
@@ -8,6 +10,10 @@ import MacCtlCore
 private let advCtlVendorID = 0x16C0
 private let advCtlProductID = 0x05DF
 private let advCtlProductName = "ADVCtl"
+private let advCtlBundleIdentifier = "dev.cardputer.advctl"
+private let advCtlInstalledAppURL = URL(fileURLWithPath: "/Applications/ADVCtl.app", isDirectory: true)
+private let advCtlLaunchAgentLabel = "dev.cardputer.advctl"
+private let advCtlAudioDriverURL = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/ADVCtlAudio.driver", isDirectory: true)
 private let advCtlUsagePage = 0xFF00
 private let advCtlUsage = 0x01
 private let hidUsagePageGenericDesktop = 0x01
@@ -89,6 +95,27 @@ private func requestHIDListenAccessIfNeeded() -> Bool {
 
 private func openInputMonitoringPreferences() {
     guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else {
+        return
+    }
+    NSWorkspace.shared.open(url)
+}
+
+private func openAccessibilityPreferences() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else {
+        return
+    }
+    NSWorkspace.shared.open(url)
+}
+
+private func openMicrophonePreferences() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else {
+        return
+    }
+    NSWorkspace.shared.open(url)
+}
+
+private func openBluetoothPreferences() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings") else {
         return
     }
     NSWorkspace.shared.open(url)
@@ -762,6 +789,138 @@ private final class ADVCtlBridge {
     }
 }
 
+private enum ADVCtlInstaller {
+    static var launchAgentURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(advCtlLaunchAgentLabel).plist")
+    }
+
+    static var bundledAudioDriverURL: URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("ADVCtlAudio.driver", isDirectory: true)
+    }
+
+    static func isLaunchAtLoginEnabled() -> Bool {
+        FileManager.default.fileExists(atPath: launchAgentURL.path)
+    }
+
+    static func isLaunchAtLoginLoaded() -> Bool {
+        runLaunchctl(["print", "\(launchDomain())/\(advCtlLaunchAgentLabel)"]) == 0
+    }
+
+    static func installAppToApplications() throws {
+        let current = Bundle.main.bundleURL
+        guard current.pathExtension == "app" else {
+            throw NSError(domain: "ADVCtlInstaller", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "ADVCtl must be running from an app bundle."
+            ])
+        }
+        if current.standardizedFileURL == advCtlInstalledAppURL.standardizedFileURL {
+            return
+        }
+        let command = "rm -rf \(shellQuote(advCtlInstalledAppURL.path)) && ditto \(shellQuote(current.path)) \(shellQuote(advCtlInstalledAppURL.path))"
+        try runAdminShell(command)
+    }
+
+    static func installAudioDriver() throws {
+        guard let bundledAudioDriverURL, FileManager.default.fileExists(atPath: bundledAudioDriverURL.path) else {
+            throw NSError(domain: "ADVCtlInstaller", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Bundled ADVCtlAudio.driver is missing. Rebuild ADVCtl with tools/macctl-helper/build-app.sh."
+            ])
+        }
+        let command = [
+            "mkdir -p /Library/Audio/Plug-Ins/HAL",
+            "rm -rf \(shellQuote(advCtlAudioDriverURL.path))",
+            "rm -f /tmp/advctl_audio_pcm.ring",
+            "ditto \(shellQuote(bundledAudioDriverURL.path)) \(shellQuote(advCtlAudioDriverURL.path))",
+            "chown -R root:wheel \(shellQuote(advCtlAudioDriverURL.path))",
+            "chmod -R go-w \(shellQuote(advCtlAudioDriverURL.path))",
+            "killall coreaudiod || true",
+        ].joined(separator: " && ")
+        try runAdminShell(command)
+    }
+
+    static func setLaunchAtLogin(_ enabled: Bool) throws {
+        if enabled {
+            try FileManager.default.createDirectory(at: launchAgentURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try launchAgentPlist().write(to: launchAgentURL, atomically: true, encoding: .utf8)
+            _ = runLaunchctl(["bootout", launchDomain(), launchAgentURL.path])
+            let result = runLaunchctl(["bootstrap", launchDomain(), launchAgentURL.path])
+            if result != 0 {
+                throw NSError(domain: "ADVCtlInstaller", code: Int(result), userInfo: [
+                    NSLocalizedDescriptionKey: "launchctl bootstrap failed with status \(result)."
+                ])
+            }
+            _ = runLaunchctl(["kickstart", "-k", "\(launchDomain())/\(advCtlLaunchAgentLabel)"])
+        } else {
+            _ = runLaunchctl(["bootout", launchDomain(), launchAgentURL.path])
+            if FileManager.default.fileExists(atPath: launchAgentURL.path) {
+                try FileManager.default.removeItem(at: launchAgentURL)
+            }
+        }
+    }
+
+    private static func launchAgentPlist() -> String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>\(advCtlLaunchAgentLabel)</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>/Applications/ADVCtl.app/Contents/MacOS/ADVCtl</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <true/>
+        </dict>
+        </plist>
+        """
+    }
+
+    private static func launchDomain() -> String {
+        "gui/\(getuid())"
+    }
+
+    private static func runLaunchctl(_ arguments: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        } catch {
+            return -1
+        }
+    }
+
+    private static func runAdminShell(_ command: String) throws {
+        let script = "do shell script \(appleScriptQuote(command)) with administrator privileges"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            throw NSError(domain: "ADVCtlInstaller", code: Int(process.terminationStatus), userInfo: [
+                NSLocalizedDescriptionKey: "Administrator command failed with status \(process.terminationStatus)."
+            ])
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private static func appleScriptQuote(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+    }
+}
+
 private final class SettingsWindowController: NSWindowController {
     private struct SettingsSection {
         let identifier: String
@@ -779,7 +938,28 @@ private final class SettingsWindowController: NSWindowController {
     var onAudioTestChanged: ((Bool) -> Void)?
     var onRefreshSettings: (() -> Void)?
     var onResetHardwareSettings: (() -> Void)?
+    var onInstallApp: (() -> Void)?
+    var onInstallAudioDriver: (() -> Void)?
+    var onLaunchAtLoginChanged: ((Bool) -> Void)?
+    var onRequestInputMonitoring: (() -> Void)?
+    var onRequestAccessibility: (() -> Void)?
+    var onRequestMicrophone: (() -> Void)?
+    var onOpenBluetooth: (() -> Void)?
 
+    private let appInstallStatusLabel = NSTextField(labelWithString: "Checking")
+    private let audioDriverStatusLabel = NSTextField(labelWithString: "Checking")
+    private let loginStartupStatusLabel = NSTextField(labelWithString: "Checking")
+    private let inputMonitoringStatusLabel = NSTextField(labelWithString: "Checking")
+    private let accessibilityStatusLabel = NSTextField(labelWithString: "Checking")
+    private let microphonePermissionStatusLabel = NSTextField(labelWithString: "Checking")
+    private let bluetoothStatusLabel = NSTextField(labelWithString: "Bluetooth Settings")
+    private let installAppButton = NSButton(title: "Install to /Applications", target: nil, action: nil)
+    private let installAudioDriverButton = NSButton(title: "Install Audio Driver", target: nil, action: nil)
+    private let launchAtLoginButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let inputMonitoringButton = NSButton(title: "Request", target: nil, action: nil)
+    private let accessibilityButton = NSButton(title: "Request", target: nil, action: nil)
+    private let microphonePermissionButton = NSButton(title: "Request", target: nil, action: nil)
+    private let bluetoothButton = NSButton(title: "Open Bluetooth", target: nil, action: nil)
     private let connectionValueLabel = NSTextField(labelWithString: "Disconnected")
     private let knobValueLabel = NSTextField(labelWithString: "No input")
     private let messageValueLabel = NSTextField(labelWithString: "Starting")
@@ -892,6 +1072,21 @@ private final class SettingsWindowController: NSWindowController {
         root.addArrangedSubview(contentEffect)
         contentView.addSubview(root)
 
+        installAppButton.target = self
+        installAppButton.action = #selector(installApp)
+        installAudioDriverButton.target = self
+        installAudioDriverButton.action = #selector(installAudioDriver)
+        launchAtLoginButton.target = self
+        launchAtLoginButton.action = #selector(toggleLaunchAtLogin)
+        inputMonitoringButton.target = self
+        inputMonitoringButton.action = #selector(requestInputMonitoring)
+        accessibilityButton.target = self
+        accessibilityButton.action = #selector(requestAccessibility)
+        microphonePermissionButton.target = self
+        microphonePermissionButton.action = #selector(requestMicrophone)
+        bluetoothButton.target = self
+        bluetoothButton.action = #selector(openBluetooth)
+
         swapAxesButton.target = self
         swapAxesButton.action = #selector(settingsChanged)
         invertXButton.target = self
@@ -947,6 +1142,28 @@ private final class SettingsWindowController: NSWindowController {
 
     private func makeSections() -> [SettingsSection] {
         [
+            SettingsSection(identifier: "install",
+                            sidebarTitle: "安装",
+                            symbol: "externaldrive.badge.checkmark",
+                            accent: .systemIndigo,
+                            pageTitle: "安装",
+                            pageSubtitle: "安装 ADVCtl、音频驱动、登录启动项，并集中处理 macOS 权限。",
+                            groups: [
+                                group("应用与驱动", rows: [
+                                    valueRow("ADVCtl.app", appInstallStatusLabel),
+                                    controlRow("安装位置", installAppButton),
+                                    valueRow("ADVCtlAudio", audioDriverStatusLabel),
+                                    controlRow("系统音频驱动", installAudioDriverButton),
+                                    valueRow("登录启动", loginStartupStatusLabel),
+                                    controlRow("登录后自动启动", launchAtLoginButton),
+                                ]),
+                                group("权限", rows: [
+                                    permissionRow("输入监听", inputMonitoringStatusLabel, inputMonitoringButton),
+                                    permissionRow("辅助功能", accessibilityStatusLabel, accessibilityButton),
+                                    permissionRow("麦克风", microphonePermissionStatusLabel, microphonePermissionButton),
+                                    permissionRow("蓝牙", bluetoothStatusLabel, bluetoothButton),
+                                ]),
+                            ]),
             SettingsSection(identifier: "status",
                             sidebarTitle: "状态",
                             symbol: "dot.radiowaves.left.and.right",
@@ -1073,9 +1290,17 @@ private final class SettingsWindowController: NSWindowController {
 
     @objc private func selectSettingsTab(_ sender: NSButton) {
         guard let identifier = sender.identifier?.rawValue else { return }
+        selectPage(identifier)
+    }
+
+    func selectInstallPage() {
+        selectPage("install")
+    }
+
+    private func selectPage(_ identifier: String) {
         tabView.selectTabViewItem(withIdentifier: identifier)
         for button in sidebarButtons {
-            let selected = button === sender
+            let selected = button.identifier?.rawValue == identifier
             button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
             button.contentTintColor = selected ? .controlAccentColor : .labelColor
             button.layer?.backgroundColor = selected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.20).cgColor : NSColor.clear.cgColor
@@ -1198,6 +1423,20 @@ private final class SettingsWindowController: NSWindowController {
         return row(title, trailing: control)
     }
 
+    private func permissionRow(_ title: String, _ status: NSTextField, _ button: NSButton) -> NSView {
+        status.font = .systemFont(ofSize: 13)
+        status.textColor = .secondaryLabelColor
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.addArrangedSubview(status)
+        stack.addArrangedSubview(button)
+        status.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
+        return row(title, trailing: stack)
+    }
+
     private func sensitivityRow() -> NSView {
         let stack = NSStackView()
         stack.orientation = .horizontal
@@ -1269,6 +1508,52 @@ private final class SettingsWindowController: NSWindowController {
     }
 
     func refresh() {
+        let appInstalled = FileManager.default.fileExists(atPath: advCtlInstalledAppURL.path)
+        setStatus(appInstallStatusLabel,
+                  appInstalled ? "Installed in /Applications" : "Not installed",
+                  ok: appInstalled)
+
+        let driverInstalled = FileManager.default.fileExists(atPath: advCtlAudioDriverURL.path)
+        setStatus(audioDriverStatusLabel,
+                  driverInstalled ? "Installed" : "Not installed",
+                  ok: driverInstalled)
+
+        let launchAtLoginEnabled = ADVCtlInstaller.isLaunchAtLoginEnabled()
+        let launchAtLoginLoaded = ADVCtlInstaller.isLaunchAtLoginLoaded()
+        launchAtLoginButton.state = launchAtLoginEnabled ? .on : .off
+        setStatus(loginStartupStatusLabel,
+                  launchAtLoginEnabled ? (launchAtLoginLoaded ? "Enabled" : "Enabled, loads next login") : "Disabled",
+                  ok: launchAtLoginEnabled)
+
+        let inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        setStatus(inputMonitoringStatusLabel,
+                  inputMonitoringGranted ? "Granted" : "Required",
+                  ok: inputMonitoringGranted)
+
+        let accessibilityGranted = AXIsProcessTrusted()
+        setStatus(accessibilityStatusLabel,
+                  accessibilityGranted ? "Granted" : "Required",
+                  ok: accessibilityGranted)
+
+        let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let microphoneGranted = microphoneStatus == .authorized
+        let microphoneText: String
+        switch microphoneStatus {
+        case .authorized:
+            microphoneText = "Granted"
+        case .denied:
+            microphoneText = "Denied"
+        case .restricted:
+            microphoneText = "Restricted"
+        case .notDetermined:
+            microphoneText = "Not requested"
+        @unknown default:
+            microphoneText = "Unknown"
+        }
+        setStatus(microphonePermissionStatusLabel, microphoneText, ok: microphoneGranted)
+
+        setStatus(bluetoothStatusLabel, "Pair ADVCtl", ok: true)
+
         swapAxesButton.state = settings.swapAxes ? .on : .off
         invertXButton.state = settings.invertX ? .on : .off
         invertYButton.state = settings.invertY ? .on : .off
@@ -1283,6 +1568,11 @@ private final class SettingsWindowController: NSWindowController {
         audioStateLabel.textColor = audioTestActive ? .systemBlue : .secondaryLabelColor
         recordButton.title = audioTestActive ? "Stop ADV Microphone" : "Activate ADV Microphone"
         waveformView.isActive = audioTestActive
+    }
+
+    private func setStatus(_ label: NSTextField, _ text: String, ok: Bool) {
+        label.stringValue = text
+        label.textColor = ok ? .systemGreen : .secondaryLabelColor
     }
 
     @objc private func settingsChanged() {
@@ -1325,9 +1615,38 @@ private final class SettingsWindowController: NSWindowController {
     @objc private func toggleAudioTest() {
         onAudioTestChanged?(!audioTestActive)
     }
+
+    @objc private func installApp() {
+        onInstallApp?()
+    }
+
+    @objc private func installAudioDriver() {
+        onInstallAudioDriver?()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        onLaunchAtLoginChanged?(launchAtLoginButton.state == .on)
+    }
+
+    @objc private func requestInputMonitoring() {
+        onRequestInputMonitoring?()
+    }
+
+    @objc private func requestAccessibility() {
+        onRequestAccessibility?()
+    }
+
+    @objc private func requestMicrophone() {
+        onRequestMicrophone?()
+    }
+
+    @objc private func openBluetooth() {
+        onOpenBluetooth?()
+    }
 }
 
 private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBridgeDelegate {
+    private let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
     private let settings = JoystickSettings()
     private lazy var bridge = ADVCtlBridge(config: HelperConfig.load())
     private lazy var settingsWindow = SettingsWindowController(settings: settings)
@@ -1359,7 +1678,29 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settingsWindow.onResetHardwareSettings = { [weak self] in
             self?.bridge.resetHardwareSettings()
         }
+        settingsWindow.onInstallApp = { [weak self] in
+            self?.installApp()
+        }
+        settingsWindow.onInstallAudioDriver = { [weak self] in
+            self?.installAudioDriver()
+        }
+        settingsWindow.onLaunchAtLoginChanged = { [weak self] enabled in
+            self?.setLaunchAtLogin(enabled)
+        }
+        settingsWindow.onRequestInputMonitoring = { [weak self] in
+            self?.requestInputMonitoring()
+        }
+        settingsWindow.onRequestAccessibility = { [weak self] in
+            self?.requestAccessibility()
+        }
+        settingsWindow.onRequestMicrophone = { [weak self] in
+            self?.requestMicrophone()
+        }
+        settingsWindow.onOpenBluetooth = {
+            openBluetoothPreferences()
+        }
         buildStatusItem()
+        applyDefaultLaunchAtLogin()
         bridge.delegate = self
         installKeyMonitors()
         bridge.start()
@@ -1437,6 +1778,10 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         menu.addItem(messageMenuItem)
         menu.addItem(.separator())
 
+        let installItem = NSMenuItem(title: "Install Guide...", action: #selector(openInstallGuide), keyEquivalent: "i")
+        installItem.target = self
+        menu.addItem(installItem)
+
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -1447,6 +1792,23 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
 
         item.menu = menu
         statusItem = item
+    }
+
+    private func applyDefaultLaunchAtLogin() {
+        if UserDefaults.standard.object(forKey: launchAtLoginDefaultsKey) == nil {
+            UserDefaults.standard.set(true, forKey: launchAtLoginDefaultsKey)
+        }
+        guard UserDefaults.standard.bool(forKey: launchAtLoginDefaultsKey) else {
+            return
+        }
+        guard !ADVCtlInstaller.isLaunchAtLoginLoaded() else {
+            return
+        }
+        do {
+            try ADVCtlInstaller.setLaunchAtLogin(true)
+        } catch {
+            log("Launch at Login setup failed: \(error.localizedDescription)")
+        }
     }
 
     private func installKeyMonitors() {
@@ -1508,8 +1870,72 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc private func openInstallGuide() {
+        openSettings()
+        settingsWindow.selectInstallPage()
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    private func installApp() {
+        do {
+            try ADVCtlInstaller.installAppToApplications()
+            messageMenuItem.title = "Installed ADVCtl.app"
+        } catch {
+            messageMenuItem.title = "App install failed"
+            log("App install failed: \(error.localizedDescription)")
+        }
+        settingsWindow.refresh()
+    }
+
+    private func installAudioDriver() {
+        do {
+            try ADVCtlInstaller.installAudioDriver()
+            messageMenuItem.title = "Installed ADVCtlAudio"
+        } catch {
+            messageMenuItem.title = "Audio driver install failed"
+            log("Audio driver install failed: \(error.localizedDescription)")
+        }
+        settingsWindow.refresh()
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: launchAtLoginDefaultsKey)
+        do {
+            try ADVCtlInstaller.setLaunchAtLogin(enabled)
+            messageMenuItem.title = enabled ? "Launch at Login enabled" : "Launch at Login disabled"
+        } catch {
+            messageMenuItem.title = "Launch at Login failed"
+            log("Launch at Login update failed: \(error.localizedDescription)")
+        }
+        settingsWindow.refresh()
+    }
+
+    private func requestInputMonitoring() {
+        _ = requestHIDListenAccessIfNeeded()
+        if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
+            openInputMonitoringPreferences()
+        }
+        settingsWindow.refresh()
+    }
+
+    private func requestAccessibility() {
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        AXIsProcessTrustedWithOptions(options)
+        settingsWindow.refresh()
+    }
+
+    private func requestMicrophone() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.settingsWindow.refresh()
+                if AVCaptureDevice.authorizationStatus(for: .audio) == .denied {
+                    openMicrophonePreferences()
+                }
+            }
+        }
     }
 }
 

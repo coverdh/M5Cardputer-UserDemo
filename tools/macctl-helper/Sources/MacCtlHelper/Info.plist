@@ -18,6 +18,8 @@
     <string>ADVCtl connects to the Cardputer ADV over Bluetooth to receive control events.</string>
     <key>NSInputMonitoringUsageDescription</key>
     <string>ADVCtl listens to the Cardputer ADV HID control endpoint for knob commands.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ADVCtl requests microphone permission during setup so macOS records the same stable app identity used by the ADV audio bridge.</string>
     <key>LSUIElement</key>
     <true/>
 </dict>
