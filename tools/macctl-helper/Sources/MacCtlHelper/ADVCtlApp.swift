@@ -1265,7 +1265,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     }
 
     var knobVolumeStepLabel: String {
-        "\(knobVolumeStep)x"
+        "\(knobVolumeStep)%"
     }
 
     var audioStateText: String {
@@ -1862,7 +1862,7 @@ private struct ADVCtlKnobView: View {
                                 ok: !model.appleTVDevices.isEmpty,
                                 buttonTitle: "扫描",
                                 action: { model.onScanAppleTV?() })
-                SliderRow(title: "音量步进",
+                SliderRow(title: "每格音量",
                           valueText: model.knobVolumeStepLabel,
                           value: Binding(get: { Double(model.knobVolumeStep) }, set: { model.setKnobVolumeStep($0) }),
                           range: 1...20,

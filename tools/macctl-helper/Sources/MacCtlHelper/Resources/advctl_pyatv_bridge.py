@@ -133,16 +133,25 @@ async def connect_atv(args):
     return await pyatv.connect(config, loop, storage=storage)
 
 
+async def apply_volume_delta(atv, delta):
+    current = getattr(atv.audio, "volume", None)
+    if current is None:
+        if delta > 0:
+            await atv.audio.volume_up()
+        elif delta < 0:
+            await atv.audio.volume_down()
+        return getattr(atv.audio, "volume", None)
+
+    target = max(0.0, min(100.0, float(current) + float(delta)))
+    await atv.audio.set_volume(target)
+    return target
+
+
 async def command_volume(args):
     atv = await connect_atv(args)
     try:
         delta = int(args.delta)
-        for _ in range(min(abs(delta), 20)):
-            if delta > 0:
-                await atv.audio.volume_up()
-            elif delta < 0:
-                await atv.audio.volume_down()
-        volume = getattr(atv.audio, "volume", None)
+        volume = await apply_volume_delta(atv, delta)
         emit({"ok": True, "volume": volume})
     finally:
         await asyncio.gather(*atv.close(), return_exceptions=True)
@@ -200,12 +209,8 @@ async def command_serve(args):
                 command = request.get("command")
                 if command == "volume":
                     delta = int(request.get("delta", 0))
-                    for _ in range(min(abs(delta), 20)):
-                        if delta > 0:
-                            await atv.audio.volume_up()
-                        elif delta < 0:
-                            await atv.audio.volume_down()
-                    emit({"event": "ok", "command": "volume", "volume": getattr(atv.audio, "volume", None)})
+                    volume = await apply_volume_delta(atv, delta)
+                    emit({"event": "ok", "command": "volume", "volume": volume})
                 elif command == "remote":
                     remote_command = getattr(atv.remote_control, request.get("name", "play_pause"))
                     await remote_command()
