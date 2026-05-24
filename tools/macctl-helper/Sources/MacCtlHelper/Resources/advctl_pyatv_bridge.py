@@ -137,7 +137,7 @@ async def command_volume(args):
     atv = await connect_atv(args)
     try:
         delta = int(args.delta)
-        for _ in range(min(abs(delta), 8)):
+        for _ in range(min(abs(delta), 20)):
             if delta > 0:
                 await atv.audio.volume_up()
             elif delta < 0:
@@ -200,7 +200,7 @@ async def command_serve(args):
                 command = request.get("command")
                 if command == "volume":
                     delta = int(request.get("delta", 0))
-                    for _ in range(min(abs(delta), 8)):
+                    for _ in range(min(abs(delta), 20)):
                         if delta > 0:
                             await atv.audio.volume_up()
                         elif delta < 0:

@@ -74,6 +74,14 @@ final class JoystickSettings {
         set { defaults.set(newValue.isEmpty ? "airplay" : newValue, forKey: "advctl.appleTVPairingProtocol") }
     }
 
+    var knobVolumeStep: Int {
+        get {
+            let saved = defaults.integer(forKey: "advctl.knobVolumeStep")
+            return saved == 0 ? 1 : min(20, max(1, saved))
+        }
+        set { defaults.set(min(20, max(1, newValue)), forKey: "advctl.knobVolumeStep") }
+    }
+
     var appleTVConfigured: Bool {
         !appleTVIdentifier.isEmpty
     }

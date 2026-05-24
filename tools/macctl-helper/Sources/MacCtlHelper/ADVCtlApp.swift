@@ -288,6 +288,7 @@ private final class ADVCtlBridge {
     private var expectedAudioFrameSequence: UInt8?
     private var concealedAudioPacketCount = 0
     private var lastNowPlayingTextSignature = ""
+    private var lastPublishedAppleTVVolumePercent: UInt8?
     weak var delegate: ADVCtlBridgeDelegate?
 
     init(config: HelperConfig) {
@@ -301,6 +302,11 @@ private final class ADVCtlBridge {
 
     private var configuredAppleTVIdentifier: String {
         UserDefaults.standard.string(forKey: "advctl.appleTVIdentifier") ?? ""
+    }
+
+    private var knobVolumeStep: Int {
+        let saved = UserDefaults.standard.integer(forKey: "advctl.knobVolumeStep")
+        return saved == 0 ? 1 : min(20, max(1, saved))
     }
 
     private func commandSession(for identifier: String) throws -> AppleTVNativeCommandSession {
@@ -436,6 +442,7 @@ private final class ADVCtlBridge {
     }
 
     func mediaConfigurationDidChange() {
+        lastPublishedAppleTVVolumePercent = nil
         startAppleTVCommandSessionIfConfigured()
         if nowPlayingTask == nil {
             startNowPlayingSync()
@@ -455,10 +462,18 @@ private final class ADVCtlBridge {
         }
     }
 
-    @MainActor private func sendNowPlaying(_ snapshot: NowPlayingSnapshot) {
-        DispatchQueue.main.async {
-            self.delegate?.bridgeDidUpdateAppleTVVolume(Int(snapshot.volumePercent))
+    private func publishAppleTVVolumeIfChanged(_ volumePercent: UInt8) {
+        guard lastPublishedAppleTVVolumePercent != volumePercent else {
+            return
         }
+        lastPublishedAppleTVVolumePercent = volumePercent
+        DispatchQueue.main.async {
+            self.delegate?.bridgeDidUpdateAppleTVVolume(Int(volumePercent))
+        }
+    }
+
+    @MainActor private func sendNowPlaying(_ snapshot: NowPlayingSnapshot) {
+        publishAppleTVVolumeIfChanged(snapshot.volumePercent)
         var flags: UInt8 = 0
         if snapshot.active { flags |= 0x01 }
         if snapshot.playing { flags |= 0x02 }
@@ -519,7 +534,7 @@ private final class ADVCtlBridge {
                                                                   artist: ""))
                 }
                 let hasAppleTV = !(self?.configuredAppleTVIdentifier ?? "").isEmpty
-                try? await Task.sleep(nanoseconds: hasAppleTV ? 15_000_000_000 : 3_000_000_000)
+                try? await Task.sleep(nanoseconds: hasAppleTV ? 2_000_000_000 : 3_000_000_000)
             }
         }
     }
@@ -912,13 +927,14 @@ private final class ADVCtlBridge {
             return
         }
 
-        let command: MacCtlCommand = keyCode == hidKeyF13 ? .volumeDelta(1) : .volumeDelta(-1)
+        let delta = keyCode == hidKeyF13 ? knobVolumeStep : -knobVolumeStep
+        let command: MacCtlCommand = .volumeDelta(delta)
         Task {
             do {
                 let appleTVIdentifier = self.configuredAppleTVIdentifier
                 if !appleTVIdentifier.isEmpty {
-                    try commandSession(for: appleTVIdentifier).sendVolumeDelta(keyCode == hidKeyF13 ? 1 : -1)
-                    self.updateMessage("Handled \(keyCode == hidKeyF13 ? "F13" : "F14") via Apple TV")
+                    try commandSession(for: appleTVIdentifier).sendVolumeDelta(delta)
+                    self.updateMessage("Handled \(keyCode == hidKeyF13 ? "F13" : "F14") as \(delta) via Apple TV")
                 } else if let homeAssistant {
                     try await homeAssistant.handle(command)
                     self.updateMessage("Handled \(keyCode == hidKeyF13 ? "F13" : "F14") as \(command)")
@@ -944,13 +960,18 @@ private final class ADVCtlBridge {
                     let session = try commandSession(for: appleTVIdentifier)
                     switch command {
                     case .volumeDelta(let delta):
-                        session.sendVolumeDelta(delta)
+                        session.sendVolumeDelta(delta * self.knobVolumeStep)
                     case .playPause:
                         session.sendPlayPause()
                     }
                     self.updateMessage("Handled \(command) via Apple TV")
                 } else if let homeAssistant {
-                    try await homeAssistant.handle(command)
+                    switch command {
+                    case .volumeDelta(let delta):
+                        try await homeAssistant.handle(.volumeDelta(delta * self.knobVolumeStep))
+                    case .playPause:
+                        try await homeAssistant.handle(command)
+                    }
                     self.updateMessage("Handled \(command)")
                 } else {
                     self.updateMessage("Received \(command); pair Apple TV or set ADVCTL_HA_TOKEN")
@@ -997,9 +1018,7 @@ private final class ADVCtlBridge {
                 continue
             }
             let percent = min(100, max(0, Int(volume.rounded())))
-            DispatchQueue.main.async {
-                self.delegate?.bridgeDidUpdateAppleTVVolume(percent)
-            }
+            publishAppleTVVolumeIfChanged(UInt8(percent))
         }
     }
 }
@@ -1229,6 +1248,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     @Published var appleTVPairingProtocol = "airplay"
     @Published var appleTVPin = ""
     @Published var appleTVPairingActive = false
+    @Published var knobVolumeStep = 1
 
     init(settings: JoystickSettings) {
         self.settings = settings
@@ -1242,6 +1262,10 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
 
     var sensitivityLabel: String {
         "\(sensitivity)"
+    }
+
+    var knobVolumeStepLabel: String {
+        "\(knobVolumeStep)x"
     }
 
     var audioStateText: String {
@@ -1294,6 +1318,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
         knobMode = settings.knobMode
         screenTimeoutSeconds = settings.screenTimeoutSeconds
         powerSaveTimeoutMinutes = settings.powerSaveTimeoutMinutes
+        knobVolumeStep = settings.knobVolumeStep
         appleTVRuntimeInstalled = AppleTVNativeClient().isRuntimeInstalled
         selectedAppleTVID = selectedAppleTVID.isEmpty ? settings.appleTVIdentifier : selectedAppleTVID
         appleTVPairingProtocol = settings.appleTVPairingProtocol
@@ -1407,6 +1432,12 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     func setPowerSaveTimeout(_ value: Double) {
         powerSaveTimeoutMinutes = Int(round(value))
         commitPowerSettings()
+    }
+
+    func setKnobVolumeStep(_ value: Double) {
+        knobVolumeStep = min(20, max(1, Int(round(value))))
+        settings.knobVolumeStep = knobVolumeStep
+        settings.synchronize()
     }
 
     func applyHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
@@ -1831,6 +1862,11 @@ private struct ADVCtlKnobView: View {
                                 ok: !model.appleTVDevices.isEmpty,
                                 buttonTitle: "扫描",
                                 action: { model.onScanAppleTV?() })
+                SliderRow(title: "音量步进",
+                          valueText: model.knobVolumeStepLabel,
+                          value: Binding(get: { Double(model.knobVolumeStep) }, set: { model.setKnobVolumeStep($0) }),
+                          range: 1...20,
+                          step: 1)
                 if !model.appleTVDevices.isEmpty {
                     AppleTVDevicePickerRow(model: model)
                     AppleTVProtocolPickerRow(model: model)
