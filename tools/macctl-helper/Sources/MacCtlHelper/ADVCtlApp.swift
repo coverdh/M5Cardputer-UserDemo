@@ -593,14 +593,15 @@ private final class ADVCtlBridge {
                                   payload: inout [UInt8],
                                   reportWithID: inout [UInt8]) -> IOReturn {
         let attempts: [(IOHIDReportType, Bool, CFIndex)] = [
-            (kIOHIDReportTypeFeature, true, 0),
             (kIOHIDReportTypeOutput, true, 0),
-            (kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID)),
             (kIOHIDReportTypeOutput, false, CFIndex(advCtlReportID)),
-            (kIOHIDReportTypeFeature, true, CFIndex(advCtlReportID)),
             (kIOHIDReportTypeOutput, true, CFIndex(advCtlReportID)),
+            (kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID)),
+            (kIOHIDReportTypeFeature, true, 0),
+            (kIOHIDReportTypeFeature, true, CFIndex(advCtlReportID)),
         ]
         var lastStatus = kIOReturnUnsupported
+        var outputReportSent = false
         for (reportType, includeReportID, reportID) in attempts {
             let status: IOReturn
             if includeReportID {
@@ -626,9 +627,16 @@ private final class ADVCtlBridge {
             }
             if status == kIOReturnSuccess {
                 updateMessage("Sent control payload using \(reportType == kIOHIDReportTypeFeature ? "feature" : "output") report\(includeReportID ? " with id" : "") param=\(reportID)")
+                if reportType == kIOHIDReportTypeOutput {
+                    outputReportSent = true
+                    continue
+                }
                 return status
             }
             lastStatus = status
+        }
+        if outputReportSent {
+            return kIOReturnSuccess
         }
         return lastStatus
     }

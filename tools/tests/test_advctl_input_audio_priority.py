@@ -114,13 +114,13 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("kIOHIDReportTypeOutput", source[source.index("private func setKeyboardOutputReport"):])
         self.assertIn("CFIndex(advCtlKeyboardReportID)", source[source.index("private func setKeyboardOutputReport"):])
         attempts = source[source.index("let attempts: [(IOHIDReportType, Bool, CFIndex)]"):source.index("var lastStatus", source.index("let attempts: [(IOHIDReportType, Bool, CFIndex)]"))]
-        self.assertLess(attempts.index("kIOHIDReportTypeFeature"), attempts.index("kIOHIDReportTypeOutput"))
+        self.assertLess(attempts.index("kIOHIDReportTypeOutput"), attempts.index("kIOHIDReportTypeFeature"))
         self.assertIn("(kIOHIDReportTypeFeature, true, 0)", attempts)
         self.assertIn("(kIOHIDReportTypeOutput, true, 0)", attempts)
-        self.assertLess(attempts.index("(kIOHIDReportTypeFeature, true, 0)"),
-                        attempts.index("(kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID))"))
         self.assertLess(attempts.index("(kIOHIDReportTypeOutput, true, 0)"),
                         attempts.index("(kIOHIDReportTypeOutput, false, CFIndex(advCtlReportID))"))
+        self.assertLess(attempts.index("(kIOHIDReportTypeOutput, false, CFIndex(advCtlReportID))"),
+                        attempts.index("(kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID))"))
         open_failed_block = source[source.index('updateMessage("HID manager open failed: \\(status)")'):source.index("if let devices = IOHIDManagerCopyDevices", source.index('updateMessage("HID manager open failed: \\(status)")'))]
         self.assertNotIn("return", open_failed_block)
         keyboard_match = "usagePage == hidUsagePageGenericDesktop && usage == hidUsageKeyboard"
