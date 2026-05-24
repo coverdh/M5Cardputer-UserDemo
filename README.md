@@ -60,25 +60,38 @@ build/cardputer-adv.bin
 
 ### Flash
 
-Find the serial port first:
+The helper script auto-detects ESP-IDF and the first common USB serial port, then builds and
+flashes the firmware:
 
 ```bash
-ls /dev/cu.*
+./tools/flash-firmware.sh
 ```
 
-Then flash with the detected port, for example:
+Pass an explicit port when multiple devices are connected:
 
 ```bash
-idf.py -p /dev/cu.usbmodem101 flash
+./tools/flash-firmware.sh --port /dev/cu.usbmodem101
 ```
 
 ### Monitor Logs
 
 ```bash
-idf.py -p /dev/cu.usbmodem101 monitor
+./tools/flash-firmware.sh --monitor
 ```
 
 Exit monitor with `Ctrl+]`.
+
+### Install ADVCtl On macOS
+
+Build and install the Mac helper app plus the `ADVCtl Audio` HAL input driver:
+
+```bash
+./tools/macctl-helper/install.sh
+```
+
+The installer copies `ADVCtl.app` to `/Applications`, installs
+`/Library/Audio/Plug-Ins/HAL/ADVCtlAudio.driver`, restarts CoreAudio, and launches the app. macOS
+will ask for administrator permission when installing the HAL driver.
 
 ## Hardware Notes
 
@@ -161,8 +174,7 @@ idf.py build
 For device validation:
 
 ```bash
-idf.py -p /dev/cu.usbmodem101 flash
-idf.py -p /dev/cu.usbmodem101 monitor
+./tools/flash-firmware.sh --port /dev/cu.usbmodem101 --monitor
 ```
 
 ### Commit Style

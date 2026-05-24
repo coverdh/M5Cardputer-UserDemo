@@ -212,6 +212,23 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("private let advCtlAudioUpsampleFactor = 6", sink)
         self.assertIn("@discardableResult func enqueueSilence(uLawSampleCount: Int) -> Int", sink)
 
+    def test_install_scripts_automate_firmware_flash_and_mac_audio_driver_install(self):
+        flash = (ROOT / "tools/flash-firmware.sh").read_text()
+        build_app = (ROOT / "tools/macctl-helper/build-app.sh").read_text()
+        install = (ROOT / "tools/macctl-helper/install.sh").read_text()
+
+        self.assertIn("find_idf_export()", flash)
+        self.assertIn("find_serial_port()", flash)
+        self.assertIn("idf.py set-target esp32s3", flash)
+        self.assertIn('idf.py -p "${PORT}" -b "${BAUD}" flash', flash)
+        self.assertIn('idf.py -p "${PORT}" monitor', flash)
+        self.assertIn("ADVCTL_INSTALL_AUDIO_DRIVER", build_app)
+        self.assertIn("install_audio_driver()", build_app)
+        self.assertIn("/Library/Audio/Plug-Ins/HAL", build_app)
+        self.assertIn("ADVCtlAudio.driver", build_app)
+        self.assertIn("killall coreaudiod || true", build_app)
+        self.assertIn("./build-app.sh", install)
+
     def test_keyboard_report_map_keeps_output_byte_aligned(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
         start = source.index("const unsigned char keyboardReportMap[]")
