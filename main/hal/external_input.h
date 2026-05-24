@@ -130,6 +130,7 @@ private:
     uint32_t _last_poll               = 0;
     uint32_t _last_probe              = 0;
     uint32_t _last_scan_log           = 0;
+    uint32_t _last_center_wait_log    = 0;
     uint8_t _chain_read_failures      = 0;
     uint8_t _encoder_read_failures    = 0;
     uint8_t _chain_bus_read_failures  = 0;

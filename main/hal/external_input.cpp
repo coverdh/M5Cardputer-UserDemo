@@ -32,6 +32,8 @@ static constexpr int JOYSTICK_UNIT_CENTER                     = 128;
 static constexpr int JOYSTICK_UNIT_DEAD_ZONE                  = 38;
 static constexpr int JOYSTICK2_DEAD_ZONE                      = 24;
 static constexpr int CHAIN_JOYSTICK_DEAD_ZONE                 = 12;
+static constexpr int CHAIN_JOYSTICK_CENTER_ACCEPTANCE         = CHAIN_JOYSTICK_DEAD_ZONE * 2;
+static constexpr uint32_t CHAIN_JOYSTICK_CENTER_LOG_INTERVAL_MS = 1000;
 static constexpr uart_port_t CHAIN_UART                       = UART_NUM_1;
 static constexpr int CHAIN_RX_A                               = 1;
 static constexpr int CHAIN_TX_A                               = 2;
@@ -51,6 +53,11 @@ static constexpr uint8_t CHAIN_OPERATION_SUCCESS              = 0x01;
 static constexpr gpio_num_t DUAL_BUTTON_RED_PIN               = GPIO_NUM_1;
 static constexpr gpio_num_t DUAL_BUTTON_BLUE_PIN              = GPIO_NUM_2;
 static const std::string TAG                                  = "ExternalInput";
+
+static bool chainJoystickAxisNearCenter(int value)
+{
+    return value >= -CHAIN_JOYSTICK_CENTER_ACCEPTANCE && value <= CHAIN_JOYSTICK_CENTER_ACCEPTANCE;
+}
 
 void ExternalInput::init()
 {
@@ -279,6 +286,7 @@ void ExternalInput::probeBus(uint32_t now)
     _chain_read_failures         = 0;
     _encoder_read_failures       = 0;
     _chain_bus_read_failures     = 0;
+    _last_center_wait_log        = 0;
     _unit_encoder_has_last_value = false;
     uart_driver_delete(CHAIN_UART);
 
@@ -745,13 +753,28 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
 
     const int rawX = static_cast<int8_t>(data[0]);
     const int rawY = static_cast<int8_t>(data[1]);
-    if (!_chain_joystick_center_ready || _chain_joystick_center_pending) {
+    if (_chain_joystick_center_pending &&
+        chainJoystickAxisNearCenter(rawX) &&
+        chainJoystickAxisNearCenter(rawY)) {
         _chain_joystick_center_x       = rawX;
         _chain_joystick_center_y       = rawY;
         _chain_joystick_center_ready   = true;
         _chain_joystick_center_pending = false;
         mclog::tagInfo(TAG, "chain joystick center: x={} y={}", _chain_joystick_center_x,
                        _chain_joystick_center_y);
+    } else if (!_chain_joystick_center_ready) {
+        _chain_joystick_center_x     = 0;
+        _chain_joystick_center_y     = 0;
+        _chain_joystick_center_ready = true;
+        if (M5.millis() - _last_center_wait_log >= CHAIN_JOYSTICK_CENTER_LOG_INTERVAL_MS) {
+            _last_center_wait_log = M5.millis();
+            mclog::tagWarn(TAG, "chain joystick center deferred: raw x={} y={} still using default center",
+                           rawX, rawY);
+        }
+    } else if (_chain_joystick_center_pending &&
+               M5.millis() - _last_center_wait_log >= CHAIN_JOYSTICK_CENTER_LOG_INTERVAL_MS) {
+        _last_center_wait_log = M5.millis();
+        mclog::tagWarn(TAG, "chain joystick center waiting for neutral: raw x={} y={}", rawX, rawY);
     }
 
     const int x = rawX - _chain_joystick_center_x;
