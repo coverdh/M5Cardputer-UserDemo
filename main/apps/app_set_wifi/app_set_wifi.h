@@ -1,76 +1,65 @@
-/**
- * @file app_set_wifi.h
- * @author Forairaaaaa
- * @brief 
- * @version 0.6
- * @date 2023-09-20
- * 
- * @copyright Copyright (c) 2023
- * 
+/*
+ * SPDX-FileCopyrightText: 2025 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
  */
 #pragma once
 #include <mooncake.h>
-#include "../../hal/hal.h"
-#include "../utils/theme/theme_define.h"
-#include "../utils/anim/anim_define.h"
-#include "../utils/icon/icon_define.h"
+#include <cstdint>
+#include <hal/hal.h>
+#include <string>
 
-#include "assets/set_wifi_big.h"
-#include "assets/set_wifi_small.h"
+/**
+ * @brief
+ *
+ */
+class AppSetWiFi : public mooncake::AppAbility {
+public:
+    AppSetWiFi();
+    ~AppSetWiFi();
 
+    void onOpen() override;
+    void onRunning() override;
+    void onClose() override;
 
-namespace MOONCAKE
-{
-    namespace APPS
-    {
-        class AppSetWiFi : public APP_BASE
-        {
-            private:
-                enum State_t
-                {
-                    state_init = 0,
-                    state_wait_ssid,
-                    state_wait_password,
-                    state_connect,
-                    state_wait_quit,
-                };
+private:
+    enum State_t {
+        STATE_INIT = 0,
+        STATE_WAIT_SSID,
+        STATE_WAIT_PASSWORD,
+        STATE_CONNECTING,
+        STATE_SUCCESS,
+        STATE_FAILED
+    };
 
-                struct Data_t
-                {
-                    HAL::Hal* hal = nullptr;
+    static constexpr size_t INPUT_BUFFER_SIZE     = 128;
+    static constexpr uint32_t CURSOR_BLINK_PERIOD = 500;
 
-                    int last_key_num = 0;
-                    std::string repl_input_buffer;
-                    bool is_caps = false;
-                    char* value_buffer = nullptr;
+    uint32_t _time_count         = 0;
+    uint32_t _cursor_update_time = 0;
+    bool _cursor_state           = false;
+    std::string _input_buffer;
+    State_t _current_state = STATE_INIT;
+    std::string _wifi_ssid;
+    std::string _wifi_password;
+    int _key_event_slot_id  = -1;
+    bool _connection_result = false;
 
-                    uint32_t cursor_update_time_count = 0;
-                    uint32_t cursor_update_period = 500;
-                    bool cursor_state = false;
-
-                    State_t current_state = state_init;
-                    std::string wifi_ssid;
-                    std::string wifi_password;
-                };
-                Data_t _data;
-                
-                void _update_input();
-                void _update_cursor();
-                void _update_state();
-
-            public:
-                void onCreate() override;
-                void onResume() override;
-                void onRunning() override;
-                void onDestroy() override;
-        };
-
-        class AppSetWiFi_Packer : public APP_PACKER_BASE
-        {
-            std::string getAppName() override { return "SetWiFi"; }
-            void* getAppIcon() override { return (void*)(new AppIcon_t(image_data_set_wifi_big, image_data_set_wifi_small)); }
-            void* newApp() override { return new AppSetWiFi; }
-            void deleteApp(void *app) override { delete (AppSetWiFi*)app; }
-        };
-    }
-}
+    void render_interface();
+    void render_input_prompt();
+    void render_current_input_line();
+    void handle_key_event(const Keyboard::KeyEvent_t& keyEvent);
+    void handle_enter_key();
+    void handle_backspace();
+    void update_cursor();
+    void process_state_machine();
+    void show_ssid_prompt();
+    void show_password_prompt();
+    void show_connection_status();
+    void connect_to_wifi();
+    void show_connection_result();
+    void load_saved_wifi_settings();
+    void save_wifi_settings();
+    void auto_fill_saved_ssid();
+    void auto_fill_saved_password();
+};

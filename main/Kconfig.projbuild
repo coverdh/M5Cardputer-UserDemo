@@ -1,26 +1,38 @@
-menu "USB HID Device Example"
+menu "HID Example Configuration"
+    config EXAMPLE_SSP_ENABLED
+        bool "Secure Simple Pairing"
+        depends on BT_CLASSIC_ENABLED
+        default y
+        help
+            This enables the Secure Simple Pairing. If disable this option,
+            Bluedroid will only support Legacy Pairing
 
-    choice HID_SUBCLASS
-        prompt "HID Device"
-        default SUBCLASS_MOUSE
+    choice EXAMPLE_HID_DEVICE_ROLE
+        prompt "HID Device Role"
+        depends on BT_NIMBLE_ENABLED || BT_BLE_ENABLED
+        default EXAMPLE_MEDIA_ENABLE
+        help
+            Three Supported Roles for Device
+            - Media Device
+            - Keyboard
+            - Mouse
 
-        config SUBCLASS_MOUSE
-            bool "Mouse"
-        config SUBCLASS_KEYBOARD
-            bool "Keyboard"
+        config EXAMPLE_MEDIA_ENABLE
+            select BT_NIMBLE_HID_SERVICE if BT_NIMBLE_ENABLED
+            bool "Enable Media Device"
+
+        config EXAMPLE_KBD_ENABLE
+            select BT_NIMBLE_HID_SERVICE if BT_NIMBLE_ENABLED
+            bool "Enable Keyboard Device"
+
+        config EXAMPLE_MOUSE_ENABLE
+            select BT_NIMBLE_HID_SERVICE if BT_NIMBLE_ENABLED
+            bool "Enable Mouse Device"
     endchoice
 
-    config TUSB_VID
-        hex "USB Device VID"
-        default 0x303A
-    config TUSB_PID
-        hex "USB Device PID"
-        default 0x8000
-    config TUSB_MANUFACTURER
-        string "USB Device Manufacture"
-        default "Espressif"
-    config TUSB_PRODUCT
-        string "Product Name"
-        default "HID Demo"
-
+    config EXAMPLE_HID_DEVICE_ROLE
+        int
+        default 1 if EXAMPLE_MEDIA_ENABLE
+        default 2 if EXAMPLE_KBD_ENABLE
+        default 3 if EXAMPLE_MOUSE_ENABLE
 endmenu

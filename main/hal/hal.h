@@ -1,80 +1,210 @@
-/**
- * @file hal.h
- * @author Forairaaaaa
- * @brief
- * @version 0.1
- * @date 2023-09-18
+/*
+ * SPDX-FileCopyrightText: 2025 M5Stack Technology CO LTD
  *
- * @copyright Copyright (c) 2023
- *
+ * SPDX-License-Identifier: MIT
  */
 #pragma once
-#include "../../components/M5GFX/src/M5GFX.h"
 #include "keyboard/keyboard.h"
-#include "mic/Mic_Class.hpp"
-#include "speaker/Speaker_Class.hpp"
-#include "button/Button.h"
-#include "sdcard/sdcard.h"
-#include <iostream>
+#include "external_input.h"
+#include "cap_lora868/cap_lora868.h"
+#include "utils/settings/settings.h"
+#include <M5Unified.hpp>
+#include <M5GFX.h>
+#include <memory>
+#include <cstdint>
 #include <string>
+#include <vector>
 
-namespace HAL
-{
-    /**
-     * @brief Hal base for DI
-     *
-     */
-    class Hal
+class Hal {
+public:
+    void init(bool gameboy_only_mode = false);
+    void update();
+
+    /* --------------------------------- System --------------------------------- */
+    void delay(std::uint32_t ms)
     {
-    protected:
-        LGFX_Device* _display;
-        LGFX_Sprite* _canvas;
-        LGFX_Sprite* _canvas_system_bar;
-        LGFX_Sprite* _canvas_keyboard_bar;
+        m5gfx::delay(ms);
+    }
+    std::uint32_t millis()
+    {
+        return m5gfx::millis();
+    }
+    void feedTheDog();
+    std::vector<uint8_t> getDeviceMac();
+    std::string getDeviceMacString();
 
-        KEYBOARD::Keyboard* _keyboard;
-        m5::Mic_Class* _mic;
-        m5::Speaker_Class* _speaker;
-        Button* _homeButton;
-        SDCard* _sdcard;
+    /* --------------------------------- Display -------------------------------- */
+    M5GFX& display                = M5.Display;
+    LGFX_Sprite canvas            = LGFX_Sprite(&M5.Display);
+    LGFX_Sprite canvasSystemBar   = LGFX_Sprite(&M5.Display);
+    LGFX_Sprite canvasKeyboardBar = LGFX_Sprite(&M5.Display);
 
-        bool _sntp_adjusted;
-
-    public:
-        Hal()
-            : _display(nullptr), _canvas(nullptr), _canvas_system_bar(nullptr), _canvas_keyboard_bar(nullptr),
-              _keyboard(nullptr), _mic(nullptr), _speaker(nullptr), _homeButton(nullptr), _sdcard(nullptr),
-              _sntp_adjusted(false)
-        {
+    inline void pushCanvasSystemBar()
+    {
+        if (_fullscreen_mode || !_ui_sprites_enabled) {
+            return;
         }
+        canvasSystemBar.pushSprite(canvasKeyboardBar.width(), 0);
+    }
+    inline void pushCanvasKeyboardBar()
+    {
+        if (_fullscreen_mode || !_ui_sprites_enabled) {
+            return;
+        }
+        canvasKeyboardBar.pushSprite(0, 0);
+    }
+    inline void pushCanvas()
+    {
+        if (!_ui_sprites_enabled) {
+            return;
+        }
+        canvas.pushSprite(canvasKeyboardBar.width(), canvasSystemBar.height());
+    }
+    void setFullscreenMode(bool fullscreen);
+    bool isFullscreenMode() const
+    {
+        return _fullscreen_mode;
+    }
+    void setDeviceBrightnessPercent(int percent);
+    int getDeviceBrightnessPercent() const
+    {
+        return _display_brightness_percent;
+    }
 
-        // Getter
-        inline LGFX_Device* display() { return _display; }
-        inline LGFX_Sprite* canvas() { return _canvas; }
-        inline LGFX_Sprite* canvas_system_bar() { return _canvas_system_bar; }
-        inline LGFX_Sprite* canvas_keyboard_bar() { return _canvas_keyboard_bar; }
-        inline KEYBOARD::Keyboard* keyboard() { return _keyboard; }
-        inline m5::Mic_Class* mic() { return _mic; }
-        inline m5::Speaker_Class* Speaker() { return _speaker; }
-        inline Button* homeButton() { return _homeButton; }
-        inline SDCard* sdcard() { return _sdcard; }
+    /* ---------------------------------- Audio --------------------------------- */
+    m5::Speaker_Class& speaker = M5.Speaker;
+    m5::Mic_Class& mic         = M5.Mic;
+    void setDeviceVolumePercent(int percent);
+    int getDeviceVolumePercent() const;
 
-        inline void setSntpAdjusted(bool isAdjusted) { _sntp_adjusted = isAdjusted; }
-        inline bool isSntpAdjusted(void) { return _sntp_adjusted; }
+    /* ---------------------------------- Input --------------------------------- */
+    m5::Button_Class& homeButton = M5.BtnA;
+    Keyboard keyboard;
+    ExternalInput externalInput;
 
-        // Canvas
-        inline void canvas_system_bar_update() { _canvas_system_bar->pushSprite(_canvas_keyboard_bar->width(), 0); }
-        inline void canvas_keyboard_bar_update() { _canvas_keyboard_bar->pushSprite(0, 0); }
-        inline void canvas_update() { _canvas->pushSprite(_canvas_keyboard_bar->width(), _canvas_system_bar->height()); }
+    /* ---------------------------------- Power --------------------------------- */
+    inline uint8_t getBatLevel()
+    {
+        return M5.Power.getBatteryLevel();
+    }
 
-        // Override
-        virtual std::string type() { return "null"; }
-        virtual void init() {}
+    /* ---------------------------------- WiFi ---------------------------------- */
+    using ScanResult_t = std::pair<int, std::string>;
+    void wifiInit();
+    void wifiDeinit();
+    void wifiScan(std::vector<ScanResult_t>& scanResult);
+    bool wifiConnect(const std::string& ssid, const std::string& password);
+    bool isWifiConnected() const
+    {
+        return _is_wifi_connected;
+    }
+    void wifiDisconnect();
 
-        virtual void playLastSound() {}
-        virtual void playNextSound() {}
-        virtual void playKeyboardSound() {}
+    /* --------------------------------- EspNow --------------------------------- */
+    void espNowInit();
+    void espNowDeinit();
+    void espNowSend(const std::string& data);
+    bool espNowAvailable();
+    const std::string& espNowGetReceivedData();
+    void espNowClearReceivedData();
 
-        virtual uint8_t getBatLevel() { return 100; }
+    /* ----------------------------------- IR ----------------------------------- */
+    void irInit();
+    void irSend(uint8_t addr, uint8_t cmd);
+
+    /* ----------------------------------- BLE ---------------------------------- */
+    bool bleControlInit();
+    void bleControlStop();
+    bool bleControlForgetBonds();
+    void bleKeyboardInit();
+    bool bleKeyboardIsConnected() const;
+    void bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode);
+    void bleKeyboardTap(uint8_t modifier, KeScanCode_t keyCode);
+    void bleMouseReport(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel = 0);
+    void bleMouseMove(int8_t dx, int8_t dy, int8_t wheel = 0);
+    void bleMouseClick(uint8_t buttons);
+    void bleConsumerSend(uint16_t usageId);
+    struct MacCtlNowPlayingState {
+        bool active = false;
+        bool playing = false;
+        bool muted = false;
+        uint8_t volumePercent = 0;
+        uint8_t progressPercent = 0;
+        uint32_t updatedMs = 0;
+        char title[33] = {};
+        char artist[33] = {};
     };
-} // namespace HAL
+    bool bleMacCtlVolumeDelta(int8_t delta);
+    bool bleMacCtlPlayPause();
+    bool bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode);
+    bool bleMacCtlPowerConfig(uint8_t screenTimeoutSeconds, uint8_t powerSaveTimeoutMinutes);
+    bool bleMacCtlIsConnected() const;
+    bool bleMacCtlTimeSynced() const;
+    const MacCtlNowPlayingState& bleMacCtlNowPlaying() const;
+    bool bleMacCtlAudioState(bool active);
+    bool bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len);
+    bool bleConsumeAudioTestRequest(bool& active);
+
+    /* ----------------------------------- USB ---------------------------------- */
+    void usbKeyboardInit();
+    bool usbKeyboardIsConnected() const;
+
+    /* -------------------------------- Settings -------------------------------- */
+    Settings& getSettings()
+    {
+        return *_settings;
+    }
+
+    /* ----------------------------------- IMU ---------------------------------- */
+    m5::IMU_Class& imu = M5.Imu;
+
+    /* --------------------------------- SD Card -------------------------------- */
+    struct SdCardProbeResult_t {
+        bool is_mounted = false;
+        std::string size;
+        std::string type;
+        std::string name;
+
+        bool operator==(const SdCardProbeResult_t& other) const
+        {
+            return is_mounted == other.is_mounted && size == other.size && type == other.type && name == other.name;
+        }
+    };
+
+    SdCardProbeResult_t sdCardProbe();
+    void sdCardUnmount();
+
+    /* ----------------------------------- Cap ---------------------------------- */
+    CapLoRa868 capLora868;
+
+private:
+    Settings* _settings             = nullptr;
+    bool _is_wifi_inited            = false;
+    bool _wifi_init_failed          = false;
+    bool _is_wifi_connected         = false;
+    bool _is_esp_now_inited         = false;
+    bool _is_ir_inited              = false;
+    bool _is_ble_keyboard_inited    = false;
+    uint32_t _last_ble_advertising_ensure_ms = 0;
+    bool _is_usb_keyboard_inited    = false;
+    bool _is_sd_card_mounted        = false;
+    bool _fullscreen_mode           = false;
+    bool _ui_sprites_enabled        = true;
+    int _display_brightness_percent = 100;
+    int _ble_keyboard_event_slot_id = -1;
+    int _usb_keyboard_event_slot_id = -1;
+    std::unique_ptr<CapLoRa868> _cap_lora868;
+
+    void display_init(bool create_ui_sprites);
+    void i2c_scan();
+    void keyboard_init();
+    void start_sntp();
+    void stop_sntp();
+    void setting_init();
+    void spi_init();
+    void sd_card_init();
+    void handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent);
+    void handle_usb_keyboard_event(const Keyboard::KeyEvent_t& keyEvent);
+};
+
+Hal& GetHAL();

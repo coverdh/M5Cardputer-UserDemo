@@ -1,316 +1,223 @@
-/**
- * @file app_record.cpp
- * @author Forairaaaaa
- * @brief 
- * @version 0.1
- * @date 2023-09-19
- * http://gitlab.m5stack.com/Forairaaaaa/stamps3_keypad_factory_test/blob/master/code/src/factory_test/mic/mic_test.cpp
- * @copyright Copyright (c) 2023
- * 
+/*
+ * SPDX-FileCopyrightText: 2025 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
  */
 #include "app_record.h"
-#include "lgfx/v1/misc/enum.hpp"
-#include "spdlog/spdlog.h"
-#include <cstdint>
-#include "../utils/theme/theme_define.h"
+#include "assets/record_big.h"
+#include "assets/record_small.h"
+#include <apps/utils/audio/audio.h>
+#include <apps/utils/common.h>
+#include <apps/utils/theme.h>
+#include <mooncake_log.h>
+#include <assets.h>
 
+using namespace mooncake;
 
-using namespace MOONCAKE::APPS;
-
-
-void AppRecord::onCreate()
+AppRecord::AppRecord()
 {
-    spdlog::info("{} onCreate", getAppName());
-
-    // Get hal
-    _data.hal = mcAppGetDatabase()->Get("HAL")->value<HAL::Hal *>();
+    setAppInfo().name     = "Record";
+    setAppInfo().userData = new AppIcon_t(image_data_record_big, image_data_record_small);
 }
 
-
-static constexpr const size_t record_number = 256;
-static constexpr const size_t record_length = 200;
-static constexpr const size_t record_size = record_number * record_length;
-static constexpr const size_t record_samplerate = 16000;
-static int16_t prev_y[record_length];
-static int16_t prev_h[record_length];
-static size_t rec_record_idx = 2;
-static size_t draw_record_idx = 0;
-static int16_t *rec_data;
-
-#define _canvas _data.hal->canvas()
-#define _canvas_update _data.hal->canvas_update
-#define _speaker _data.hal->Speaker()
-#define _mic _data.hal->mic()
-
-
-void AppRecord::onResume()
+AppRecord::~AppRecord()
 {
-    ANIM_APP_OPEN();
-
-
-
-
-    // _canvas->setCursor(0, 0);
-    // _canvas->print(" REC");
-    // rec_data = (typeof(rec_data))heap_caps_malloc(record_size * sizeof(int16_t), MALLOC_CAP_8BIT);
-
-    rec_data = (typeof(rec_data))malloc(record_size * sizeof(int16_t));
-
-    memset(rec_data, 0 , record_size * sizeof(int16_t));
-    _canvas_update();
-    
-    /// Since the microphone and speaker cannot be used at the same time, turn off the speaker here.
-    _speaker->end();
-    _speaker->setVolume(255);
-
-    _mic->begin();
-
-    _canvas->fillScreen(THEME_COLOR_BG);
-    _canvas->setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-
-
-    _canvas->setCursor(10, 0);
-    _canvas->setFont(FONT_REPL);
-    _canvas->setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-    _canvas->setTextSize(1);
-    _canvas->print("Press enter to play");
+    delete static_cast<AppIcon_t*>(getAppInfo().userData);
+    if (_rec_data) {
+        delete[] _rec_data;
+        _rec_data = nullptr;
+    }
 }
 
+void AppRecord::onOpen()
+{
+    mclog::tagInfo(getAppInfo().name, "on open");
+
+    audio::set_keyboard_sfx_enable(false);
+
+    _rec_data = new int16_t[RECORD_SIZE]();
+
+    start_recording();
+    render_page_recording();
+}
 
 void AppRecord::onRunning()
 {
-    // while (1)
-    // {
+    if (_is_recording && GetHAL().mic.isEnabled()) {
+        render_waveform();
+    }
 
-
-
-    
-    if (_mic->isEnabled())
-    {
-        static constexpr int shift = 6;
-        auto data = &rec_data[rec_record_idx * record_length];
-        // if (_mic->record(data, record_length, record_samplerate))
-
-        if (_mic->record(data, record_length, record_samplerate))
-        {
-            // _canvas->fillScreen(TFT_BLACK);
-
-            data = &rec_data[draw_record_idx * record_length];
-
-            int32_t w = _canvas->width();
-            if (w > record_length - 1)
-            {
-                w = record_length - 1;
-            }
-
-            // Align center 
-            static int y_offset = 0;
-            static int last_y_offset = 0;
-            static int average = 0;
-
-            average = 0;
-            for (int32_t i = 0; i < w; i++)
-            {
-                average += prev_y[i] / 3;
-            }
-            y_offset = _canvas->height() / 2 - average / w;
-            // spdlog::info("{} {}", average / w, y_offset);
-
-
-            for (int32_t x = 0; x < w; ++x)
-            {
-                // _canvas->writeFastVLine(x, prev_y[x], prev_h[x], TFT_BLACK);
-                // printf("%d\n", prev_y[x]);
-
-                // _canvas->writeFastVLine(x + 10, prev_y[x] / 3 + y_offset, prev_h[x], THEME_COLOR_BG);
-
-                // Wipe last one 
-                _canvas->writeFastVLine(x + 10, prev_y[x] / 3 + last_y_offset, prev_h[x], THEME_COLOR_BG);
-
-
-                int32_t y1 = (data[x] >> shift);
-                int32_t y2 = (data[x + 1] >> shift);
-                if (y1 > y2)
-                {
-                    int32_t tmp = y1;
-                    y1 = y2;
-                    y2 = tmp;
-                }
-                int32_t y = (_canvas->height() >> 1) + y1;
-                int32_t h = (_canvas->height() >> 1) + y2 + 1 - y;
-                prev_y[x] = y;
-                prev_h[x] = h;
-
-                _canvas->writeFastVLine(x + 10, y / 3 + y_offset, h, TFT_WHITE);
-
-            }
-
-            last_y_offset = y_offset;
-
-
-            // _canvas->fillRect(0, 0, _canvas->width(), 25, _canvas->color565(20, 20, 20));
-            // _canvas->setTextSize(2);
-            // _canvas->setTextColor(TFT_WHITE);
-            // _canvas->drawCenterString("MIC Test", _canvas->width() / 2, 6);
-            // _canvas->setTextColor(TFT_ORANGE);
-
-            // _canvas->setCursor(0, 40);
-            // _canvas->print(" REC\n");
-            // _canvas->setTextSize(1);
-            // _canvas->print("  Press enter to play");
-            // _canvas->setTextSize(2);
-
-
-            _canvas->setCursor(10, 0);
-            _canvas->setFont(FONT_REPL);
-            _canvas->setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-            _canvas->setTextSize(1);
-            _canvas->print("Press enter to play");
-
-
-            _canvas_update();
-
-            if (++draw_record_idx >= record_number)
-            {
-                draw_record_idx = 0;
-            }
-            if (++rec_record_idx >= record_number)
-            {
-                rec_record_idx = 0;
-            }
+    // Handle keyboard input
+    auto key_event = GetHAL().keyboard.getLatestKeyEvent();
+    if (key_event.state == true) {
+        if (key_event.keyCode == KEY_ENTER) {
+            handle_enter_key();
         }
     }
 
-
-    // spdlog::info("{} {}", _data.hal->keyboard()->getKey().x, _data.hal->keyboard()->getKey().y);
-    auto pressing_key = _data.hal->keyboard()->getKey();
-    if (pressing_key.x >= 0)
-    // if (1)
-    {
-        // if (_keypad.getKeyValue(_keypad.getKey()).value_first == "opt")
-        if (strcmp(_data.hal->keyboard()->getKeyValue(_data.hal->keyboard()->getKey()).value_first, "opt") == 0)
-        {
-            // printf("1111\n");
-
-            auto cfg = _mic->config();
-            cfg.noise_filter_level = (cfg.noise_filter_level + 8) & 255;
-            _mic->config(cfg);
-            _canvas->setCursor(0, 110);
-            _canvas->setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-            _canvas->printf(" nf:%03d", cfg.noise_filter_level);
-            _canvas_update();
-        }
-
-        // else if (_keypad.getKeyValue(_keypad.getKey()).value_first == "enter")
-        else if (strcmp(_data.hal->keyboard()->getKeyValue(_data.hal->keyboard()->getKey()).value_first, "enter") == 0)
-        // if (_data.hal->homeButton()->pressed())
-        {
-            // printf("2222\n");
-
-
-            if (_speaker->isEnabled())
-            {
-                // _canvas->clear();
-                _canvas->fillScreen(THEME_COLOR_BG);
-                while (_mic->isRecording())
-                {
-                    delay(1);
-                }
-
-                /// Since the microphone and speaker cannot be used at the same time, turn off the microphone here.
-                _mic->end();
-                _speaker->begin();
-
-                // _canvas->setCursor(0, 40);
-                // _canvas->print(" PLAY");
-
-
-                _canvas->setCursor(10, 0);
-                _canvas->setFont(FONT_REPL);
-                _canvas->setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-                _canvas->setTextSize(1);
-                _canvas->print("playing");
-
-
-
-                // _canvas->fillRect(0, 0, _canvas->width(), 25, _canvas->color565(20, 20, 20));
-                // _canvas->setTextSize(2);
-                // _canvas->setTextColor(TFT_WHITE);
-                // _canvas->drawCenterString("MIC Test", _canvas->width() / 2, 6);
-                // _canvas->setTextColor(TFT_ORANGE);
-
-                _canvas_update();
-
-
-
-                int start_pos = rec_record_idx * record_length;
-                if (start_pos < record_size)
-                {
-                    // _speaker->playRaw(&rec_data[start_pos], record_size - start_pos, record_samplerate, false, 1, 0);
-                    // _speaker->playRaw(&rec_data[start_pos], record_size - start_pos, record_samplerate, true, 1, 0);
-                    _speaker->playRaw(&rec_data[start_pos], record_size - start_pos, 22050, false);
-                }
-                if (start_pos > 0)
-                {
-                    // _speaker->playRaw(rec_data, start_pos, record_samplerate, false, 1, 0);
-                    // _speaker->playRaw(rec_data, start_pos, record_samplerate, true, 1, 0);
-                    _speaker->playRaw(rec_data, start_pos, 22050, false);
-                }
-                do
-                {
-                    delay(1);
-                } while (_speaker->isPlaying());
-
-                /// Since the microphone and speaker cannot be used at the same time, turn off the speaker here.
-                _speaker->end();
-                _mic->begin();
-
-                // _canvas->clear();
-                _canvas->fillScreen(THEME_COLOR_BG);
-                // _canvas->setCursor(0, 40);
-                // _canvas->print(" REC\n");
-                // _canvas->setTextSize(1);
-                // _canvas->print("  Press enter to play");
-                // _canvas->setTextSize(2);
-
-
-                _canvas->setCursor(10, 0);
-                _canvas->setFont(FONT_REPL);
-                _canvas->setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-                _canvas->setTextSize(1);
-                _canvas->print("Press enter to play");
-
-
-                // _canvas->fillRect(0, 0, _canvas->width(), 25, _canvas->color565(20, 20, 20));
-                // _canvas->setTextSize(2);
-                // _canvas->setTextColor(TFT_WHITE);
-                // _canvas->drawCenterString("MIC Test", _canvas->width() / 2, 6);
-                // _canvas->setTextColor(TFT_ORANGE);
-
-
-                _canvas_update();
-            }
-        }
-    }
-
-
-    // }
-    
-
-
-    else if (_data.hal->homeButton()->pressed()) 
-    {
-        while (_mic->isRecording()) { delay(1); }
-
-        /// Since the microphone and speaker cannot be used at the same time, turn off the microphone here.
-        _mic->end();
-        _speaker->begin();
-
-        free(rec_data);
-        // break;
-
-        _data.hal->playNextSound();
-        destroyApp();
+    // Close app when home button clicked
+    if (GetHAL().homeButton.wasClicked()) {
+        // GetHAL().speaker.setVolume(90);
+        // audio::play_random_tone();
+        close();
     }
 }
 
+void AppRecord::onClose()
+{
+    mclog::tagInfo(getAppInfo().name, "on close");
+
+    // Stop recording if active
+    while (GetHAL().mic.isRecording()) {
+        GetHAL().delay(1);
+    }
+
+    // Cleanup audio devices
+    GetHAL().mic.end();
+    GetHAL().speaker.begin();
+    GetHAL().speaker.setVolume(255);
+
+    // Free memory
+    if (_rec_data) {
+        delete[] _rec_data;
+        _rec_data = nullptr;
+    }
+
+    audio::set_keyboard_sfx_enable(true);
+}
+
+void AppRecord::start_recording()
+{
+    // Since microphone and speaker cannot be used at the same time, turn off speaker
+    GetHAL().speaker.end();
+    GetHAL().speaker.setVolume(255);
+
+    auto cfg = GetHAL().mic.config();
+    // cfg.over_sampling = 1;
+    cfg.magnification      = 128;
+    cfg.noise_filter_level = 2;
+    GetHAL().mic.config(cfg);
+    GetHAL().mic.begin();
+
+    _is_recording = true;
+}
+
+void AppRecord::start_playback()
+{
+    if (!GetHAL().speaker.isEnabled()) {
+        return;
+    }
+
+    // Stop recording and start playback
+    while (GetHAL().mic.isRecording()) {
+        GetHAL().delay(1);
+    }
+
+    GetHAL().mic.end();
+    GetHAL().speaker.begin();
+    GetHAL().speaker.setVolume(255);
+
+    render_page_playing();
+
+    // Play recorded data
+    int start_pos = _rec_record_idx * RECORD_LENGTH;
+    if (start_pos < RECORD_SIZE) {
+        GetHAL().speaker.playRaw(&_rec_data[start_pos], RECORD_SIZE - start_pos, PLAYBACK_SAMPLERATE, false);
+    }
+    if (start_pos > 0) {
+        GetHAL().speaker.playRaw(_rec_data, start_pos, PLAYBACK_SAMPLERATE, false);
+    }
+
+    // Wait for playback to finish
+    do {
+        GetHAL().delay(1);
+    } while (GetHAL().speaker.isPlaying());
+
+    // Resume recording
+    start_recording();
+    render_page_recording();
+}
+
+void AppRecord::render_page_recording()
+{
+    GetHAL().canvas.fillScreen(THEME_COLOR_BG);
+    GetHAL().canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
+    GetHAL().canvas.setCursor(10, 0);
+    GetHAL().canvas.setTextSize(1);
+    GetHAL().canvas.print("Press enter to play");
+    GetHAL().pushCanvas();
+}
+
+void AppRecord::render_page_playing()
+{
+    GetHAL().canvas.fillScreen(THEME_COLOR_BG);
+    GetHAL().canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
+    GetHAL().canvas.setCursor(10, 0);
+    GetHAL().canvas.setTextSize(1);
+    GetHAL().canvas.print("playing");
+    GetHAL().pushCanvas();
+}
+
+void AppRecord::render_waveform()
+{
+    if (!_rec_data) {
+        return;
+    }
+
+    auto data = &_rec_data[_rec_record_idx * RECORD_LENGTH];
+
+    if (GetHAL().mic.record(data, RECORD_LENGTH, RECORD_SAMPLERATE)) {
+        data = &_rec_data[_draw_record_idx * RECORD_LENGTH];
+
+        // 清除波形区域（避免重叠绘制）
+        int32_t waveform_top    = 15;  // 文字下方
+        int32_t waveform_height = GetHAL().canvas.height() - waveform_top;
+        GetHAL().canvas.fillRect(10, waveform_top, RECORD_LENGTH, waveform_height, THEME_COLOR_BG);
+
+        int32_t w = GetHAL().canvas.width();
+        if (w > RECORD_LENGTH) {
+            w = RECORD_LENGTH;
+        }
+
+        // 直接用录音数据画点 - 无需额外缓冲区
+        int32_t center_y           = waveform_top + waveform_height / 2;
+        static constexpr int shift = 8;  // 调整振幅显示
+
+        for (int32_t x = 0; x < w; ++x) {
+            // 计算波形点的y坐标
+            int32_t sample_value = data[x] >> shift;
+            int32_t y            = center_y + sample_value;
+
+            // 限制在波形区域内
+            if (y < waveform_top) y = waveform_top;
+            if (y >= waveform_top + waveform_height) y = waveform_top + waveform_height - 1;
+
+            // 画点 - 使用2x2像素块让点更明显
+            GetHAL().canvas.drawPixel(x + 10, y, TFT_WHITE);
+            GetHAL().canvas.drawPixel(x + 11, y, TFT_WHITE);
+            GetHAL().canvas.drawPixel(x + 10, y + 1, TFT_WHITE);
+            GetHAL().canvas.drawPixel(x + 11, y + 1, TFT_WHITE);
+        }
+
+        // 重绘UI文字
+        GetHAL().canvas.setCursor(10, 0);
+        GetHAL().canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
+        GetHAL().canvas.setTextSize(1);
+        GetHAL().canvas.print("Press enter to play");
+
+        GetHAL().pushCanvas();
+
+        // 更新循环缓冲区索引
+        if (++_draw_record_idx >= RECORD_NUMBER) {
+            _draw_record_idx = 0;
+        }
+        if (++_rec_record_idx >= RECORD_NUMBER) {
+            _rec_record_idx = 0;
+        }
+    }
+}
+
+void AppRecord::handle_enter_key()
+{
+    start_playback();
+}

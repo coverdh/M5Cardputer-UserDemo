@@ -1,27 +1,77 @@
 dependencies:
   espressif/cmake_utilities:
     component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
     source:
-      service_url: https://api.components.espressif.com/
+      registry_url: https://components.espressif.com
       type: service
     version: 0.5.3
   espressif/esp-now:
-    component_hash: 5ad630168194ad0134b28194852dda1616a1231680ef477cc6e0fc5eb5fc6233
+    component_hash: 56f902e978ec0b70528ad30a45265b56bf2b91653d13e0badc78159f39f41ece
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    - name: idf
+      require: private
+      version: '>=4.4'
     source:
-      service_url: https://api.components.espressif.com/
+      registry_url: https://components.espressif.com/
       type: service
-    version: 2.5.1
+    version: 2.5.2
+  espressif/esp_tinyusb:
+    component_hash: 96d232ced7afe1976119b62f7fbf1944a2a78b36228ff6f7b9318394ac1153cc
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    - name: espressif/tinyusb
+      registry_url: https://components.espressif.com
+      require: public
+      version: '>=0.14.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.6~1
+  espressif/tinyusb:
+    component_hash: a40b7f67df6ac254a4afd96c6401cc56f2059ae747d6d7e66b568bca53ad0edc
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    - esp32h4
+    - esp32s31
+    version: 0.19.0~3
   idf:
-    component_hash: null
     source:
       type: idf
-    version: 4.4.6
-  leeebo/tinyusb_src:
-    component_hash: f9d730e3145f97949745e6432a9114c5f114c3bcde273b167ece4de7b9243927
+    version: 5.4.2
+  jgromes/radiolib:
+    component_hash: 7e367fd420aa66da05687e00dc3775c5891cd8236eee56d9d797d6eb04bb1918
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
     source:
-      service_url: https://api.components.espressif.com/
+      registry_url: https://components.espressif.com/
       type: service
-    version: 0.16.0~4
-manifest_hash: 757ffdd1f72d060667a404560cb6428aa61b2fd425c30f13d51741db70d4bd55
+    version: 7.2.1
+direct_dependencies:
+- espressif/esp-now
+- espressif/esp_tinyusb
+- idf
+- jgromes/radiolib
+manifest_hash: 11dfa23746cd56272c7e2231f3316fed15687713e403eee1876bad6e4bb0f037
 target: esp32s3
-version: 1.0.0
+version: 2.0.0

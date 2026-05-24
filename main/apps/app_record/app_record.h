@@ -1,49 +1,44 @@
-/**
- * @file app_record.h
- * @author Forairaaaaa
- * @brief 
- * @version 0.1
- * @date 2023-09-19
- * 
- * @copyright Copyright (c) 2023
- * 
+/*
+ * SPDX-FileCopyrightText: 2025 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
  */
 #pragma once
 #include <mooncake.h>
-#include "../../hal/hal.h"
-#include "../utils/theme/theme_define.h"
-#include "../utils/anim/anim_define.h"
-#include "../utils/icon/icon_define.h"
+#include <cstdint>
+#include <hal/hal.h>
 
-#include "assets/record_big.h"
-#include "assets/record_small.h"
+/**
+ * @brief
+ *
+ */
+class AppRecord : public mooncake::AppAbility {
+public:
+    AppRecord();
+    ~AppRecord();
 
+    void onOpen() override;
+    void onRunning() override;
+    void onClose() override;
 
-namespace MOONCAKE
-{
-    namespace APPS
-    {
-        class AppRecord : public APP_BASE
-        {
-            private:
-                struct Data_t
-                {
-                    HAL::Hal* hal = nullptr;
-                };
-                Data_t _data;
+private:
+    // 16000Hz采样率，1秒 = 16000个采样点，按200像素宽度分成80个缓冲区
+    static constexpr size_t RECORD_NUMBER       = 80;   // 16000/200 = 80个缓冲区，正好1秒
+    static constexpr size_t RECORD_LENGTH       = 200;  // 屏幕宽度
+    static constexpr size_t RECORD_SIZE         = RECORD_NUMBER * RECORD_LENGTH;
+    static constexpr size_t RECORD_SAMPLERATE   = 16000;
+    static constexpr size_t PLAYBACK_SAMPLERATE = 16000;
 
-            public:
-                void onCreate() override;
-                void onResume() override;
-                void onRunning() override;
-        };
+    uint32_t _time_count    = 0;
+    int16_t* _rec_data      = nullptr;
+    size_t _rec_record_idx  = 2;
+    size_t _draw_record_idx = 0;
+    bool _is_recording      = true;
 
-        class AppRecord_Packer : public APP_PACKER_BASE
-        {
-            std::string getAppName() override { return "RECORD"; }
-            void* getAppIcon() override { return (void*)(new AppIcon_t(image_data_record_big, image_data_record_small)); }
-            void* newApp() override { return new AppRecord; }
-            void deleteApp(void *app) override { delete (AppRecord*)app; }
-        };
-    }
-}
+    void render_page_recording();
+    void render_page_playing();
+    void render_waveform();
+    void handle_enter_key();
+    void start_recording();
+    void start_playback();
+};
