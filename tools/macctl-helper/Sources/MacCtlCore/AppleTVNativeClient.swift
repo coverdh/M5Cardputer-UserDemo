@@ -150,12 +150,28 @@ public final class AppleTVNativeClient {
         if let override = ProcessInfo.processInfo.environment["ADVCTL_PYTHON"], !override.isEmpty {
             return URL(fileURLWithPath: override)
         }
-        for path in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"] {
+        for path in ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
             if FileManager.default.isExecutableFile(atPath: path) {
-                return URL(fileURLWithPath: path)
+                let url = URL(fileURLWithPath: path)
+                if isPythonCompatibleForPyATV(url) {
+                    return url
+                }
             }
         }
-        throw AppleTVNativeError.processFailed("python3 was not found")
+        throw AppleTVNativeError.processFailed("compatible python3 was not found")
+    }
+
+    private static func isPythonCompatibleForPyATV(_ url: URL) -> Bool {
+        let process = Process()
+        process.executableURL = url
+        process.arguments = ["-c", "import inspect; raise SystemExit(0 if hasattr(inspect, 'getargspec') else 1)"]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 
     public func scan(timeout: Int = 5) async throws -> [AppleTVNativeDevice] {
@@ -354,6 +370,7 @@ public final class AppleTVNativePairingSession {
     private let error: Pipe
     private let eventHandler: (AppleTVNativePairingEvent) -> Void
     private var outputBuffer = Data()
+    private var errorBuffer = Data()
 
     init(pythonURL: URL,
          scriptURL: URL,
@@ -378,21 +395,26 @@ public final class AppleTVNativePairingSession {
             guard let self else { return }
             let data = handle.availableData
             if data.isEmpty { return }
-            let text = String(data: data, encoding: .utf8) ?? "Apple TV pairing failed"
-            self.eventHandler(AppleTVNativePairingEvent(event: "error", message: text, deviceProvidesPin: nil, pin: nil, paired: nil))
+            self.errorBuffer.append(data)
         }
         process.terminationHandler = { [weak self] process in
             self?.output.fileHandleForReading.readabilityHandler = nil
             self?.error.fileHandleForReading.readabilityHandler = nil
             if process.terminationStatus != 0 {
+                let text = self.flatMap { String(data: $0.errorBuffer, encoding: .utf8) }?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 self?.eventHandler(AppleTVNativePairingEvent(event: "error",
-                                                             message: "Pairing process exited with \(process.terminationStatus)",
+                                                             message: text?.isEmpty == false ? text! : "Pairing process exited with \(process.terminationStatus)",
                                                              deviceProvidesPin: nil,
                                                              pin: nil,
                                                              paired: false))
             }
         }
         try process.run()
+    }
+
+    deinit {
+        cancel()
     }
 
     public func submit(pin: String) {
