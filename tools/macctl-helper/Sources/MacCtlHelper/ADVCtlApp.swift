@@ -1326,6 +1326,10 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
         appleTVStatus = status
     }
 
+    func updateAppleTVPin(_ pin: String) {
+        setAppleTVPin(pin)
+    }
+
     func updateAppleTVDevices(_ devices: [AppleTVNativeDevice]) {
         appleTVDevices = devices
         if selectedAppleTVID.isEmpty || !devices.contains(where: { $0.id == selectedAppleTVID }) {
@@ -1573,6 +1577,10 @@ private final class SettingsWindowController: NSWindowController, NSToolbarDeleg
         if let pairingActive {
             viewModel.appleTVPairingActive = pairingActive
         }
+    }
+
+    func updateAppleTVPin(_ pin: String) {
+        viewModel.updateAppleTVPin(pin)
     }
 
     func updateAppleTVDevices(_ devices: [AppleTVNativeDevice]) {
@@ -2464,6 +2472,7 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
             return
         }
         appleTVPairingSession?.cancel()
+        settingsWindow.updateAppleTVPin("")
         settingsWindow.updateAppleTVStatus("正在开始配对", pairingActive: true)
         do {
             appleTVPairingSession = try appleTVNative.startPairing(identifier: identifier, proto: proto) { [weak self] event in
@@ -2489,12 +2498,15 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         switch event.event {
         case "pin_required":
             if event.deviceProvidesPin == false, let pin = event.pin {
+                settingsWindow.updateAppleTVPin(pin)
                 settingsWindow.updateAppleTVStatus("在 Apple TV 上输入 PIN \(pin)", pairingActive: true)
             } else {
+                settingsWindow.updateAppleTVPin("")
                 settingsWindow.updateAppleTVStatus("输入 Apple TV 屏幕上的 PIN", pairingActive: true)
             }
         case "paired":
             appleTVPairingSession = nil
+            settingsWindow.updateAppleTVPin("")
             if event.paired == true {
                 settings.appleTVIdentifier = identifier
                 settings.appleTVPairingProtocol = proto
@@ -2510,6 +2522,7 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
             }
         case "error":
             appleTVPairingSession = nil
+            settingsWindow.updateAppleTVPin("")
             settingsWindow.updateAppleTVStatus("配对失败：\(event.message ?? "未知错误")", pairingActive: false)
         default:
             settingsWindow.updateAppleTVStatus(event.message ?? event.event)
