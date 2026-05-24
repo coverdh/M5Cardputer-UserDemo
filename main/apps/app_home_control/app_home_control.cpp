@@ -1420,6 +1420,10 @@ bool AppHomeControl::handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEve
 
 void AppHomeControl::forwardKeyboardEvent(const Keyboard::KeyEvent_t& keyEvent)
 {
+    if (GetHAL().bleMacSystemControlKey(keyEvent)) {
+        return;
+    }
+
     uint8_t modifier = GetHAL().keyboard.getModifierMask() | keyEvent.extraModifiers;
     KeScanCode_t key = keyEvent.isModifier ? KEY_NONE : keyEvent.keyCode;
     if (!keyEvent.state) {

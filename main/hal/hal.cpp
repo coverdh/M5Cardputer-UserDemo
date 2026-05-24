@@ -954,6 +954,42 @@ void Hal::bleConsumerSend(uint16_t usageId)
     ble_hid_device_helper_send_consumer(usageId);
 }
 
+bool Hal::bleMacSystemControlKey(const Keyboard::KeyEvent_t& keyEvent)
+{
+    if (!keyboard.isFnPressed()) {
+        return false;
+    }
+
+    uint16_t usageId = 0;
+    switch (keyEvent.keyCode) {
+        case KEY_F1:
+            usageId = BLE_HID_CONSUMER_BRIGHTNESS_DOWN;
+            break;
+        case KEY_F2:
+            usageId = BLE_HID_CONSUMER_BRIGHTNESS_UP;
+            break;
+        case KEY_F7:
+            usageId = BLE_HID_CONSUMER_SCAN_PREVIOUS_TRACK;
+            break;
+        case KEY_F8:
+            usageId = BLE_HID_CONSUMER_PLAY_PAUSE;
+            break;
+        case KEY_F9:
+            usageId = BLE_HID_CONSUMER_SCAN_NEXT_TRACK;
+            break;
+        case KEY_F10:
+            usageId = BLE_HID_CONSUMER_MUTE;
+            break;
+        default:
+            return false;
+    }
+
+    if (keyEvent.state) {
+        bleConsumerSend(usageId);
+    }
+    return true;
+}
+
 bool Hal::bleMacCtlVolumeDelta(int8_t delta)
 {
     if (!ble_hid_device_helper_is_ready()) {
@@ -1048,6 +1084,10 @@ void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
 
     // Only forward once the host subscribed to HID input notifications.
     if (!ble_hid_device_helper_is_ready()) {
+        return;
+    }
+
+    if (bleMacSystemControlKey(keyEvent)) {
         return;
     }
 
