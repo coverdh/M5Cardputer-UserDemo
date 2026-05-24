@@ -49,6 +49,8 @@ private let hidKeyF15: UInt8 = 0x6A
 private let macKeyF13: UInt16 = 0x69
 private let macKeyF14: UInt16 = 0x6B
 private let macKeyF15: UInt16 = 0x71
+private let macKeyC: CGKeyCode = 0x08
+private let macKeySpace: CGKeyCode = 0x31
 private let systemDefinedKeyDownSubtype: Int16 = 8
 private let systemDefinedKeyStateDown = 0x0A
 private let nxKeyTypeBrightnessDown = 3
@@ -955,6 +957,13 @@ private final class ADVCtlBridge {
 
         Task {
             do {
+                if case .systemKey(let key) = command {
+                    self.handleSystemKey(key)
+                    self.updateMessage("Handled \(command)")
+                    self.markCommandHandled()
+                    return
+                }
+
                 let appleTVIdentifier = self.configuredAppleTVIdentifier
                 if !appleTVIdentifier.isEmpty {
                     let session = try commandSession(for: appleTVIdentifier)
@@ -963,6 +972,8 @@ private final class ADVCtlBridge {
                         session.sendVolumeDelta(delta * self.knobVolumeStep)
                     case .playPause:
                         session.sendPlayPause()
+                    case .systemKey:
+                        break
                     }
                     self.updateMessage("Handled \(command) via Apple TV")
                 } else if let homeAssistant {
@@ -971,6 +982,8 @@ private final class ADVCtlBridge {
                         try await homeAssistant.handle(.volumeDelta(delta * self.knobVolumeStep))
                     case .playPause:
                         try await homeAssistant.handle(command)
+                    case .systemKey:
+                        break
                     }
                     self.updateMessage("Handled \(command)")
                 } else {
@@ -981,6 +994,26 @@ private final class ADVCtlBridge {
                 self.updateMessage("Media request failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func handleSystemKey(_ key: MacCtlSystemKey) {
+        switch key {
+        case .controlCenter:
+            postKeyTap(keyCode: macKeyC, flags: .maskSecondaryFn)
+        case .spotlight:
+            postKeyTap(keyCode: macKeySpace, flags: .maskCommand)
+        }
+    }
+
+    private func postKeyTap(keyCode: CGKeyCode, flags: CGEventFlags) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+        keyDown?.flags = flags
+        keyUp?.flags = flags
+        keyDown?.post(tap: .cghidEventTap)
+        usleep(20_000)
+        keyUp?.post(tap: .cghidEventTap)
     }
 
     private func markCommandHandled() {
@@ -2580,6 +2613,13 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
             knobStatus = delta > 0 ? "旋钮：音量 +\(delta)" : "旋钮：音量 \(delta)"
         case .playPause:
             knobStatus = "旋钮：按下"
+        case .systemKey(let key):
+            switch key {
+            case .controlCenter:
+                knobStatus = "快捷键：控制中心"
+            case .spotlight:
+                knobStatus = "快捷键：聚焦"
+            }
         }
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
     }

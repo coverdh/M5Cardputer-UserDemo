@@ -127,6 +127,7 @@ public:
     void bleMouseClick(uint8_t buttons);
     void bleConsumerSend(uint16_t usageId);
     bool bleMacSystemControlKey(const Keyboard::KeyEvent_t& keyEvent);
+    bool bleMacCtlSystemKey(uint8_t key);
     struct MacCtlNowPlayingState {
         bool active = false;
         bool playing = false;

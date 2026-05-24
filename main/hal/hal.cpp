@@ -968,6 +968,16 @@ bool Hal::bleMacSystemControlKey(const Keyboard::KeyEvent_t& keyEvent)
         case KEY_F2:
             usageId = BLE_HID_CONSUMER_BRIGHTNESS_UP;
             break;
+        case KEY_F3:
+            if (keyEvent.state) {
+                bleMacCtlSystemKey(BLE_HID_MACCTL_SYSTEM_CONTROL_CENTER);
+            }
+            return true;
+        case KEY_F4:
+            if (keyEvent.state) {
+                bleMacCtlSystemKey(BLE_HID_MACCTL_SYSTEM_SPOTLIGHT);
+            }
+            return true;
         case KEY_F7:
             usageId = BLE_HID_CONSUMER_SCAN_PREVIOUS_TRACK;
             break;
@@ -1012,6 +1022,18 @@ bool Hal::bleMacCtlPlayPause()
     }
 
     return ble_hid_device_helper_send_macctl_play_pause();
+}
+
+bool Hal::bleMacCtlSystemKey(uint8_t key)
+{
+    if (!ble_hid_device_helper_is_ready()) {
+        return false;
+    }
+    if (!s_advctl_control_ready) {
+        return false;
+    }
+
+    return ble_hid_device_helper_send_macctl_system_key(key);
 }
 
 bool Hal::bleMacCtlConfig(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)

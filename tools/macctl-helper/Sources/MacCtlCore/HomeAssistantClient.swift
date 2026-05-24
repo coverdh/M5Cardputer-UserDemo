@@ -55,6 +55,8 @@ public final class HomeAssistantClient {
             try await applyVolumeDelta(delta)
         case .playPause:
             try await toggleMute()
+        case .systemKey:
+            return
         }
     }
 

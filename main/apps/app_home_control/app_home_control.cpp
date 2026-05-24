@@ -1168,7 +1168,7 @@ void AppHomeControl::renderStatusBar()
 
 void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
 {
-    if (_screen_off) {
+    if (_screen_off && _power_save_active) {
         if (keyEvent.state) {
             wakeDisplay();
         }

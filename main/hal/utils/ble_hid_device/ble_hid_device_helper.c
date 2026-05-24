@@ -118,6 +118,7 @@ static uint8_t s_ble_hid_last_macctl_feature_len = 0;
 
 #define MACCTL_CMD_VOLUME_DELTA 1
 #define MACCTL_CMD_PLAY_PAUSE   2
+#define MACCTL_CMD_SYSTEM_KEY   3
 #define MACCTL_LED_CMD_PREFIX      0x1F
 #define MACCTL_LED_CMD_AUDIO_STOP  0x10
 #define MACCTL_LED_CMD_AUDIO_START 0x11
@@ -1595,6 +1596,11 @@ bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta)
 bool ble_hid_device_helper_send_macctl_play_pause(void)
 {
     return ble_hid_device_helper_queue_macctl_command(MACCTL_CMD_PLAY_PAUSE, 0);
+}
+
+bool ble_hid_device_helper_send_macctl_system_key(uint8_t key)
+{
+    return ble_hid_device_helper_queue_macctl_command(MACCTL_CMD_SYSTEM_KEY, (int8_t)key);
 }
 
 bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity, uint8_t knob_mode)
