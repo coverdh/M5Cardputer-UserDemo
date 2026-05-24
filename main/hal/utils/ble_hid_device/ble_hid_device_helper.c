@@ -27,9 +27,14 @@
 #include "host/ble_gap.h"
 #include "host/ble_store.h"
 #include "host/ble_hs.h"
+#include "host/ble_att.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs_mbuf.h"
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "os/os_mbuf.h"
+#include "services/hid/ble_svc_hid.h"
 #else
 #include "esp_bt_defs.h"
 #if CONFIG_BT_BLE_ENABLED
@@ -81,6 +86,12 @@ static ble_hid_device_helper_output_callback_t s_ble_hid_output_callback = NULL;
 static TickType_t s_ble_hid_last_drop_log  = 0;
 static TickType_t s_ble_hid_connected_tick = 0;
 static uint32_t s_ble_hid_connection_seq   = 0;
+static uint16_t s_ble_hid_macctl_output_handle = 0;
+static uint16_t s_ble_hid_macctl_feature_handle = 0;
+static uint8_t s_ble_hid_last_macctl_output[BLE_HID_MACCTL_REPORT_LEN] = {0};
+static uint8_t s_ble_hid_last_macctl_output_len = 0;
+static uint8_t s_ble_hid_last_macctl_feature[BLE_HID_MACCTL_REPORT_LEN] = {0};
+static uint8_t s_ble_hid_last_macctl_feature_len = 0;
 #endif
 
 #define BLE_HID_READY_DELAY_MS 2000
@@ -298,6 +309,117 @@ static void ble_hid_device_helper_handle_keyboard_output(const uint8_t* data, ui
         s_ble_hid_output_callback(command, sizeof(command));
     }
 }
+
+#if CONFIG_BT_NIMBLE_ENABLED
+typedef int ble_att_svr_access_fn(uint16_t conn_handle, uint16_t attr_handle, uint8_t op, uint16_t offset,
+                                  struct os_mbuf **om, void *arg);
+
+struct ble_att_svr_entry {
+    void *ha_next;
+    const ble_uuid_t *ha_uuid;
+    uint8_t ha_flags;
+    uint8_t ha_min_key_size;
+    uint16_t ha_handle_id;
+    ble_att_svr_access_fn *ha_cb;
+    void *ha_cb_arg;
+};
+
+struct ble_att_svr_entry *ble_att_svr_find_by_uuid(struct ble_att_svr_entry *start_at, const ble_uuid_t *uuid,
+                                                   uint16_t end_handle);
+
+static bool ble_hid_device_helper_read_local_report(uint16_t handle, uint8_t *buffer, uint8_t *len)
+{
+    if (!handle || !buffer || !len) {
+        return false;
+    }
+
+    struct os_mbuf *om = NULL;
+    const int rc = ble_att_svr_read_local(handle, &om);
+    if (rc != 0 || !om) {
+        return false;
+    }
+
+    uint16_t out_len = 0;
+    const int flat_rc = ble_hs_mbuf_to_flat(om, buffer, BLE_HID_MACCTL_REPORT_LEN, &out_len);
+    os_mbuf_free_chain(om);
+    if (flat_rc != 0 || out_len == 0 || out_len > BLE_HID_MACCTL_REPORT_LEN) {
+        return false;
+    }
+
+    *len = (uint8_t)out_len;
+    return true;
+}
+
+static void ble_hid_device_helper_discover_macctl_report_handles(void)
+{
+    if (s_ble_hid_macctl_output_handle && s_ble_hid_macctl_feature_handle) {
+        return;
+    }
+
+    const ble_uuid_t *report_ref_uuid = BLE_UUID16_DECLARE(BLE_SVC_HID_DSC_UUID16_RPT_REF);
+    struct ble_att_svr_entry *entry = NULL;
+    while ((entry = ble_att_svr_find_by_uuid(entry, report_ref_uuid, UINT16_MAX)) != NULL) {
+        const struct ble_gatt_dsc_def *dsc = (const struct ble_gatt_dsc_def *)entry->ha_cb_arg;
+        if (!dsc || !dsc->arg) {
+            continue;
+        }
+
+        uint8_t report_ref[2] = {0};
+        uint8_t report_ref_len = 0;
+        if (!ble_hid_device_helper_read_local_report(entry->ha_handle_id, report_ref, &report_ref_len) ||
+            report_ref_len < 2 || report_ref[0] != BLE_HID_RPT_ID_MACCTL) {
+            continue;
+        }
+
+        const uint16_t report_handle = *(const uint16_t *)dsc->arg;
+        if (report_ref[1] == BLE_SVC_HID_RPT_TYPE_OUTPUT) {
+            s_ble_hid_macctl_output_handle = report_handle;
+        } else if (report_ref[1] == BLE_SVC_HID_RPT_TYPE_FEATURE) {
+            s_ble_hid_macctl_feature_handle = report_handle;
+        }
+    }
+
+    if (s_ble_hid_macctl_output_handle || s_ble_hid_macctl_feature_handle) {
+        ESP_LOGI(TAG, "macctl report handles: output=%u feature=%u", s_ble_hid_macctl_output_handle,
+                 s_ble_hid_macctl_feature_handle);
+    }
+}
+
+static void ble_hid_device_helper_poll_one_macctl_report(uint16_t handle, uint8_t *last_data, uint8_t *last_len)
+{
+    if (!handle || !last_data || !last_len || !s_ble_hid_output_callback) {
+        return;
+    }
+
+    uint8_t data[BLE_HID_MACCTL_REPORT_LEN] = {0};
+    uint8_t len = 0;
+    if (!ble_hid_device_helper_read_local_report(handle, data, &len)) {
+        return;
+    }
+    if (len == *last_len && memcmp(data, last_data, len) == 0) {
+        return;
+    }
+
+    memcpy(last_data, data, len);
+    *last_len = len;
+    ESP_LOGI(TAG, "MACCTL write poll ID: %u, Len: %u, Data:", BLE_HID_RPT_ID_MACCTL, len);
+    ESP_LOG_BUFFER_HEX(TAG, data, len);
+    s_ble_hid_output_callback(data, len);
+}
+
+static void ble_hid_device_helper_poll_nimble_output_reports(void)
+{
+    if (!s_ble_hid_output_callback || !ble_hid_device_helper_is_ready()) {
+        return;
+    }
+
+    ble_hid_device_helper_discover_macctl_report_handles();
+    ble_hid_device_helper_poll_one_macctl_report(s_ble_hid_macctl_output_handle, s_ble_hid_last_macctl_output,
+                                                 &s_ble_hid_last_macctl_output_len);
+    ble_hid_device_helper_poll_one_macctl_report(s_ble_hid_macctl_feature_handle, s_ble_hid_last_macctl_feature,
+                                                 &s_ble_hid_last_macctl_feature_len);
+}
+#endif
 
 const unsigned char mediaReportMap[] = {
     0x05, 0x0C,                    // Usage Page (Consumer)
@@ -1509,6 +1631,13 @@ bool ble_hid_device_helper_send_macctl_audio(uint8_t sequence, const uint8_t* da
 void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback)
 {
     s_ble_hid_output_callback = callback;
+}
+
+void ble_hid_device_helper_poll_output_reports(void)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    ble_hid_device_helper_poll_nimble_output_reports();
+#endif
 }
 
 BleHidDeviceState_t ble_hid_device_helper_get_state(void)

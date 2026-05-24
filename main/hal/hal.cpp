@@ -1005,6 +1005,7 @@ bool Hal::bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len
 
 bool Hal::bleConsumeAudioTestRequest(bool& active)
 {
+    ble_hid_device_helper_poll_output_reports();
     if (!s_advctl_audio_test_pending) {
         return false;
     }

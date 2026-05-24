@@ -130,6 +130,8 @@ private func openBluetoothPreferences() {
 private struct HelperConfig {
     var homeAssistant: HomeAssistantConfig?
     var expectedCommands: Int?
+    var expectedAudioFrames: Int?
+    var audioE2ETimeoutSeconds: TimeInterval?
 
     static func load(arguments: [String] = CommandLine.arguments, environment: [String: String] = ProcessInfo.processInfo.environment) -> HelperConfig {
         var config = HelperConfig()
@@ -149,6 +151,10 @@ private struct HelperConfig {
                 values["ADVCTL_HA_TOKEN_FILE"] = value
             case "--entity":
                 values["ADVCTL_HA_ENTITY"] = value
+            case "--e2e-audio-frames":
+                values["ADVCTL_E2E_EXPECTED_AUDIO_FRAMES"] = value
+            case "--e2e-audio-timeout":
+                values["ADVCTL_E2E_AUDIO_TIMEOUT_SECONDS"] = value
             default:
                 continue
             }
@@ -165,6 +171,8 @@ private struct HelperConfig {
         }
 
         config.expectedCommands = (values["ADVCTL_E2E_EXPECTED_COMMANDS"] ?? values["MACCTL_E2E_EXPECTED_COMMANDS"]).flatMap(Int.init)
+        config.expectedAudioFrames = (values["ADVCTL_E2E_EXPECTED_AUDIO_FRAMES"] ?? values["MACCTL_E2E_EXPECTED_AUDIO_FRAMES"]).flatMap(Int.init)
+        config.audioE2ETimeoutSeconds = (values["ADVCTL_E2E_AUDIO_TIMEOUT_SECONDS"] ?? values["MACCTL_E2E_AUDIO_TIMEOUT_SECONDS"]).flatMap(TimeInterval.init)
         if let url = URL(string: urlString), let token = values["ADVCTL_HA_TOKEN"], !token.isEmpty {
             config.homeAssistant = HomeAssistantConfig(baseURL: url, token: token, entityID: entity)
         }
@@ -256,6 +264,7 @@ private final class ADVCtlBridge {
     private var pressedKnobKeys = Set<UInt8>()
     private var nowPlayingTask: Task<Void, Never>?
     private var audioDemandTimer: Timer?
+    private var audioE2ETimeoutTimer: Timer?
     private var manualAudioTestActive = false
     private var driverAudioDemandActive = false
     private var advAudioBridgeActive = false
@@ -279,6 +288,7 @@ private final class ADVCtlBridge {
     deinit {
         nowPlayingTask?.cancel()
         audioDemandTimer?.invalidate()
+        audioE2ETimeoutTimer?.invalidate()
         sendAudioBridgeActive(false, force: true, updateStatus: false)
         audioSink.stop()
         for registration in hidDevices {
@@ -341,6 +351,7 @@ private final class ADVCtlBridge {
         }
         startNowPlayingSync()
         startAudioDemandMonitor()
+        startAudioE2ETimeoutIfNeeded()
         syncAudioBridgeDemand(forceControl: true)
         delegate?.bridgeDidUpdateAudioStatus(audioSink.statusText, active: audioSink.isRunning)
     }
@@ -445,6 +456,19 @@ private final class ADVCtlBridge {
         }
         audioDemandTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.syncAudioBridgeDemand()
+        }
+    }
+
+    private func startAudioE2ETimeoutIfNeeded() {
+        guard let expectedFrames = config.expectedAudioFrames, expectedFrames > 0, audioE2ETimeoutTimer == nil else {
+            return
+        }
+        let timeout = max(3.0, config.audioE2ETimeoutSeconds ?? 30.0)
+        updateMessage("E2E waiting for \(expectedFrames) ADV audio frames within \(Int(timeout))s")
+        audioE2ETimeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
+            log("E2E audio timeout; received \(self.audioFrameCount) of \(expectedFrames) frames")
+            fflush(stderr)
+            exit(2)
         }
     }
 
@@ -747,6 +771,11 @@ private final class ADVCtlBridge {
                 let concealedFrames = concealMissingAudioPackets(before: sequence, payloadBytes: byteCount)
                 audioFrameCount += 1
                 let writtenFrames = audioSink.enqueueULaw(payload.subdata(in: 3..<(3 + byteCount)))
+                if let expectedFrames = config.expectedAudioFrames, expectedFrames > 0, audioFrameCount >= expectedFrames {
+                    log("E2E audio complete; received \(audioFrameCount) frames, wrote \(writtenFrames) samples, concealed \(concealedAudioPacketCount) packets")
+                    fflush(stdout)
+                    exit(0)
+                }
                 if audioFrameCount == 1 || audioFrameCount % 100 == 0 {
                     updateMessage("Received ADV audio frames: \(audioFrameCount), wrote \(writtenFrames) samples, concealed \(concealedAudioPacketCount) packets")
                 } else if concealedFrames > 0 {
