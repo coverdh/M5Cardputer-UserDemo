@@ -51,7 +51,6 @@ void AppHomeControl::onOpen()
 
     loadConfig();
     loadWifiConfig();
-    GetHAL().externalInput.calibrateJoystickCenter();
 
     _key_event_slot_id = GetHAL().keyboard.onKeyEvent.connect(
         [this](const Keyboard::KeyEvent_t& keyEvent) { handleKeyEvent(keyEvent); });
@@ -441,12 +440,11 @@ void AppHomeControl::handleBleControlRequests()
 
 void AppHomeControl::applyHardwareSettings(uint8_t flags, uint8_t sensitivity, uint8_t knobMode)
 {
-    const uint8_t clampedSensitivity = std::max<uint8_t>(2, std::min<uint8_t>(6, sensitivity));
+    const uint8_t clampedJoystickSensitivity = std::max<uint8_t>(1, std::min<uint8_t>(100, sensitivity));
     const uint8_t clampedKnobMode    = std::min<uint8_t>(2, knobMode);
     GetHAL().externalInput.setDirectionTransform((flags & 0x02) != 0, (flags & 0x04) != 0, (flags & 0x01) != 0);
-    _pointer_sensitivity = clampedSensitivity;
-    _knob_mode           = clampedKnobMode;
-    GetHAL().getSettings().SetInt("ptr_sens2", _pointer_sensitivity);
+    GetHAL().externalInput.setJoystickSensitivity(clampedJoystickSensitivity);
+    _knob_mode = clampedKnobMode;
     GetHAL().getSettings().SetInt("adv_knob_mode", _knob_mode);
     sendHardwareSettings();
     setStatus("Hardware settings saved");
@@ -454,7 +452,7 @@ void AppHomeControl::applyHardwareSettings(uint8_t flags, uint8_t sensitivity, u
 
 void AppHomeControl::resetHardwareSettings()
 {
-    applyHardwareSettings(0, 2, 0);
+    applyHardwareSettings(0, ExternalInput::DEFAULT_JOYSTICK_SENSITIVITY, 0);
     setStatus("Hardware reset");
 }
 
@@ -464,7 +462,7 @@ void AppHomeControl::sendHardwareSettings()
     if (GetHAL().externalInput.getSwapAxes()) flags |= 0x01;
     if (GetHAL().externalInput.getFlipX()) flags |= 0x02;
     if (GetHAL().externalInput.getFlipY()) flags |= 0x04;
-    GetHAL().bleMacCtlConfig(flags, static_cast<uint8_t>(_pointer_sensitivity), _knob_mode);
+    GetHAL().bleMacCtlConfig(flags, GetHAL().externalInput.getJoystickSensitivity(), _knob_mode);
 }
 
 void AppHomeControl::startAudioTest()

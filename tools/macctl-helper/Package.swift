@@ -15,6 +15,7 @@ let package = Package(
             name: "MacCtlHelper",
             dependencies: ["MacCtlCore"],
             exclude: ["Info.plist"],
+            resources: [.copy("Resources")],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("AppKit"),

@@ -36,6 +36,7 @@ private let advCtlNowPlayingArtistCommand: UInt8 = 0x89
 private let advCtlAudioFrameReport: UInt8 = 0xA0
 private let advCtlAudioStateReport: UInt8 = 0xA1
 private let advCtlAudioAckRetryInterval: TimeInterval = 2.0
+private let advCtlAudioMaxConcealedPackets = 16
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
@@ -129,6 +130,8 @@ private func openBluetoothPreferences() {
 private struct HelperConfig {
     var homeAssistant: HomeAssistantConfig?
     var expectedCommands: Int?
+    var expectedAudioFrames: Int?
+    var audioE2ETimeoutSeconds: TimeInterval?
 
     static func load(arguments: [String] = CommandLine.arguments, environment: [String: String] = ProcessInfo.processInfo.environment) -> HelperConfig {
         var config = HelperConfig()
@@ -148,6 +151,10 @@ private struct HelperConfig {
                 values["ADVCTL_HA_TOKEN_FILE"] = value
             case "--entity":
                 values["ADVCTL_HA_ENTITY"] = value
+            case "--e2e-audio-frames":
+                values["ADVCTL_E2E_EXPECTED_AUDIO_FRAMES"] = value
+            case "--e2e-audio-timeout":
+                values["ADVCTL_E2E_AUDIO_TIMEOUT_SECONDS"] = value
             default:
                 continue
             }
@@ -164,6 +171,8 @@ private struct HelperConfig {
         }
 
         config.expectedCommands = (values["ADVCTL_E2E_EXPECTED_COMMANDS"] ?? values["MACCTL_E2E_EXPECTED_COMMANDS"]).flatMap(Int.init)
+        config.expectedAudioFrames = (values["ADVCTL_E2E_EXPECTED_AUDIO_FRAMES"] ?? values["MACCTL_E2E_EXPECTED_AUDIO_FRAMES"]).flatMap(Int.init)
+        config.audioE2ETimeoutSeconds = (values["ADVCTL_E2E_AUDIO_TIMEOUT_SECONDS"] ?? values["MACCTL_E2E_AUDIO_TIMEOUT_SECONDS"]).flatMap(TimeInterval.init)
         if let url = URL(string: urlString), let token = values["ADVCTL_HA_TOKEN"], !token.isEmpty {
             config.homeAssistant = HomeAssistantConfig(baseURL: url, token: token, entityID: entity)
         }
@@ -205,12 +214,23 @@ private struct NowPlayingSnapshot: Equatable {
         title = attributes.mediaTitle ?? (active ? "Playing" : "")
         artist = attributes.mediaArtist ?? attributes.mediaAlbumName ?? ""
     }
+
+    init(state: AppleTVNativeState) {
+        active = state.active
+        playing = state.playing
+        muted = state.volumePercent == 0
+        volumePercent = state.volumePercent
+        progressPercent = state.progressPercent
+        title = state.title.isEmpty && active ? "Playing" : state.title
+        artist = state.artist
+    }
 }
 
 private protocol ADVCtlBridgeDelegate: AnyObject {
     func bridgeDidUpdateConnection(deviceCount: Int)
     func bridgeDidReceive(command: MacCtlCommand)
     func bridgeDidReceiveKnobKey(_ keyCode: UInt8)
+    func bridgeDidUpdateAppleTVVolume(_ volumePercent: Int)
     func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8)
     func bridgeDidReceivePowerSettings(screenTimeoutSeconds: UInt8, powerSaveTimeoutMinutes: UInt8)
     func bridgeDidUpdateAudioStatus(_ message: String, active: Bool)
@@ -248,6 +268,9 @@ private final class HIDDeviceRegistration {
 private final class ADVCtlBridge {
     private let config: HelperConfig
     private let homeAssistant: HomeAssistantClient?
+    private let appleTVNative = AppleTVNativeClient()
+    private var appleTVCommandSession: AppleTVNativeCommandSession?
+    private var appleTVCommandSessionIdentifier = ""
     private let audioSink = ADVCtlAudioRingSink()
     private var handledCommands = 0
     private var hidManager: IOHIDManager?
@@ -255,12 +278,15 @@ private final class ADVCtlBridge {
     private var pressedKnobKeys = Set<UInt8>()
     private var nowPlayingTask: Task<Void, Never>?
     private var audioDemandTimer: Timer?
+    private var audioE2ETimeoutTimer: Timer?
     private var manualAudioTestActive = false
     private var driverAudioDemandActive = false
     private var advAudioBridgeActive = false
     private var advAudioStateAcknowledged = true
     private var lastAudioBridgeCommandAt: TimeInterval = 0
     private var audioFrameCount = 0
+    private var expectedAudioFrameSequence: UInt8?
+    private var concealedAudioPacketCount = 0
     private var lastNowPlayingTextSignature = ""
     weak var delegate: ADVCtlBridgeDelegate?
 
@@ -273,9 +299,35 @@ private final class ADVCtlBridge {
         }
     }
 
+    private var configuredAppleTVIdentifier: String {
+        UserDefaults.standard.string(forKey: "advctl.appleTVIdentifier") ?? ""
+    }
+
+    private func commandSession(for identifier: String) throws -> AppleTVNativeCommandSession {
+        if let session = appleTVCommandSession,
+           session.isRunning,
+           appleTVCommandSessionIdentifier == identifier {
+            return session
+        }
+        appleTVCommandSession?.stop()
+        let session = try appleTVNative.startCommandSession(identifier: identifier) { [weak self] message in
+            guard !message.isEmpty else { return }
+            log("Apple TV worker: \(message)")
+            self?.handleAppleTVWorkerMessage(message)
+            if message.contains("\"event\": \"ready\"") || message.contains("\"event\":\"ready\"") {
+                self?.updateMessage("Apple TV control connected")
+            }
+        }
+        appleTVCommandSession = session
+        appleTVCommandSessionIdentifier = identifier
+        return session
+    }
+
     deinit {
         nowPlayingTask?.cancel()
+        appleTVCommandSession?.stop()
         audioDemandTimer?.invalidate()
+        audioE2ETimeoutTimer?.invalidate()
         sendAudioBridgeActive(false, force: true, updateStatus: false)
         audioSink.stop()
         for registration in hidDevices {
@@ -288,6 +340,10 @@ private final class ADVCtlBridge {
         if homeAssistant == nil {
             log("ADVCtl HA disabled; token not configured")
         }
+        if configuredAppleTVIdentifier.isEmpty {
+            log("ADVCtl Apple TV native control disabled; pair Apple TV in settings")
+        }
+        startAppleTVCommandSessionIfConfigured()
         let hidAccessGranted = requestHIDListenAccessIfNeeded()
 
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -338,6 +394,7 @@ private final class ADVCtlBridge {
         }
         startNowPlayingSync()
         startAudioDemandMonitor()
+        startAudioE2ETimeoutIfNeeded()
         syncAudioBridgeDemand(forceControl: true)
         delegate?.bridgeDidUpdateAudioStatus(audioSink.statusText, active: audioSink.isRunning)
     }
@@ -378,7 +435,30 @@ private final class ADVCtlBridge {
         syncAudioBridgeDemand(forceControl: true)
     }
 
+    func mediaConfigurationDidChange() {
+        startAppleTVCommandSessionIfConfigured()
+        if nowPlayingTask == nil {
+            startNowPlayingSync()
+        }
+    }
+
+    private func startAppleTVCommandSessionIfConfigured() {
+        let identifier = configuredAppleTVIdentifier
+        guard !identifier.isEmpty else {
+            return
+        }
+        do {
+            _ = try commandSession(for: identifier)
+            updateMessage("Connecting Apple TV control")
+        } catch {
+            updateMessage("Apple TV worker failed: \(error.localizedDescription)")
+        }
+    }
+
     @MainActor private func sendNowPlaying(_ snapshot: NowPlayingSnapshot) {
+        DispatchQueue.main.async {
+            self.delegate?.bridgeDidUpdateAppleTVVolume(Int(snapshot.volumePercent))
+        }
         var flags: UInt8 = 0
         if snapshot.active { flags |= 0x01 }
         if snapshot.playing { flags |= 0x02 }
@@ -413,15 +493,22 @@ private final class ADVCtlBridge {
     }
 
     private func startNowPlayingSync() {
-        guard let homeAssistant, nowPlayingTask == nil else {
+        guard nowPlayingTask == nil, homeAssistant != nil || !configuredAppleTVIdentifier.isEmpty else {
             return
         }
         nowPlayingTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
-                    let state = try await homeAssistant.fetchState()
-                    let snapshot = NowPlayingSnapshot(state: state)
-                    await self?.sendNowPlaying(snapshot)
+                    if let identifier = self?.configuredAppleTVIdentifier, !identifier.isEmpty {
+                        let state = try await self?.appleTVNative.fetchState(identifier: identifier)
+                        if let state {
+                            await self?.sendNowPlaying(NowPlayingSnapshot(state: state))
+                        }
+                    } else if let homeAssistant = self?.homeAssistant {
+                        let state = try await homeAssistant.fetchState()
+                        let snapshot = NowPlayingSnapshot(state: state)
+                        await self?.sendNowPlaying(snapshot)
+                    }
                 } catch {
                     await self?.sendNowPlaying(NowPlayingSnapshot(active: false,
                                                                   playing: false,
@@ -431,7 +518,8 @@ private final class ADVCtlBridge {
                                                                   title: "",
                                                                   artist: ""))
                 }
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                let hasAppleTV = !(self?.configuredAppleTVIdentifier ?? "").isEmpty
+                try? await Task.sleep(nanoseconds: hasAppleTV ? 15_000_000_000 : 3_000_000_000)
             }
         }
     }
@@ -442,6 +530,19 @@ private final class ADVCtlBridge {
         }
         audioDemandTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.syncAudioBridgeDemand()
+        }
+    }
+
+    private func startAudioE2ETimeoutIfNeeded() {
+        guard let expectedFrames = config.expectedAudioFrames, expectedFrames > 0, audioE2ETimeoutTimer == nil else {
+            return
+        }
+        let timeout = max(3.0, config.audioE2ETimeoutSeconds ?? 30.0)
+        updateMessage("E2E waiting for \(expectedFrames) ADV audio frames within \(Int(timeout))s")
+        audioE2ETimeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
+            log("E2E audio timeout; received \(self.audioFrameCount) of \(expectedFrames) frames")
+            fflush(stderr)
+            exit(2)
         }
     }
 
@@ -487,6 +588,7 @@ private final class ADVCtlBridge {
         }
         advAudioBridgeActive = active
         advAudioStateAcknowledged = false
+        resetAudioPacketTracking()
         lastAudioBridgeCommandAt = Date().timeIntervalSince1970
         sendControlPayload([advCtlAudioTestCommand, active ? 1 : 0, 0, 0],
                            successMessage: active ? "ADV microphone bridge activated" : "ADV microphone bridge stopped",
@@ -499,6 +601,38 @@ private final class ADVCtlBridge {
             return false
         }
         return Date().timeIntervalSince1970 - lastAudioBridgeCommandAt >= advCtlAudioAckRetryInterval
+    }
+
+    private func resetAudioPacketTracking() {
+        expectedAudioFrameSequence = nil
+        audioFrameCount = 0
+        concealedAudioPacketCount = 0
+    }
+
+    private func concealMissingAudioPackets(before sequence: UInt8, payloadBytes: Int) -> Int {
+        guard let expected = expectedAudioFrameSequence, payloadBytes > 0 else {
+            expectedAudioFrameSequence = sequence &+ 1
+            return 0
+        }
+
+        let distance = (Int(sequence) - Int(expected) + 256) % 256
+        expectedAudioFrameSequence = sequence &+ 1
+        guard distance > 0 else {
+            return 0
+        }
+
+        guard distance <= 127 else {
+            log("ADV audio sequence reset or stale packet: expected=\(expected) got=\(sequence)")
+            return 0
+        }
+
+        let missingPackets = min(distance, advCtlAudioMaxConcealedPackets)
+        concealedAudioPacketCount += missingPackets
+        let written = audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)
+        if distance > advCtlAudioMaxConcealedPackets {
+            log("ADV audio gap capped: missing=\(distance) concealed=\(missingPackets)")
+        }
+        return written
     }
 
     private func sendKeyboardLedAudioControl(active: Bool) {
@@ -557,14 +691,15 @@ private final class ADVCtlBridge {
                                   payload: inout [UInt8],
                                   reportWithID: inout [UInt8]) -> IOReturn {
         let attempts: [(IOHIDReportType, Bool, CFIndex)] = [
-            (kIOHIDReportTypeFeature, true, 0),
             (kIOHIDReportTypeOutput, true, 0),
-            (kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID)),
             (kIOHIDReportTypeOutput, false, CFIndex(advCtlReportID)),
-            (kIOHIDReportTypeFeature, true, CFIndex(advCtlReportID)),
             (kIOHIDReportTypeOutput, true, CFIndex(advCtlReportID)),
+            (kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID)),
+            (kIOHIDReportTypeFeature, true, 0),
+            (kIOHIDReportTypeFeature, true, CFIndex(advCtlReportID)),
         ]
         var lastStatus = kIOReturnUnsupported
+        var outputReportSent = false
         for (reportType, includeReportID, reportID) in attempts {
             let status: IOReturn
             if includeReportID {
@@ -590,9 +725,16 @@ private final class ADVCtlBridge {
             }
             if status == kIOReturnSuccess {
                 updateMessage("Sent control payload using \(reportType == kIOHIDReportTypeFeature ? "feature" : "output") report\(includeReportID ? " with id" : "") param=\(reportID)")
+                if reportType == kIOHIDReportTypeOutput {
+                    outputReportSent = true
+                    continue
+                }
                 return status
             }
             lastStatus = status
+        }
+        if outputReportSent {
+            return kIOReturnSuccess
         }
         return lastStatus
     }
@@ -687,6 +829,7 @@ private final class ADVCtlBridge {
         if payload.count >= 2, payload[0] == advCtlAudioStateReport {
             let active = payload[1] != 0
             advAudioStateAcknowledged = active == advAudioBridgeActive
+            resetAudioPacketTracking()
             updateMessage(active ? "ADV microphone started" : "ADV microphone stopped")
             DispatchQueue.main.async {
                 self.delegate?.bridgeDidUpdateAudioStatus(active ? "ADV microphone streaming" : self.audioSink.statusText,
@@ -696,12 +839,21 @@ private final class ADVCtlBridge {
         }
 
         if payload.count >= 3, payload[0] == advCtlAudioFrameReport {
+            let sequence = payload[1]
             let byteCount = min(Int(payload[2]), payload.count - 3)
             if byteCount > 0 {
+                let concealedFrames = concealMissingAudioPackets(before: sequence, payloadBytes: byteCount)
                 audioFrameCount += 1
                 let writtenFrames = audioSink.enqueueULaw(payload.subdata(in: 3..<(3 + byteCount)))
+                if let expectedFrames = config.expectedAudioFrames, expectedFrames > 0, audioFrameCount >= expectedFrames {
+                    log("E2E audio complete; received \(audioFrameCount) frames, wrote \(writtenFrames) samples, concealed \(concealedAudioPacketCount) packets")
+                    fflush(stdout)
+                    exit(0)
+                }
                 if audioFrameCount == 1 || audioFrameCount % 100 == 0 {
-                    updateMessage("Received ADV audio frames: \(audioFrameCount), wrote \(writtenFrames) samples")
+                    updateMessage("Received ADV audio frames: \(audioFrameCount), wrote \(writtenFrames) samples, concealed \(concealedAudioPacketCount) packets")
+                } else if concealedFrames > 0 {
+                    updateMessage("Concealed ADV audio gap before seq \(sequence): wrote \(concealedFrames) silence samples")
                 }
             }
             return
@@ -763,15 +915,19 @@ private final class ADVCtlBridge {
         let command: MacCtlCommand = keyCode == hidKeyF13 ? .volumeDelta(1) : .volumeDelta(-1)
         Task {
             do {
-                if let homeAssistant {
+                let appleTVIdentifier = self.configuredAppleTVIdentifier
+                if !appleTVIdentifier.isEmpty {
+                    try commandSession(for: appleTVIdentifier).sendVolumeDelta(keyCode == hidKeyF13 ? 1 : -1)
+                    self.updateMessage("Handled \(keyCode == hidKeyF13 ? "F13" : "F14") via Apple TV")
+                } else if let homeAssistant {
                     try await homeAssistant.handle(command)
                     self.updateMessage("Handled \(keyCode == hidKeyF13 ? "F13" : "F14") as \(command)")
                 } else {
-                    self.updateMessage("Received knob key; set ADVCTL_HA_TOKEN to enable HA control")
+                    self.updateMessage("Received knob key; pair Apple TV or set ADVCTL_HA_TOKEN")
                 }
                 self.markCommandHandled()
             } catch {
-                self.updateMessage("HA request failed: \(error.localizedDescription)")
+                self.updateMessage("Media request failed: \(error.localizedDescription)")
             }
         }
     }
@@ -783,15 +939,25 @@ private final class ADVCtlBridge {
 
         Task {
             do {
-                if let homeAssistant {
+                let appleTVIdentifier = self.configuredAppleTVIdentifier
+                if !appleTVIdentifier.isEmpty {
+                    let session = try commandSession(for: appleTVIdentifier)
+                    switch command {
+                    case .volumeDelta(let delta):
+                        session.sendVolumeDelta(delta)
+                    case .playPause:
+                        session.sendPlayPause()
+                    }
+                    self.updateMessage("Handled \(command) via Apple TV")
+                } else if let homeAssistant {
                     try await homeAssistant.handle(command)
                     self.updateMessage("Handled \(command)")
                 } else {
-                    self.updateMessage("Received \(command); set ADVCTL_HA_TOKEN to enable HA control")
+                    self.updateMessage("Received \(command); pair Apple TV or set ADVCTL_HA_TOKEN")
                 }
                 self.markCommandHandled()
             } catch {
-                self.updateMessage("HA request failed: \(error.localizedDescription)")
+                self.updateMessage("Media request failed: \(error.localizedDescription)")
             }
         }
     }
@@ -816,6 +982,24 @@ private final class ADVCtlBridge {
         log(message)
         DispatchQueue.main.async {
             self.delegate?.bridgeDidUpdateMessage(message)
+        }
+    }
+
+    private func handleAppleTVWorkerMessage(_ message: String) {
+        for line in message.split(whereSeparator: \.isNewline) {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let event = object["event"] as? String,
+                  event == "ok",
+                  let command = object["command"] as? String,
+                  command == "volume",
+                  let volume = object["volume"] as? Double else {
+                continue
+            }
+            let percent = min(100, max(0, Int(volume.rounded())))
+            DispatchQueue.main.async {
+                self.delegate?.bridgeDidUpdateAppleTVVolume(percent)
+            }
         }
     }
 }
@@ -1006,6 +1190,10 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     var onRequestAccessibility: (() -> Void)?
     var onRequestMicrophone: (() -> Void)?
     var onOpenBluetooth: (() -> Void)?
+    var onInstallAppleTVRuntime: (() -> Void)?
+    var onScanAppleTV: (() -> Void)?
+    var onStartAppleTVPairing: ((String, String) -> Void)?
+    var onSubmitAppleTVPin: ((String) -> Void)?
 
     @Published var selectedPage: ADVCtlSettingsPage = .install
     @Published var appInstallStatus = "检查中"
@@ -1030,10 +1218,17 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     @Published var swapAxes = false
     @Published var invertX = false
     @Published var invertY = false
-    @Published var sensitivity = 2
+    @Published var sensitivity = 50
     @Published var knobMode = 0
     @Published var screenTimeoutSeconds = 30
     @Published var powerSaveTimeoutMinutes = 3
+    @Published var appleTVRuntimeInstalled = false
+    @Published var appleTVStatus = "未配置"
+    @Published var appleTVDevices: [AppleTVNativeDevice] = []
+    @Published var selectedAppleTVID = ""
+    @Published var appleTVPairingProtocol = "airplay"
+    @Published var appleTVPin = ""
+    @Published var appleTVPairingActive = false
 
     init(settings: JoystickSettings) {
         self.settings = settings
@@ -1046,7 +1241,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     }
 
     var sensitivityLabel: String {
-        sensitivity.isMultiple(of: 2) ? "\(sensitivity / 2)x" : "\(sensitivity / 2).5x"
+        "\(sensitivity)"
     }
 
     var audioStateText: String {
@@ -1099,6 +1294,62 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
         knobMode = settings.knobMode
         screenTimeoutSeconds = settings.screenTimeoutSeconds
         powerSaveTimeoutMinutes = settings.powerSaveTimeoutMinutes
+        appleTVRuntimeInstalled = AppleTVNativeClient().isRuntimeInstalled
+        selectedAppleTVID = selectedAppleTVID.isEmpty ? settings.appleTVIdentifier : selectedAppleTVID
+        appleTVPairingProtocol = settings.appleTVPairingProtocol
+        if settings.appleTVConfigured {
+            let name = settings.appleTVName.isEmpty ? settings.appleTVIdentifier : settings.appleTVName
+            appleTVStatus = appleTVRuntimeInstalled ? "已配置 \(name)" : "需要安装运行时"
+        } else if appleTVRuntimeInstalled {
+            appleTVStatus = "可扫描 Apple TV"
+        } else {
+            appleTVStatus = "需要安装运行时"
+        }
+    }
+
+    var selectedAppleTVDevice: AppleTVNativeDevice? {
+        appleTVDevices.first { $0.id == selectedAppleTVID }
+    }
+
+    var selectedAppleTVProtocols: [String] {
+        let protocols = selectedAppleTVDevice?.services
+            .filter { $0.enabled && $0.pairing != "Unsupported" && $0.pairing != "Disabled" }
+            .map(\.proto) ?? []
+        return protocols.isEmpty ? ["airplay"] : protocols
+    }
+
+    var canStartAppleTVPairing: Bool {
+        appleTVRuntimeInstalled && !selectedAppleTVID.isEmpty && !appleTVPairingActive
+    }
+
+    func updateAppleTVStatus(_ status: String) {
+        appleTVStatus = status
+    }
+
+    func updateAppleTVDevices(_ devices: [AppleTVNativeDevice]) {
+        appleTVDevices = devices
+        if selectedAppleTVID.isEmpty || !devices.contains(where: { $0.id == selectedAppleTVID }) {
+            selectedAppleTVID = devices.first?.id ?? ""
+        }
+        if let device = selectedAppleTVDevice {
+            appleTVPairingProtocol = device.preferredPairingProtocol
+        }
+        appleTVStatus = devices.isEmpty ? "没有发现 Apple TV" : "发现 \(devices.count) 台设备"
+    }
+
+    func setSelectedAppleTVID(_ id: String) {
+        selectedAppleTVID = id
+        if let device = selectedAppleTVDevice {
+            appleTVPairingProtocol = device.preferredPairingProtocol
+        }
+    }
+
+    func setAppleTVPairingProtocol(_ value: String) {
+        appleTVPairingProtocol = value
+    }
+
+    func setAppleTVPin(_ value: String) {
+        appleTVPin = String(value.filter(\.isNumber).prefix(8))
     }
 
     func updateStatus(connected: Bool, knobStatus: String) {
@@ -1135,7 +1386,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     }
 
     func setSensitivity(_ value: Double) {
-        sensitivity = Int(round(value))
+        sensitivity = min(100, max(1, Int(round(value))))
         commitInputSettings()
     }
 
@@ -1235,6 +1486,22 @@ private final class SettingsWindowController: NSWindowController, NSToolbarDeleg
         get { viewModel.onOpenBluetooth }
         set { viewModel.onOpenBluetooth = newValue }
     }
+    var onInstallAppleTVRuntime: (() -> Void)? {
+        get { viewModel.onInstallAppleTVRuntime }
+        set { viewModel.onInstallAppleTVRuntime = newValue }
+    }
+    var onScanAppleTV: (() -> Void)? {
+        get { viewModel.onScanAppleTV }
+        set { viewModel.onScanAppleTV = newValue }
+    }
+    var onStartAppleTVPairing: ((String, String) -> Void)? {
+        get { viewModel.onStartAppleTVPairing }
+        set { viewModel.onStartAppleTVPairing = newValue }
+    }
+    var onSubmitAppleTVPin: ((String) -> Void)? {
+        get { viewModel.onSubmitAppleTVPin }
+        set { viewModel.onSubmitAppleTVPin = newValue }
+    }
 
     init(settings: JoystickSettings) {
         viewModel = ADVCtlSettingsViewModel(settings: settings)
@@ -1299,6 +1566,17 @@ private final class SettingsWindowController: NSWindowController, NSToolbarDeleg
 
     func updateAudioStatus(_ message: String, active: Bool) {
         viewModel.updateAudioStatus(message, active: active)
+    }
+
+    func updateAppleTVStatus(_ message: String, pairingActive: Bool? = nil) {
+        viewModel.updateAppleTVStatus(message)
+        if let pairingActive {
+            viewModel.appleTVPairingActive = pairingActive
+        }
+    }
+
+    func updateAppleTVDevices(_ devices: [AppleTVNativeDevice]) {
+        viewModel.updateAppleTVDevices(devices)
     }
 
     func refresh() {
@@ -1499,7 +1777,7 @@ private struct ADVCtlPointerView: View {
 
     var body: some View {
         SettingsScrollPage {
-            SettingsHeader(title: "指针", subtitle: "调整摇杆方向、轴映射和鼠标移动速度。这些设置会写入 ADV 固件。")
+            SettingsHeader(title: "指针", subtitle: "调整摇杆方向、轴映射和灵敏度。这些设置会写入 ADV 固件。")
             SettingsGroup("指针") {
                 ToggleRow(title: "交换 X/Y 轴",
                           isOn: Binding(get: { model.swapAxes }, set: { model.setSwapAxes($0) }))
@@ -1507,10 +1785,10 @@ private struct ADVCtlPointerView: View {
                           isOn: Binding(get: { model.invertX }, set: { model.setInvertX($0) }))
                 ToggleRow(title: "反转上下",
                           isOn: Binding(get: { model.invertY }, set: { model.setInvertY($0) }))
-                SliderRow(title: "指针速度",
+                SliderRow(title: "摇杆灵敏度",
                           valueText: model.sensitivityLabel,
                           value: Binding(get: { Double(model.sensitivity) }, set: { model.setSensitivity($0) }),
-                          range: 2...6,
+                          range: 1...100,
                           step: 1)
             }
         }
@@ -1522,15 +1800,90 @@ private struct ADVCtlKnobView: View {
 
     var body: some View {
         SettingsScrollPage {
-            SettingsHeader(title: "旋钮", subtitle: "设置旋转行为。HomePod 音量由 ADVCtl 通过 Home Assistant 执行。")
+            SettingsHeader(title: "旋钮", subtitle: "设置旋转行为。HomePod/Apple TV 音量由 ADVCtl.app 本机配对后执行。")
             SettingsGroup("旋钮") {
                 PickerRow(title: "旋转",
                           selection: Binding(get: { model.knobMode }, set: { model.setKnobMode($0) }),
-                          options: ["系统音量", "HomePod 音量", "禁用"])
-                StatusRow(title: "按下", detail: "系统模式静音，HomePod 模式发送 F15", ok: true)
+                          options: ["系统音量", "媒体音量", "禁用"])
+                StatusRow(title: "按下", detail: "系统模式静音，媒体模式发送 F15", ok: true)
                 ActionRow(title: "默认值", buttonTitle: "恢复硬件默认值") {
                     model.onResetHardwareSettings?()
                 }
+            }
+            SettingsGroup("Apple TV") {
+                ActionStatusRow(title: "运行时",
+                                detail: model.appleTVRuntimeInstalled ? "已安装" : "未安装",
+                                symbol: model.appleTVRuntimeInstalled ? "checkmark.circle.fill" : "shippingbox",
+                                ok: model.appleTVRuntimeInstalled,
+                                buttonTitle: model.appleTVRuntimeInstalled ? "重新安装" : "安装 pyatv",
+                                action: { model.onInstallAppleTVRuntime?() })
+                ActionStatusRow(title: "发现",
+                                detail: model.appleTVStatus,
+                                symbol: model.appleTVDevices.isEmpty ? "appletv" : "checkmark.circle.fill",
+                                ok: !model.appleTVDevices.isEmpty,
+                                buttonTitle: "扫描",
+                                action: { model.onScanAppleTV?() })
+                if !model.appleTVDevices.isEmpty {
+                    AppleTVDevicePickerRow(model: model)
+                    AppleTVProtocolPickerRow(model: model)
+                    ActionRow(title: "配对", buttonTitle: model.appleTVPairingActive ? "等待 PIN" : "开始配对") {
+                        model.onStartAppleTVPairing?(model.selectedAppleTVID, model.appleTVPairingProtocol)
+                    }
+                    AppleTVPinRow(model: model)
+                }
+            }
+        }
+    }
+}
+
+private struct AppleTVDevicePickerRow: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsRow(title: "设备") {
+            Picker("", selection: Binding(get: { model.selectedAppleTVID },
+                                          set: { model.setSelectedAppleTVID($0) })) {
+                ForEach(model.appleTVDevices) { device in
+                    Text(device.name).tag(device.id)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 220)
+        }
+    }
+}
+
+private struct AppleTVProtocolPickerRow: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsRow(title: "协议") {
+            Picker("", selection: Binding(get: { model.appleTVPairingProtocol },
+                                          set: { model.setAppleTVPairingProtocol($0) })) {
+                ForEach(model.selectedAppleTVProtocols, id: \.self) { proto in
+                    Text(proto.uppercased()).tag(proto)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 140)
+        }
+    }
+}
+
+private struct AppleTVPinRow: View {
+    @ObservedObject var model: ADVCtlSettingsViewModel
+
+    var body: some View {
+        SettingsRow(title: "PIN") {
+            HStack(spacing: 10) {
+                TextField("0000", text: Binding(get: { model.appleTVPin },
+                                                set: { model.setAppleTVPin($0) }))
+                    .frame(width: 82)
+                    .multilineTextAlignment(.center)
+                Button("完成") {
+                    model.onSubmitAppleTVPin?(model.appleTVPin)
+                }
+                .disabled(model.appleTVPin.isEmpty || !model.appleTVPairingActive)
             }
         }
     }
@@ -1949,17 +2302,22 @@ private struct StatusBadge: View {
     }
 }
 
-private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBridgeDelegate {
+private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBridgeDelegate, ObservableObject {
     private let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
     private let settings = JoystickSettings()
+    private let appleTVNative = AppleTVNativeClient()
     private lazy var bridge = ADVCtlBridge(config: HelperConfig.load())
     private lazy var settingsWindow = SettingsWindowController(settings: settings)
     private var connected = false
     private var knobStatus = "旋钮：无输入"
     private var lastMessage = "启动中"
+    private var appleTVPairingSession: AppleTVNativePairingSession?
+    private var appleTVDevices: [AppleTVNativeDevice] = []
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var didCompleteLaunchSetup = false
+    private var statusItem: NSStatusItem?
+    @Published var menuBarTitle = "ADVCtl"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         start()
@@ -1978,6 +2336,7 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
             return
         }
         registerSingleInstanceNotifications()
+        configureStatusItem()
         settingsWindow.onSettingsChanged = { [weak self] in
             guard let self else { return }
             self.bridge.sendSettings(self.settings)
@@ -2016,6 +2375,18 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         settingsWindow.onOpenBluetooth = {
             openBluetoothPreferences()
         }
+        settingsWindow.onInstallAppleTVRuntime = { [weak self] in
+            self?.installAppleTVRuntime()
+        }
+        settingsWindow.onScanAppleTV = { [weak self] in
+            self?.scanAppleTV()
+        }
+        settingsWindow.onStartAppleTVPairing = { [weak self] identifier, proto in
+            self?.startAppleTVPairing(identifier: identifier, proto: proto)
+        }
+        settingsWindow.onSubmitAppleTVPin = { [weak self] pin in
+            self?.submitAppleTVPairingPin(pin)
+        }
         if !shouldOpenInstallGuide && !shouldOpenSettings {
             applyDefaultLaunchAtLogin()
         }
@@ -2053,6 +2424,98 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
         openInstallGuide()
     }
 
+    private func installAppleTVRuntime() {
+        settingsWindow.updateAppleTVStatus("正在安装 pyatv")
+        Task {
+            do {
+                try await appleTVNative.installRuntime()
+                await MainActor.run {
+                    settingsWindow.refresh()
+                    settingsWindow.updateAppleTVStatus("pyatv 已安装")
+                }
+            } catch {
+                await MainActor.run {
+                    settingsWindow.updateAppleTVStatus("pyatv 安装失败：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func scanAppleTV() {
+        settingsWindow.updateAppleTVStatus("正在扫描 Apple TV")
+        Task {
+            do {
+                let devices = try await appleTVNative.scan()
+                await MainActor.run {
+                    appleTVDevices = devices
+                    settingsWindow.updateAppleTVDevices(devices)
+                }
+            } catch {
+                await MainActor.run {
+                    settingsWindow.updateAppleTVStatus("扫描失败：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func startAppleTVPairing(identifier: String, proto: String) {
+        guard !identifier.isEmpty else {
+            settingsWindow.updateAppleTVStatus("请先选择 Apple TV")
+            return
+        }
+        appleTVPairingSession?.cancel()
+        settingsWindow.updateAppleTVStatus("正在开始配对", pairingActive: true)
+        do {
+            appleTVPairingSession = try appleTVNative.startPairing(identifier: identifier, proto: proto) { [weak self] event in
+                DispatchQueue.main.async {
+                    self?.handleAppleTVPairingEvent(event, identifier: identifier, proto: proto)
+                }
+            }
+        } catch {
+            settingsWindow.updateAppleTVStatus("配对启动失败：\(error.localizedDescription)", pairingActive: false)
+        }
+    }
+
+    private func submitAppleTVPairingPin(_ pin: String) {
+        guard !pin.isEmpty else {
+            settingsWindow.updateAppleTVStatus("请输入 Apple TV 显示的 PIN")
+            return
+        }
+        settingsWindow.updateAppleTVStatus("正在完成配对")
+        appleTVPairingSession?.submit(pin: pin)
+    }
+
+    private func handleAppleTVPairingEvent(_ event: AppleTVNativePairingEvent, identifier: String, proto: String) {
+        switch event.event {
+        case "pin_required":
+            if event.deviceProvidesPin == false, let pin = event.pin {
+                settingsWindow.updateAppleTVStatus("在 Apple TV 上输入 PIN \(pin)", pairingActive: true)
+            } else {
+                settingsWindow.updateAppleTVStatus("输入 Apple TV 屏幕上的 PIN", pairingActive: true)
+            }
+        case "paired":
+            appleTVPairingSession = nil
+            if event.paired == true {
+                settings.appleTVIdentifier = identifier
+                settings.appleTVPairingProtocol = proto
+                if let device = appleTVDevices.first(where: { $0.id == identifier }) {
+                    settings.appleTVName = device.name
+                }
+                settings.synchronize()
+                bridge.mediaConfigurationDidChange()
+                settingsWindow.refresh()
+                settingsWindow.updateAppleTVStatus("Apple TV 已配对", pairingActive: false)
+            } else {
+                settingsWindow.updateAppleTVStatus("Apple TV 配对未完成", pairingActive: false)
+            }
+        case "error":
+            appleTVPairingSession = nil
+            settingsWindow.updateAppleTVStatus("配对失败：\(event.message ?? "未知错误")", pairingActive: false)
+        default:
+            settingsWindow.updateAppleTVStatus(event.message ?? event.event)
+        }
+    }
+
     func quitApplication() {
         quit()
     }
@@ -2084,6 +2547,10 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
             knobStatus = "旋钮：按键 \(keyCode)"
         }
         settingsWindow.updateStatus(connected: connected, knobStatus: knobStatus)
+    }
+
+    func bridgeDidUpdateAppleTVVolume(_ volumePercent: Int) {
+        updateStatusItemTitle("\(volumePercent)%")
     }
 
     func bridgeDidReceiveHardwareSettings(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
@@ -2138,6 +2605,43 @@ private final class ADVCtlAppDelegate: NSObject, NSApplicationDelegate, ADVCtlBr
                                                            selector: #selector(handleShowInstallNotification),
                                                            name: advCtlShowInstallNotification,
                                                            object: nil)
+    }
+
+    private func configureStatusItem() {
+        guard statusItem == nil else {
+            return
+        }
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = item
+        updateStatusItemTitle(settings.appleTVConfigured ? "--%" : "")
+        if let button = item.button {
+            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "ADVCtl")
+            button.imagePosition = .imageLeading
+            button.toolTip = "ADVCtl"
+        }
+
+        let menu = NSMenu()
+        let settingsItem = NSMenuItem(title: "打开 ADVCtl", action: #selector(openSettings), keyEquivalent: "")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        let installItem = NSMenuItem(title: "安装向导", action: #selector(openInstallGuide), keyEquivalent: "")
+        installItem.target = self
+        menu.addItem(installItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "退出 ADVCtl", action: #selector(quit), keyEquivalent: "")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        item.menu = menu
+    }
+
+    private func updateStatusItemTitle(_ title: String) {
+        menuBarTitle = title
+        statusItem?.button?.title = title
     }
 
     @objc private func handleShowSettingsNotification(_ notification: Notification) {
@@ -2306,27 +2810,8 @@ private struct ADVCtlApplication: App {
     @NSApplicationDelegateAdaptor(ADVCtlAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra("ADVCtl", systemImage: "waveform") {
-            Button {
-                appDelegate.showSettings()
-            } label: {
-                Label("打开 ADVCtl", systemImage: "macwindow")
-            }
-
-            Button {
-                appDelegate.showInstallGuide()
-            } label: {
-                Label("安装向导", systemImage: "externaldrive.badge.checkmark")
-            }
-
-            Divider()
-
-            Button {
-                appDelegate.quitApplication()
-            } label: {
-                Label("退出 ADVCtl", systemImage: "xmark.circle")
-            }
+        Settings {
+            EmptyView()
         }
-        .menuBarExtraStyle(.menu)
     }
 }

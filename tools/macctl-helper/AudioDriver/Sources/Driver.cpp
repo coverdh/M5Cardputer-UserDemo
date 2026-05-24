@@ -262,7 +262,7 @@ std::shared_ptr<aspl::Driver> CreateDriver()
     deviceParams.Manufacturer = "ADVCtl";
     deviceParams.DeviceUID = "com.advctl.audio.device";
     deviceParams.ModelUID = "com.advctl.audio.model";
-    deviceParams.ConfigurationApplicationBundleID = "com.advctl.macctl";
+    deviceParams.ConfigurationApplicationBundleID = "dev.cardputer.advctl";
     deviceParams.CanBeDefault = true;
     deviceParams.CanBeDefaultForSystemSounds = false;
     deviceParams.SampleRate = kSampleRate;

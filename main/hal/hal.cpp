@@ -690,11 +690,9 @@ static uint8_t advctl_config_flags()
 
 static void send_advctl_config_report()
 {
-    const uint8_t sensitivity = static_cast<uint8_t>(
-        std::max<int32_t>(2, std::min<int32_t>(6, GetHAL().getSettings().GetInt("ptr_sens2", 2))));
     const uint8_t knob_mode = static_cast<uint8_t>(
         std::max<int32_t>(0, std::min<int32_t>(2, GetHAL().getSettings().GetInt("adv_knob_mode", 0))));
-    GetHAL().bleMacCtlConfig(advctl_config_flags(), sensitivity, knob_mode);
+    GetHAL().bleMacCtlConfig(advctl_config_flags(), GetHAL().externalInput.getJoystickSensitivity(), knob_mode);
 }
 
 static void send_advctl_power_report()
@@ -732,6 +730,7 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
 
     if (data[0] == 0x83) {
         GetHAL().externalInput.setDirectionTransform(false, false, false);
+        GetHAL().externalInput.setJoystickSensitivity(ExternalInput::DEFAULT_JOYSTICK_SENSITIVITY);
         GetHAL().getSettings().SetInt("ptr_sens2", 2);
         GetHAL().getSettings().SetInt("adv_knob_mode", 0);
         send_advctl_config_report();
@@ -798,11 +797,7 @@ static void handle_advctl_output_report(const uint8_t* data, uint8_t len)
     const uint8_t flags = data[1];
     GetHAL().externalInput.setDirectionTransform((flags & 0x02) != 0, (flags & 0x04) != 0, (flags & 0x01) != 0);
     if (len >= 3) {
-        if (data[2] >= 2 && data[2] <= 6) {
-            GetHAL().getSettings().SetInt("ptr_sens2", data[2]);
-        } else if (data[2] >= 1 && data[2] <= 3) {
-            GetHAL().getSettings().SetInt("ptr_sens2", data[2] * 2);
-        }
+        GetHAL().externalInput.setJoystickSensitivity(data[2]);
     }
     if (len >= 4) {
         GetHAL().getSettings().SetInt("adv_knob_mode", std::max(0, std::min(2, static_cast<int>(data[3]))));
@@ -1010,6 +1005,7 @@ bool Hal::bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len
 
 bool Hal::bleConsumeAudioTestRequest(bool& active)
 {
+    ble_hid_device_helper_poll_output_reports();
     if (!s_advctl_audio_test_pending) {
         return false;
     }

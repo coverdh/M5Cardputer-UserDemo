@@ -29,17 +29,58 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("AUDIO_TEST_RATE      = 16000", header)
         self.assertIn("AUDIO_STREAM_PAYLOAD = 60", header)
 
-    def test_app_entry_requests_chain_joystick_center_calibration(self):
+    def test_chain_joystick_center_and_sensitivity_are_managed_by_input_layer(self):
         app_source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
         on_open = app_source[app_source.index("void AppHomeControl::onOpen()"):app_source.index("void AppHomeControl::onRunning()")]
-        self.assertIn("GetHAL().externalInput.calibrateJoystickCenter();", on_open)
+        self.assertNotIn("GetHAL().externalInput.calibrateJoystickCenter();", on_open)
+
+        input_header = (ROOT / "main/hal/external_input.h").read_text()
+        self.assertIn("DEFAULT_JOYSTICK_SENSITIVITY = 50", input_header)
+        self.assertIn("void setJoystickSensitivity(uint8_t sensitivity);", input_header)
+        self.assertIn("uint8_t getJoystickSensitivity() const", input_header)
 
         input_source = (ROOT / "main/hal/external_input.cpp").read_text()
         self.assertIn("void ExternalInput::calibrateJoystickCenter()", input_source)
+        self.assertIn("void ExternalInput::setJoystickSensitivity(uint8_t sensitivity)", input_source)
+        self.assertIn("settings.GetInt(\"ext_joy_sens\", DEFAULT_JOYSTICK_SENSITIVITY)", input_source)
+        self.assertIn("_settings->SetInt(\"ext_joy_sens\", _joystick_sensitivity)", input_source)
+        self.assertIn("CHAIN_JOYSTICK_MIN_SENSITIVITY", input_source)
+        self.assertIn("CHAIN_JOYSTICK_MAX_SENSITIVITY", input_source)
+        self.assertIn("CHAIN_JOYSTICK_BASE_DEAD_ZONE_X", input_source)
+        self.assertIn("CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y", input_source)
         self.assertIn("_chain_joystick_center_pending = true;", input_source)
+        self.assertIn("CHAIN_JOYSTICK_CENTER_ACCEPTANCE", input_source)
+        self.assertIn("CHAIN_JOYSTICK_CENTER_STABLE_SAMPLES", input_source)
+        self.assertIn("chainJoystickAxisNearCenter(rawX)", input_source)
+        self.assertIn("chainJoystickAxisNearCenter(rawY)", input_source)
+        self.assertIn("chainJoystickAxisInAutoCenterRange(rawX)", input_source)
+        self.assertIn("chainJoystickNormalizeMapped16", input_source)
+        self.assertIn("chainJoystickNormalizeRawAdc", input_source)
+        self.assertIn("chainCommand(_chain_joystick_index, 0x30", input_source)
+        self.assertIn("chainCommand(_chain_joystick_index, 0x34", input_source)
+        self.assertIn("mappedX16   = chainJoystickReadInt16LE(&data[0]);", input_source)
+        self.assertIn("mappedY16   = chainJoystickReadInt16LE(&data[2]);", input_source)
+        self.assertIn("updateChainJoystickCenter(rawX, rawY)", input_source)
         self.assertIn("rawX - _chain_joystick_center_x", input_source)
         self.assertIn("rawY - _chain_joystick_center_y", input_source)
-        self.assertIn("CHAIN_JOYSTICK_DEAD_ZONE", input_source[input_source.index("bool ExternalInput::readChainJoystick"):])
+        self.assertIn("chain joystick center deferred", input_source)
+        self.assertIn("chain joystick center waiting for release", input_source)
+        self.assertNotIn("_chain_joystick_center_raw_x", input_source)
+        self.assertNotIn("_chain_joystick_center_raw_y", input_source)
+        self.assertNotIn("still using default center", input_source)
+        read_chain = input_source[input_source.index("bool ExternalInput::readChainJoystick"):]
+        self.assertIn("chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_X)", read_chain)
+        self.assertIn("chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y)", read_chain)
+        self.assertIn("sensitivity={} deadzone=({}, {})", read_chain)
+
+        hal_source = (ROOT / "main/hal/hal.cpp").read_text()
+        self.assertIn("GetHAL().externalInput.getJoystickSensitivity()", hal_source)
+        self.assertIn("GetHAL().externalInput.setJoystickSensitivity(data[2]);", hal_source)
+
+        mac_source = read_mac_helper_sources()
+        self.assertIn("advctl.joystickSensitivity", mac_source)
+        self.assertIn("range: 1...100", mac_source)
+        self.assertIn("SliderRow(title: \"摇杆灵敏度\"", mac_source)
 
     def test_power_save_keeps_hid_connected_and_input_wake_active(self):
         source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
@@ -73,13 +114,13 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("kIOHIDReportTypeOutput", source[source.index("private func setKeyboardOutputReport"):])
         self.assertIn("CFIndex(advCtlKeyboardReportID)", source[source.index("private func setKeyboardOutputReport"):])
         attempts = source[source.index("let attempts: [(IOHIDReportType, Bool, CFIndex)]"):source.index("var lastStatus", source.index("let attempts: [(IOHIDReportType, Bool, CFIndex)]"))]
-        self.assertLess(attempts.index("kIOHIDReportTypeFeature"), attempts.index("kIOHIDReportTypeOutput"))
+        self.assertLess(attempts.index("kIOHIDReportTypeOutput"), attempts.index("kIOHIDReportTypeFeature"))
         self.assertIn("(kIOHIDReportTypeFeature, true, 0)", attempts)
         self.assertIn("(kIOHIDReportTypeOutput, true, 0)", attempts)
-        self.assertLess(attempts.index("(kIOHIDReportTypeFeature, true, 0)"),
-                        attempts.index("(kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID))"))
         self.assertLess(attempts.index("(kIOHIDReportTypeOutput, true, 0)"),
                         attempts.index("(kIOHIDReportTypeOutput, false, CFIndex(advCtlReportID))"))
+        self.assertLess(attempts.index("(kIOHIDReportTypeOutput, false, CFIndex(advCtlReportID))"),
+                        attempts.index("(kIOHIDReportTypeFeature, false, CFIndex(advCtlReportID))"))
         open_failed_block = source[source.index('updateMessage("HID manager open failed: \\(status)")'):source.index("if let devices = IOHIDManagerCopyDevices", source.index('updateMessage("HID manager open failed: \\(status)")'))]
         self.assertNotIn("return", open_failed_block)
         keyboard_match = "usagePage == hidUsagePageGenericDesktop && usage == hidUsageKeyboard"
@@ -175,6 +216,12 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("ble_hid_device_helper_handle_keyboard_output(param->output.data, param->output.length)", output_case)
         self.assertIn("MACCTL_LED_CMD_AUDIO_START", source)
         self.assertIn("uint8_t command[4] = {0x82", source)
+        self.assertIn("ble_hid_device_helper_poll_output_reports", source)
+        self.assertIn("ble_hid_device_helper_poll_nimble_output_reports", source)
+        self.assertIn("ble_att_svr_find_by_uuid", source)
+        self.assertIn("BLE_SVC_HID_DSC_UUID16_RPT_REF", source)
+        self.assertIn("MACCTL write poll", source)
+        self.assertIn("ble_hid_device_helper_poll_output_reports();", (ROOT / "main/hal/hal.cpp").read_text())
         self.assertNotIn("ADVCTL_GATT_SERVICE_UUID", source)
         self.assertNotIn("ble_gatts_notify_custom", source)
         self.assertNotIn("ble_hid_device_helper_register_advctl_gatt", source)
@@ -197,6 +244,57 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("let overflow = max(0, available + samples.count - capacity)", source)
         self.assertIn("readIndex += UInt64(overflow)", source)
         self.assertNotIn("UInt64(samples.count - capacity)", source)
+
+    def test_mac_audio_bridge_conceals_best_effort_hid_packet_loss(self):
+        app = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlApp.swift").read_text()
+        sink = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlAudioRingSink.swift").read_text()
+
+        self.assertIn("private let advCtlAudioMaxConcealedPackets = 16", app)
+        self.assertIn("private var expectedAudioFrameSequence: UInt8?", app)
+        self.assertIn("private func concealMissingAudioPackets(before sequence: UInt8, payloadBytes: Int) -> Int", app)
+        self.assertIn("let distance = (Int(sequence) - Int(expected) + 256) % 256", app)
+        self.assertIn("guard distance <= 127 else", app)
+        self.assertIn("audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)", app)
+        self.assertIn("resetAudioPacketTracking()", app[app.index("if payload.count >= 2, payload[0] == advCtlAudioStateReport"):])
+        self.assertIn("private let advCtlAudioUpsampleFactor = 6", sink)
+        self.assertIn("@discardableResult func enqueueSilence(uLawSampleCount: Int) -> Int", sink)
+
+    def test_voice_e2e_automation_uses_driver_demand_and_hid_audio(self):
+        script = (ROOT / "tools/tests/advctl_voice_e2e.py").read_text()
+        app = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlApp.swift").read_text()
+
+        self.assertIn("ADVCtl Audio", script)
+        self.assertIn("AudioQueueNewInput", script)
+        self.assertIn("kAudioQueueProperty_CurrentDevice", script)
+        self.assertIn("speechLikely", script)
+        self.assertIn('result = run(["open", "-gj", str(args.helper_app)])', script)
+        self.assertIn("ADV microphone bridge activated", script)
+        self.assertIn("Sent ADV microphone start", script)
+        self.assertIn("Received ADV audio frames", script)
+        self.assertIn("--e2e-audio-frames", script)
+        self.assertIn("ADVCTL_E2E_EXPECTED_AUDIO_FRAMES", app)
+        self.assertIn("ADVCTL_E2E_AUDIO_TIMEOUT_SECONDS", app)
+        self.assertIn("E2E audio complete; received", app)
+        self.assertNotIn("CoreBluetooth", script)
+        driver = (ROOT / "tools/macctl-helper/AudioDriver/Sources/Driver.cpp").read_text()
+        self.assertIn('deviceParams.ConfigurationApplicationBundleID = "dev.cardputer.advctl"', driver)
+
+    def test_install_scripts_automate_firmware_flash_and_mac_audio_driver_install(self):
+        flash = (ROOT / "tools/flash-firmware.sh").read_text()
+        build_app = (ROOT / "tools/macctl-helper/build-app.sh").read_text()
+        install = (ROOT / "tools/macctl-helper/install.sh").read_text()
+
+        self.assertIn("find_idf_export()", flash)
+        self.assertIn("find_serial_port()", flash)
+        self.assertIn("idf.py set-target esp32s3", flash)
+        self.assertIn('idf.py -p "${PORT}" -b "${BAUD}" flash', flash)
+        self.assertIn('idf.py -p "${PORT}" monitor', flash)
+        self.assertIn("ADVCTL_INSTALL_AUDIO_DRIVER", build_app)
+        self.assertIn("install_audio_driver()", build_app)
+        self.assertIn("/Library/Audio/Plug-Ins/HAL", build_app)
+        self.assertIn("ADVCtlAudio.driver", build_app)
+        self.assertIn("killall coreaudiod || true", build_app)
+        self.assertIn("./build-app.sh", install)
 
     def test_keyboard_report_map_keeps_output_byte_aligned(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()

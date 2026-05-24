@@ -6,6 +6,7 @@ private let advCtlAudioRingMagic: UInt32 = 0x41445641
 private let advCtlAudioRingVersion: UInt32 = 1
 private let advCtlAudioRingHeaderSize = 64
 private let advCtlAudioRingCapacityFrames = 48_000 * 5
+private let advCtlAudioUpsampleFactor = 6
 
 final class ADVCtlAudioRingSink {
     private var mapped: UnsafeMutableRawPointer?
@@ -96,13 +97,22 @@ final class ADVCtlAudioRingSink {
             return 0
         }
         var samples = [Float32]()
-        samples.reserveCapacity(data.count * 6)
+        samples.reserveCapacity(data.count * advCtlAudioUpsampleFactor)
         for byte in data {
             let decoded = Float32(Self.decodeULaw(byte)) / 32768.0
-            for _ in 0..<6 {
+            for _ in 0..<advCtlAudioUpsampleFactor {
                 samples.append(decoded)
             }
         }
+        write(samples)
+        return samples.count
+    }
+
+    @discardableResult func enqueueSilence(uLawSampleCount: Int) -> Int {
+        guard refreshDevice(), uLawSampleCount > 0 else {
+            return 0
+        }
+        let samples = [Float32](repeating: 0.0, count: uLawSampleCount * advCtlAudioUpsampleFactor)
         write(samples)
         return samples.count
     }

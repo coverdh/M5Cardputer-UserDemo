@@ -31,7 +31,15 @@ static constexpr uint8_t BYTE_BUTTON_STATUS_8BYTE_REG         = 0x60;
 static constexpr int JOYSTICK_UNIT_CENTER                     = 128;
 static constexpr int JOYSTICK_UNIT_DEAD_ZONE                  = 38;
 static constexpr int JOYSTICK2_DEAD_ZONE                      = 24;
-static constexpr int CHAIN_JOYSTICK_DEAD_ZONE                 = 12;
+static constexpr uint8_t CHAIN_JOYSTICK_MIN_SENSITIVITY       = 1;
+static constexpr uint8_t CHAIN_JOYSTICK_MAX_SENSITIVITY       = 100;
+static constexpr int CHAIN_JOYSTICK_BASE_DEAD_ZONE_X          = 8;
+static constexpr int CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y          = 20;
+static constexpr int CHAIN_JOYSTICK_CENTER_ACCEPTANCE         = CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y * 2;
+static constexpr int CHAIN_JOYSTICK_CENTER_AUTO_RANGE         = 112;
+static constexpr int CHAIN_JOYSTICK_CENTER_STABLE_SPREAD      = 16;
+static constexpr uint8_t CHAIN_JOYSTICK_CENTER_STABLE_SAMPLES = 2;
+static constexpr uint32_t CHAIN_JOYSTICK_CENTER_LOG_INTERVAL_MS = 1000;
 static constexpr uart_port_t CHAIN_UART                       = UART_NUM_1;
 static constexpr int CHAIN_RX_A                               = 1;
 static constexpr int CHAIN_TX_A                               = 2;
@@ -51,6 +59,50 @@ static constexpr uint8_t CHAIN_OPERATION_SUCCESS              = 0x01;
 static constexpr gpio_num_t DUAL_BUTTON_RED_PIN               = GPIO_NUM_1;
 static constexpr gpio_num_t DUAL_BUTTON_BLUE_PIN              = GPIO_NUM_2;
 static const std::string TAG                                  = "ExternalInput";
+
+static bool chainJoystickAxisNearCenter(int value)
+{
+    return value >= -CHAIN_JOYSTICK_CENTER_ACCEPTANCE && value <= CHAIN_JOYSTICK_CENTER_ACCEPTANCE;
+}
+
+static bool chainJoystickAxisInAutoCenterRange(int value)
+{
+    return value >= -CHAIN_JOYSTICK_CENTER_AUTO_RANGE && value <= CHAIN_JOYSTICK_CENTER_AUTO_RANGE;
+}
+
+static int16_t chainJoystickReadInt16LE(const uint8_t* data)
+{
+    return static_cast<int16_t>(static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8));
+}
+
+static uint16_t chainJoystickReadUInt16LE(const uint8_t* data)
+{
+    return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
+}
+
+static int chainJoystickNormalizeMapped16(int16_t value)
+{
+    const int rounded = value >= 0 ? (static_cast<int>(value) + 16) / 32 : (static_cast<int>(value) - 16) / 32;
+    return std::clamp(rounded, -128, 127);
+}
+
+static int chainJoystickNormalizeRawAdc(uint16_t value)
+{
+    const int centered = static_cast<int>(value) - 2048;
+    const int rounded  = centered >= 0 ? (centered + 8) / 16 : (centered - 8) / 16;
+    return std::clamp(rounded, -128, 127);
+}
+
+static bool chainJoystickRawAdcIsValid(uint16_t x, uint16_t y)
+{
+    return x <= 4095 && y <= 4095;
+}
+
+static uint8_t clampChainJoystickSensitivity(int value)
+{
+    return static_cast<uint8_t>(
+        std::max<int>(CHAIN_JOYSTICK_MIN_SENSITIVITY, std::min<int>(CHAIN_JOYSTICK_MAX_SENSITIVITY, value)));
+}
 
 void ExternalInput::init()
 {
@@ -121,19 +173,132 @@ void ExternalInput::setPaused(bool paused)
 
 void ExternalInput::loadSettings(Settings& settings)
 {
-    _settings  = &settings;
-    _flip_x    = settings.GetBool("ext_flip_x", false);
-    _flip_y    = settings.GetBool("ext_flip_y", false);
-    _swap_axes = settings.GetBool("ext_swap_axes", false);
-    mclog::tagInfo(TAG, "direction transform: flip_x={} flip_y={} swap_axes={}", _flip_x ? "yes" : "no",
-                   _flip_y ? "yes" : "no", _swap_axes ? "yes" : "no");
+    _settings             = &settings;
+    _flip_x               = settings.GetBool("ext_flip_x", false);
+    _flip_y               = settings.GetBool("ext_flip_y", false);
+    _swap_axes            = settings.GetBool("ext_swap_axes", false);
+    _joystick_sensitivity = clampChainJoystickSensitivity(
+        settings.GetInt("ext_joy_sens", DEFAULT_JOYSTICK_SENSITIVITY));
+    mclog::tagInfo(TAG, "direction transform: flip_x={} flip_y={} swap_axes={} joystick_sensitivity={}",
+                   _flip_x ? "yes" : "no", _flip_y ? "yes" : "no", _swap_axes ? "yes" : "no",
+                   _joystick_sensitivity);
 }
 
 void ExternalInput::calibrateJoystickCenter()
 {
     _chain_joystick_center_ready   = false;
     _chain_joystick_center_pending = true;
+    resetChainJoystickCenterSamples();
     mclog::tagInfo(TAG, "chain joystick center calibration requested");
+}
+
+void ExternalInput::setJoystickSensitivity(uint8_t sensitivity)
+{
+    const uint8_t clamped = clampChainJoystickSensitivity(sensitivity);
+    if (_joystick_sensitivity != clamped) {
+        _joystick_sensitivity = clamped;
+        mclog::tagInfo(TAG, "chain joystick sensitivity: {}", _joystick_sensitivity);
+    }
+    if (_settings) {
+        _settings->SetInt("ext_joy_sens", _joystick_sensitivity);
+    }
+}
+
+int ExternalInput::chainJoystickDeadZone(int baseDeadZone) const
+{
+    const int sensitivity = clampChainJoystickSensitivity(_joystick_sensitivity);
+    if (sensitivity >= CHAIN_JOYSTICK_MAX_SENSITIVITY) {
+        return 0;
+    }
+    return std::max(0, (baseDeadZone * (CHAIN_JOYSTICK_MAX_SENSITIVITY - sensitivity) + 25) / 50);
+}
+
+void ExternalInput::resetChainJoystickCenterSamples()
+{
+    _chain_joystick_center_samples = 0;
+    _chain_joystick_center_sum_x   = 0;
+    _chain_joystick_center_sum_y   = 0;
+    _chain_joystick_center_min_x   = 0;
+    _chain_joystick_center_max_x   = 0;
+    _chain_joystick_center_min_y   = 0;
+    _chain_joystick_center_max_y   = 0;
+}
+
+bool ExternalInput::updateChainJoystickCenter(int rawX, int rawY)
+{
+    if (!_chain_joystick_center_pending) {
+        return _chain_joystick_center_ready;
+    }
+
+    auto acceptCenter = [this](int centerX, int centerY, const char* reason) {
+        _chain_joystick_center_x       = centerX;
+        _chain_joystick_center_y       = centerY;
+        _chain_joystick_center_ready   = true;
+        _chain_joystick_center_pending = false;
+        resetChainJoystickCenterSamples();
+        mclog::tagInfo(TAG, "chain joystick center {}: x={} y={}", reason,
+                       _chain_joystick_center_x, _chain_joystick_center_y);
+    };
+
+    if (chainJoystickAxisNearCenter(rawX) && chainJoystickAxisNearCenter(rawY)) {
+        acceptCenter(rawX, rawY, "near neutral");
+        return true;
+    }
+
+    if (!chainJoystickAxisInAutoCenterRange(rawX) || !chainJoystickAxisInAutoCenterRange(rawY)) {
+        resetChainJoystickCenterSamples();
+        _chain_joystick_center_ready = false;
+        if (M5.millis() - _last_center_wait_log >= CHAIN_JOYSTICK_CENTER_LOG_INTERVAL_MS) {
+            _last_center_wait_log = M5.millis();
+            mclog::tagWarn(TAG, "chain joystick center waiting for release: raw x={} y={}", rawX, rawY);
+        }
+        return false;
+    }
+
+    if (_chain_joystick_center_samples == 0) {
+        _chain_joystick_center_min_x = rawX;
+        _chain_joystick_center_max_x = rawX;
+        _chain_joystick_center_min_y = rawY;
+        _chain_joystick_center_max_y = rawY;
+        _chain_joystick_center_sum_x = rawX;
+        _chain_joystick_center_sum_y = rawY;
+        _chain_joystick_center_samples = 1;
+        return false;
+    }
+
+    _chain_joystick_center_min_x = std::min<int16_t>(_chain_joystick_center_min_x, rawX);
+    _chain_joystick_center_max_x = std::max<int16_t>(_chain_joystick_center_max_x, rawX);
+    _chain_joystick_center_min_y = std::min<int16_t>(_chain_joystick_center_min_y, rawY);
+    _chain_joystick_center_max_y = std::max<int16_t>(_chain_joystick_center_max_y, rawY);
+    _chain_joystick_center_sum_x += rawX;
+    _chain_joystick_center_sum_y += rawY;
+    ++_chain_joystick_center_samples;
+
+    const int spreadX = _chain_joystick_center_max_x - _chain_joystick_center_min_x;
+    const int spreadY = _chain_joystick_center_max_y - _chain_joystick_center_min_y;
+    if (spreadX > CHAIN_JOYSTICK_CENTER_STABLE_SPREAD || spreadY > CHAIN_JOYSTICK_CENTER_STABLE_SPREAD) {
+        _chain_joystick_center_min_x = rawX;
+        _chain_joystick_center_max_x = rawX;
+        _chain_joystick_center_min_y = rawY;
+        _chain_joystick_center_max_y = rawY;
+        _chain_joystick_center_sum_x = rawX;
+        _chain_joystick_center_sum_y = rawY;
+        _chain_joystick_center_samples = 1;
+        return false;
+    }
+
+    if (_chain_joystick_center_samples >= CHAIN_JOYSTICK_CENTER_STABLE_SAMPLES) {
+        acceptCenter(_chain_joystick_center_sum_x / _chain_joystick_center_samples,
+                     _chain_joystick_center_sum_y / _chain_joystick_center_samples, "stable");
+        return true;
+    }
+
+    if (M5.millis() - _last_center_wait_log >= CHAIN_JOYSTICK_CENTER_LOG_INTERVAL_MS) {
+        _last_center_wait_log = M5.millis();
+        mclog::tagWarn(TAG, "chain joystick center deferred: raw x={} y={} collecting stable center",
+                       rawX, rawY);
+    }
+    return false;
 }
 
 void ExternalInput::setDirectionTransform(bool flipX, bool flipY, bool swapAxes)
@@ -200,6 +365,7 @@ bool ExternalInput::read(uint8_t& buttons, uint32_t now)
             _chain_joystick_index            = 0;
             _chain_joystick_center_ready     = false;
             _chain_joystick_center_pending   = false;
+            resetChainJoystickCenterSamples();
             if (_encoder_type != EncoderType::ChainEncoder && !_dual_button_connected) {
                 _chain_uart_ready = false;
             }
@@ -272,14 +438,19 @@ void ExternalInput::probeBus(uint32_t now)
     _chain_joystick_index        = 0;
     _chain_encoder_index         = 0;
     _chain_bus_index             = 0;
-    _chain_joystick_center_x     = 0;
-    _chain_joystick_center_y     = 0;
-    _chain_joystick_center_ready = false;
-    _chain_uart_ready            = false;
-    _chain_read_failures         = 0;
-    _encoder_read_failures       = 0;
-    _chain_bus_read_failures     = 0;
-    _unit_encoder_has_last_value = false;
+    _chain_joystick_center_x       = 0;
+    _chain_joystick_center_y       = 0;
+    _chain_joystick_center_ready   = false;
+    _chain_joystick_center_pending = false;
+    _chain_joystick_raw_adc_disabled = false;
+    resetChainJoystickCenterSamples();
+    _chain_uart_ready              = false;
+    _chain_read_failures           = 0;
+    _encoder_read_failures         = 0;
+    _chain_bus_read_failures       = 0;
+    _last_center_wait_log          = 0;
+    _last_chain_joystick_log       = 0;
+    _unit_encoder_has_last_value   = false;
     uart_driver_delete(CHAIN_UART);
 
     M5.Ex_I2C.begin();
@@ -402,6 +573,7 @@ bool ExternalInput::tryChainBus(int rxPin, int txPin)
             _joystick_type                  = JoystickType::ChainJoystick;
             _chain_joystick_index           = id;
             _chain_joystick_center_pending  = true;
+            resetChainJoystickCenterSamples();
             found                           = true;
         } else if (deviceType == CHAIN_DEVICE_UNIT_CHAINBUS && _chain_bus_index == 0) {
             _chain_bus_index = id;
@@ -731,8 +903,56 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
     size_t responseSize  = sizeof(response);
     const uint8_t* data  = nullptr;
     size_t dataSize      = 0;
-    if (!chainCommand(_chain_joystick_index, 0x35, nullptr, 0, response, responseSize) ||
-        !parseChainValue(0x35, response, responseSize, data, dataSize) || dataSize < 2) {
+    int16_t mappedX16   = 0;
+    int16_t mappedY16   = 0;
+    uint16_t rawAdcX    = 0;
+    uint16_t rawAdcY    = 0;
+    int rawX            = 0;
+    int rawY            = 0;
+    uint8_t axisCommand = 0x30;
+
+    bool axisOk = false;
+    if (!_chain_joystick_raw_adc_disabled &&
+        chainCommand(_chain_joystick_index, 0x30, nullptr, 0, response, responseSize) &&
+        parseChainValue(0x30, response, responseSize, data, dataSize) && dataSize >= 4) {
+        rawAdcX     = chainJoystickReadUInt16LE(&data[0]);
+        rawAdcY     = chainJoystickReadUInt16LE(&data[2]);
+        if (chainJoystickRawAdcIsValid(rawAdcX, rawAdcY)) {
+            rawX        = chainJoystickNormalizeRawAdc(rawAdcX);
+            rawY        = chainJoystickNormalizeRawAdc(rawAdcY);
+            mappedX16   = static_cast<int16_t>(rawX * 32);
+            mappedY16   = static_cast<int16_t>(rawY * 32);
+            axisOk      = true;
+        } else {
+            _chain_joystick_raw_adc_disabled = true;
+        }
+    }
+
+    if (!axisOk) {
+        axisCommand  = 0x34;
+        responseSize = sizeof(response);
+        if (chainCommand(_chain_joystick_index, 0x34, nullptr, 0, response, responseSize) &&
+            parseChainValue(0x34, response, responseSize, data, dataSize) && dataSize >= 4) {
+            mappedX16   = chainJoystickReadInt16LE(&data[0]);
+            mappedY16   = chainJoystickReadInt16LE(&data[2]);
+            rawX        = chainJoystickNormalizeMapped16(mappedX16);
+            rawY        = chainJoystickNormalizeMapped16(mappedY16);
+            axisOk      = true;
+        } else {
+            axisCommand  = 0x35;
+            responseSize = sizeof(response);
+            if (chainCommand(_chain_joystick_index, 0x35, nullptr, 0, response, responseSize) &&
+                parseChainValue(0x35, response, responseSize, data, dataSize) && dataSize >= 2) {
+                rawX        = static_cast<int8_t>(data[0]);
+                rawY        = static_cast<int8_t>(data[1]);
+                mappedX16   = static_cast<int16_t>(rawX * 32);
+                mappedY16   = static_cast<int16_t>(rawY * 32);
+                axisOk      = true;
+            }
+        }
+    }
+
+    if (!axisOk) {
         ++_chain_read_failures;
         if (_chain_read_failures < CHAIN_INPUT_FAILURE_LIMIT) {
             mclog::tagWarn(TAG, "chain joystick axis read miss {}/{}", _chain_read_failures,
@@ -743,28 +963,31 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
     }
     _chain_read_failures = 0;
 
-    const int rawX = static_cast<int8_t>(data[0]);
-    const int rawY = static_cast<int8_t>(data[1]);
-    if (!_chain_joystick_center_ready || _chain_joystick_center_pending) {
-        _chain_joystick_center_x       = rawX;
-        _chain_joystick_center_y       = rawY;
-        _chain_joystick_center_ready   = true;
-        _chain_joystick_center_pending = false;
-        mclog::tagInfo(TAG, "chain joystick center: x={} y={}", _chain_joystick_center_x,
-                       _chain_joystick_center_y);
-    }
-
-    const int x = rawX - _chain_joystick_center_x;
-    const int y = rawY - _chain_joystick_center_y;
-    if (x < -CHAIN_JOYSTICK_DEAD_ZONE) {
-        buttons |= PAD_LEFT;
-    } else if (x > CHAIN_JOYSTICK_DEAD_ZONE) {
-        buttons |= PAD_RIGHT;
-    }
-    if (y < -CHAIN_JOYSTICK_DEAD_ZONE) {
-        buttons |= PAD_UP;
-    } else if (y > CHAIN_JOYSTICK_DEAD_ZONE) {
-        buttons |= PAD_DOWN;
+    const bool centerReady = updateChainJoystickCenter(rawX, rawY);
+    if (centerReady) {
+        const int x = rawX - _chain_joystick_center_x;
+        const int y = rawY - _chain_joystick_center_y;
+        const int deadZoneX = chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_X);
+        const int deadZoneY = chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y);
+        if (x < -deadZoneX) {
+            buttons |= PAD_LEFT;
+        } else if (x > deadZoneX) {
+            buttons |= PAD_RIGHT;
+        }
+        if (y < -deadZoneY) {
+            buttons |= PAD_UP;
+        } else if (y > deadZoneY) {
+            buttons |= PAD_DOWN;
+        }
+        const bool axisMoved = x < -deadZoneX || x > deadZoneX || y < -deadZoneY || y > deadZoneY;
+        if (axisMoved && (buttons != _buttons || M5.millis() - _last_chain_joystick_log >= 500)) {
+            _last_chain_joystick_log = M5.millis();
+            mclog::tagInfo(TAG,
+                           "chain joystick cmd=0x{:02X} adc=({}, {}) mapped16=({}, {}) norm=({}, {}) center=({}, {}) delta=({}, {}) sensitivity={} deadzone=({}, {}) buttons=0x{:02X}",
+                           axisCommand, rawAdcX, rawAdcY, mappedX16, mappedY16, rawX, rawY,
+                           _chain_joystick_center_x, _chain_joystick_center_y, x, y, _joystick_sensitivity,
+                           deadZoneX, deadZoneY, buttons);
+        }
     }
 
     responseSize = sizeof(response);
