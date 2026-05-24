@@ -29,21 +29,58 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("AUDIO_TEST_RATE      = 16000", header)
         self.assertIn("AUDIO_STREAM_PAYLOAD = 60", header)
 
-    def test_app_entry_requests_chain_joystick_center_calibration(self):
+    def test_chain_joystick_center_and_sensitivity_are_managed_by_input_layer(self):
         app_source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
         on_open = app_source[app_source.index("void AppHomeControl::onOpen()"):app_source.index("void AppHomeControl::onRunning()")]
-        self.assertIn("GetHAL().externalInput.calibrateJoystickCenter();", on_open)
+        self.assertNotIn("GetHAL().externalInput.calibrateJoystickCenter();", on_open)
+
+        input_header = (ROOT / "main/hal/external_input.h").read_text()
+        self.assertIn("DEFAULT_JOYSTICK_SENSITIVITY = 50", input_header)
+        self.assertIn("void setJoystickSensitivity(uint8_t sensitivity);", input_header)
+        self.assertIn("uint8_t getJoystickSensitivity() const", input_header)
 
         input_source = (ROOT / "main/hal/external_input.cpp").read_text()
         self.assertIn("void ExternalInput::calibrateJoystickCenter()", input_source)
+        self.assertIn("void ExternalInput::setJoystickSensitivity(uint8_t sensitivity)", input_source)
+        self.assertIn("settings.GetInt(\"ext_joy_sens\", DEFAULT_JOYSTICK_SENSITIVITY)", input_source)
+        self.assertIn("_settings->SetInt(\"ext_joy_sens\", _joystick_sensitivity)", input_source)
+        self.assertIn("CHAIN_JOYSTICK_MIN_SENSITIVITY", input_source)
+        self.assertIn("CHAIN_JOYSTICK_MAX_SENSITIVITY", input_source)
+        self.assertIn("CHAIN_JOYSTICK_BASE_DEAD_ZONE_X", input_source)
+        self.assertIn("CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y", input_source)
         self.assertIn("_chain_joystick_center_pending = true;", input_source)
         self.assertIn("CHAIN_JOYSTICK_CENTER_ACCEPTANCE", input_source)
+        self.assertIn("CHAIN_JOYSTICK_CENTER_STABLE_SAMPLES", input_source)
         self.assertIn("chainJoystickAxisNearCenter(rawX)", input_source)
         self.assertIn("chainJoystickAxisNearCenter(rawY)", input_source)
-        self.assertIn("chain joystick center deferred", input_source)
+        self.assertIn("chainJoystickAxisInAutoCenterRange(rawX)", input_source)
+        self.assertIn("chainJoystickNormalizeMapped16", input_source)
+        self.assertIn("chainJoystickNormalizeRawAdc", input_source)
+        self.assertIn("chainCommand(_chain_joystick_index, 0x30", input_source)
+        self.assertIn("chainCommand(_chain_joystick_index, 0x34", input_source)
+        self.assertIn("mappedX16   = chainJoystickReadInt16LE(&data[0]);", input_source)
+        self.assertIn("mappedY16   = chainJoystickReadInt16LE(&data[2]);", input_source)
+        self.assertIn("updateChainJoystickCenter(rawX, rawY)", input_source)
         self.assertIn("rawX - _chain_joystick_center_x", input_source)
         self.assertIn("rawY - _chain_joystick_center_y", input_source)
-        self.assertIn("CHAIN_JOYSTICK_DEAD_ZONE", input_source[input_source.index("bool ExternalInput::readChainJoystick"):])
+        self.assertIn("chain joystick center deferred", input_source)
+        self.assertIn("chain joystick center waiting for release", input_source)
+        self.assertNotIn("_chain_joystick_center_raw_x", input_source)
+        self.assertNotIn("_chain_joystick_center_raw_y", input_source)
+        self.assertNotIn("still using default center", input_source)
+        read_chain = input_source[input_source.index("bool ExternalInput::readChainJoystick"):]
+        self.assertIn("chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_X)", read_chain)
+        self.assertIn("chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y)", read_chain)
+        self.assertIn("sensitivity={} deadzone=({}, {})", read_chain)
+
+        hal_source = (ROOT / "main/hal/hal.cpp").read_text()
+        self.assertIn("GetHAL().externalInput.getJoystickSensitivity()", hal_source)
+        self.assertIn("GetHAL().externalInput.setJoystickSensitivity(data[2]);", hal_source)
+
+        mac_source = read_mac_helper_sources()
+        self.assertIn("advctl.joystickSensitivity", mac_source)
+        self.assertIn("range: 1...100", mac_source)
+        self.assertIn("SliderRow(title: \"摇杆灵敏度\"", mac_source)
 
     def test_power_save_keeps_hid_connected_and_input_wake_active(self):
         source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()

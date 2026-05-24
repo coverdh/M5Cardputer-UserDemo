@@ -1071,7 +1071,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     @Published var swapAxes = false
     @Published var invertX = false
     @Published var invertY = false
-    @Published var sensitivity = 2
+    @Published var sensitivity = 50
     @Published var knobMode = 0
     @Published var screenTimeoutSeconds = 30
     @Published var powerSaveTimeoutMinutes = 3
@@ -1087,7 +1087,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     }
 
     var sensitivityLabel: String {
-        sensitivity.isMultiple(of: 2) ? "\(sensitivity / 2)x" : "\(sensitivity / 2).5x"
+        "\(sensitivity)"
     }
 
     var audioStateText: String {
@@ -1176,7 +1176,7 @@ private final class ADVCtlSettingsViewModel: ObservableObject {
     }
 
     func setSensitivity(_ value: Double) {
-        sensitivity = Int(round(value))
+        sensitivity = min(100, max(1, Int(round(value))))
         commitInputSettings()
     }
 
@@ -1540,7 +1540,7 @@ private struct ADVCtlPointerView: View {
 
     var body: some View {
         SettingsScrollPage {
-            SettingsHeader(title: "指针", subtitle: "调整摇杆方向、轴映射和鼠标移动速度。这些设置会写入 ADV 固件。")
+            SettingsHeader(title: "指针", subtitle: "调整摇杆方向、轴映射和灵敏度。这些设置会写入 ADV 固件。")
             SettingsGroup("指针") {
                 ToggleRow(title: "交换 X/Y 轴",
                           isOn: Binding(get: { model.swapAxes }, set: { model.setSwapAxes($0) }))
@@ -1548,10 +1548,10 @@ private struct ADVCtlPointerView: View {
                           isOn: Binding(get: { model.invertX }, set: { model.setInvertX($0) }))
                 ToggleRow(title: "反转上下",
                           isOn: Binding(get: { model.invertY }, set: { model.setInvertY($0) }))
-                SliderRow(title: "指针速度",
+                SliderRow(title: "摇杆灵敏度",
                           valueText: model.sensitivityLabel,
                           value: Binding(get: { Double(model.sensitivity) }, set: { model.setSensitivity($0) }),
-                          range: 2...6,
+                          range: 1...100,
                           step: 1)
             }
         }

@@ -20,14 +20,10 @@ final class JoystickSettings {
 
     var sensitivity: Int {
         get {
-            let saved = defaults.integer(forKey: "advctl.sensitivityHalfStep")
-            if saved >= 2 {
-                return min(6, max(2, saved))
-            }
-            let legacySaved = defaults.integer(forKey: "advctl.sensitivity")
-            return legacySaved == 0 ? 2 : min(6, max(2, legacySaved * 2))
+            let saved = defaults.integer(forKey: "advctl.joystickSensitivity")
+            return saved == 0 ? 50 : min(100, max(1, saved))
         }
-        set { defaults.set(min(6, max(2, newValue)), forKey: "advctl.sensitivityHalfStep") }
+        set { defaults.set(min(100, max(1, newValue)), forKey: "advctl.joystickSensitivity") }
     }
 
     var flags: UInt8 {
@@ -39,7 +35,7 @@ final class JoystickSettings {
     }
 
     var sensitivityLabel: String {
-        sensitivity.isMultiple(of: 2) ? "\(sensitivity / 2)x" : "\(sensitivity / 2).5x"
+        "\(sensitivity)"
     }
 
     var knobMode: Int {

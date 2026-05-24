@@ -12,6 +12,8 @@ class Settings;
 
 class ExternalInput {
 public:
+    static constexpr uint8_t DEFAULT_JOYSTICK_SENSITIVITY = 50;
+
     static constexpr uint8_t PAD_UP     = 1 << 0;
     static constexpr uint8_t PAD_DOWN   = 1 << 1;
     static constexpr uint8_t PAD_LEFT   = 1 << 2;
@@ -27,6 +29,7 @@ public:
     void setPaused(bool paused);
     void loadSettings(Settings& settings);
     void calibrateJoystickCenter();
+    void setJoystickSensitivity(uint8_t sensitivity);
     void setDirectionTransform(bool flipX, bool flipY, bool swapAxes);
     void toggleFlipX();
     void toggleFlipY();
@@ -65,6 +68,11 @@ public:
     bool getSwapAxes() const
     {
         return _swap_axes;
+    }
+
+    uint8_t getJoystickSensitivity() const
+    {
+        return _joystick_sensitivity;
     }
 
     bool isEncoderConnected() const
@@ -117,38 +125,48 @@ private:
     int _chain_rx_pin                 = -1;
     int _chain_tx_pin                 = -1;
     uint8_t _chain_count              = 0;
-    uint8_t _chain_joystick_index     = 0;
-    uint8_t _chain_encoder_index      = 0;
-    uint8_t _chain_bus_index          = 0;
-    int16_t _chain_joystick_center_x  = 0;
-    int16_t _chain_joystick_center_y  = 0;
-    uint8_t _buttons                  = 0;
-    uint8_t _pressed                  = 0;
-    uint8_t _released                 = 0;
-    int16_t _encoder_value            = 0;
-    int16_t _encoder_delta            = 0;
-    uint32_t _last_poll               = 0;
-    uint32_t _last_probe              = 0;
-    uint32_t _last_scan_log           = 0;
-    uint32_t _last_center_wait_log    = 0;
-    uint8_t _chain_read_failures      = 0;
-    uint8_t _encoder_read_failures    = 0;
-    uint8_t _chain_bus_read_failures  = 0;
-    bool _connected                   = false;
-    bool _byte_buttons_connected      = false;
-    bool _dual_button_connected       = false;
-    bool _encoder_button              = false;
-    bool _encoder_pressed             = false;
-    bool _encoder_released            = false;
-    bool _unit_encoder_has_last_value = false;
-    bool _scan_logged                 = false;
-    bool _paused                      = false;
-    bool _chain_uart_ready            = false;
+    uint8_t _chain_joystick_index        = 0;
+    uint8_t _chain_encoder_index         = 0;
+    uint8_t _chain_bus_index             = 0;
+    int16_t _chain_joystick_center_x     = 0;
+    int16_t _chain_joystick_center_y     = 0;
+    int16_t _chain_joystick_center_min_x = 0;
+    int16_t _chain_joystick_center_max_x = 0;
+    int16_t _chain_joystick_center_min_y = 0;
+    int16_t _chain_joystick_center_max_y = 0;
+    int32_t _chain_joystick_center_sum_x = 0;
+    int32_t _chain_joystick_center_sum_y = 0;
+    uint8_t _chain_joystick_center_samples = 0;
+    uint8_t _buttons                       = 0;
+    uint8_t _pressed                       = 0;
+    uint8_t _released                      = 0;
+    int16_t _encoder_value                 = 0;
+    int16_t _encoder_delta                 = 0;
+    uint32_t _last_poll                    = 0;
+    uint32_t _last_probe                   = 0;
+    uint32_t _last_scan_log                = 0;
+    uint32_t _last_center_wait_log         = 0;
+    uint32_t _last_chain_joystick_log      = 0;
+    uint8_t _chain_read_failures           = 0;
+    uint8_t _encoder_read_failures         = 0;
+    uint8_t _chain_bus_read_failures       = 0;
+    bool _connected                        = false;
+    bool _byte_buttons_connected           = false;
+    bool _dual_button_connected            = false;
+    bool _encoder_button                   = false;
+    bool _encoder_pressed                  = false;
+    bool _encoder_released                 = false;
+    bool _unit_encoder_has_last_value      = false;
+    bool _scan_logged                      = false;
+    bool _paused                           = false;
+    bool _chain_uart_ready                 = false;
+    bool _chain_joystick_raw_adc_disabled = false;
     bool _chain_joystick_center_ready   = false;
     bool _chain_joystick_center_pending = false;
     bool _flip_x                      = false;
     bool _flip_y                      = false;
     bool _swap_axes                   = false;
+    uint8_t _joystick_sensitivity     = DEFAULT_JOYSTICK_SENSITIVITY;
     Settings* _settings               = nullptr;
 
     bool read(uint8_t& buttons, uint32_t now);
@@ -167,7 +185,10 @@ private:
     bool initChainBusButtons();
     bool chainBusReadInput(uint8_t gpio, uint8_t& level);
     uint8_t applyDirectionTransform(uint8_t buttons) const;
+    int chainJoystickDeadZone(int baseDeadZone) const;
     void saveDirectionSettings();
+    void resetChainJoystickCenterSamples();
+    bool updateChainJoystickCenter(int rawX, int rawY);
     void initChainUart(int rxPin, int txPin);
     bool chainCommand(uint8_t index, uint8_t command, const uint8_t* data, size_t dataSize, uint8_t* response,
                       size_t& responseSize);
