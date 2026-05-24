@@ -43,6 +43,9 @@ rm -rf "${BUILD_APP_PATH}"
 mkdir -p "${BUILD_APP_PATH}/Contents/MacOS" "${BUILD_APP_PATH}/Contents/Resources"
 cp "${EXECUTABLE}" "${BUILD_APP_PATH}/Contents/MacOS/ADVCtl"
 cp Sources/MacCtlHelper/Info.plist "${BUILD_APP_PATH}/Contents/Info.plist"
+if [ -d Sources/MacCtlHelper/Resources ]; then
+    cp -R Sources/MacCtlHelper/Resources/. "${BUILD_APP_PATH}/Contents/Resources/"
+fi
 cp -R "${DRIVER_PATH}" "${BUILD_APP_PATH}/Contents/Resources/ADVCtlAudio.driver"
 /usr/bin/codesign --force --sign "${CODESIGN_IDENTITY}" "${BUILD_APP_PATH}/Contents/Resources/ADVCtlAudio.driver" >/dev/null
 /usr/bin/codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${BUILD_APP_PATH}" >/dev/null

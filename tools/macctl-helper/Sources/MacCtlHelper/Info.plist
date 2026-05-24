@@ -20,6 +20,14 @@
     <string>ADVCtl listens to the Cardputer ADV HID control endpoint for knob commands.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>ADVCtl requests microphone permission during setup so macOS records the same stable app identity used by the ADV audio bridge.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ADVCtl scans your local network for Apple TV so it can pair and control HomePod/Apple TV volume.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_airplay._tcp</string>
+        <string>_raop._tcp</string>
+        <string>_companion-link._tcp</string>
+    </array>
     <key>LSUIElement</key>
     <true/>
 </dict>

@@ -59,6 +59,25 @@ final class JoystickSettings {
         set { defaults.set(min(255, max(1, newValue)), forKey: "advctl.powerSaveTimeoutMinutes") }
     }
 
+    var appleTVIdentifier: String {
+        get { defaults.string(forKey: "advctl.appleTVIdentifier") ?? "" }
+        set { defaults.set(newValue, forKey: "advctl.appleTVIdentifier") }
+    }
+
+    var appleTVName: String {
+        get { defaults.string(forKey: "advctl.appleTVName") ?? "" }
+        set { defaults.set(newValue, forKey: "advctl.appleTVName") }
+    }
+
+    var appleTVPairingProtocol: String {
+        get { defaults.string(forKey: "advctl.appleTVPairingProtocol") ?? "airplay" }
+        set { defaults.set(newValue.isEmpty ? "airplay" : newValue, forKey: "advctl.appleTVPairingProtocol") }
+    }
+
+    var appleTVConfigured: Bool {
+        !appleTVIdentifier.isEmpty
+    }
+
     func applyHardware(flags: UInt8, sensitivity: UInt8, knobMode: UInt8) {
         swapAxes = (flags & 0x01) != 0
         invertX = (flags & 0x02) != 0
