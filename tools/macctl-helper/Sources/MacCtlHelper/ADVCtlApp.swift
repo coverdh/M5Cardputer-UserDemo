@@ -36,6 +36,7 @@ private let advCtlNowPlayingArtistCommand: UInt8 = 0x89
 private let advCtlAudioFrameReport: UInt8 = 0xA0
 private let advCtlAudioStateReport: UInt8 = 0xA1
 private let advCtlAudioAckRetryInterval: TimeInterval = 2.0
+private let advCtlAudioMaxConcealedPackets = 16
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
@@ -261,6 +262,8 @@ private final class ADVCtlBridge {
     private var advAudioStateAcknowledged = true
     private var lastAudioBridgeCommandAt: TimeInterval = 0
     private var audioFrameCount = 0
+    private var expectedAudioFrameSequence: UInt8?
+    private var concealedAudioPacketCount = 0
     private var lastNowPlayingTextSignature = ""
     weak var delegate: ADVCtlBridgeDelegate?
 
@@ -487,6 +490,7 @@ private final class ADVCtlBridge {
         }
         advAudioBridgeActive = active
         advAudioStateAcknowledged = false
+        resetAudioPacketTracking()
         lastAudioBridgeCommandAt = Date().timeIntervalSince1970
         sendControlPayload([advCtlAudioTestCommand, active ? 1 : 0, 0, 0],
                            successMessage: active ? "ADV microphone bridge activated" : "ADV microphone bridge stopped",
@@ -499,6 +503,38 @@ private final class ADVCtlBridge {
             return false
         }
         return Date().timeIntervalSince1970 - lastAudioBridgeCommandAt >= advCtlAudioAckRetryInterval
+    }
+
+    private func resetAudioPacketTracking() {
+        expectedAudioFrameSequence = nil
+        audioFrameCount = 0
+        concealedAudioPacketCount = 0
+    }
+
+    private func concealMissingAudioPackets(before sequence: UInt8, payloadBytes: Int) -> Int {
+        guard let expected = expectedAudioFrameSequence, payloadBytes > 0 else {
+            expectedAudioFrameSequence = sequence &+ 1
+            return 0
+        }
+
+        let distance = (Int(sequence) - Int(expected) + 256) % 256
+        expectedAudioFrameSequence = sequence &+ 1
+        guard distance > 0 else {
+            return 0
+        }
+
+        guard distance <= 127 else {
+            log("ADV audio sequence reset or stale packet: expected=\(expected) got=\(sequence)")
+            return 0
+        }
+
+        let missingPackets = min(distance, advCtlAudioMaxConcealedPackets)
+        concealedAudioPacketCount += missingPackets
+        let written = audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)
+        if distance > advCtlAudioMaxConcealedPackets {
+            log("ADV audio gap capped: missing=\(distance) concealed=\(missingPackets)")
+        }
+        return written
     }
 
     private func sendKeyboardLedAudioControl(active: Bool) {
@@ -687,6 +723,7 @@ private final class ADVCtlBridge {
         if payload.count >= 2, payload[0] == advCtlAudioStateReport {
             let active = payload[1] != 0
             advAudioStateAcknowledged = active == advAudioBridgeActive
+            resetAudioPacketTracking()
             updateMessage(active ? "ADV microphone started" : "ADV microphone stopped")
             DispatchQueue.main.async {
                 self.delegate?.bridgeDidUpdateAudioStatus(active ? "ADV microphone streaming" : self.audioSink.statusText,
@@ -696,12 +733,16 @@ private final class ADVCtlBridge {
         }
 
         if payload.count >= 3, payload[0] == advCtlAudioFrameReport {
+            let sequence = payload[1]
             let byteCount = min(Int(payload[2]), payload.count - 3)
             if byteCount > 0 {
+                let concealedFrames = concealMissingAudioPackets(before: sequence, payloadBytes: byteCount)
                 audioFrameCount += 1
                 let writtenFrames = audioSink.enqueueULaw(payload.subdata(in: 3..<(3 + byteCount)))
                 if audioFrameCount == 1 || audioFrameCount % 100 == 0 {
-                    updateMessage("Received ADV audio frames: \(audioFrameCount), wrote \(writtenFrames) samples")
+                    updateMessage("Received ADV audio frames: \(audioFrameCount), wrote \(writtenFrames) samples, concealed \(concealedAudioPacketCount) packets")
+                } else if concealedFrames > 0 {
+                    updateMessage("Concealed ADV audio gap before seq \(sequence): wrote \(concealedFrames) silence samples")
                 }
             }
             return

@@ -198,6 +198,20 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("readIndex += UInt64(overflow)", source)
         self.assertNotIn("UInt64(samples.count - capacity)", source)
 
+    def test_mac_audio_bridge_conceals_best_effort_hid_packet_loss(self):
+        app = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlApp.swift").read_text()
+        sink = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlAudioRingSink.swift").read_text()
+
+        self.assertIn("private let advCtlAudioMaxConcealedPackets = 16", app)
+        self.assertIn("private var expectedAudioFrameSequence: UInt8?", app)
+        self.assertIn("private func concealMissingAudioPackets(before sequence: UInt8, payloadBytes: Int) -> Int", app)
+        self.assertIn("let distance = (Int(sequence) - Int(expected) + 256) % 256", app)
+        self.assertIn("guard distance <= 127 else", app)
+        self.assertIn("audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)", app)
+        self.assertIn("resetAudioPacketTracking()", app[app.index("if payload.count >= 2, payload[0] == advCtlAudioStateReport"):])
+        self.assertIn("private let advCtlAudioUpsampleFactor = 6", sink)
+        self.assertIn("@discardableResult func enqueueSilence(uLawSampleCount: Int) -> Int", sink)
+
     def test_keyboard_report_map_keeps_output_byte_aligned(self):
         source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
         start = source.index("const unsigned char keyboardReportMap[]")
