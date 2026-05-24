@@ -28,6 +28,7 @@ void ble_hid_device_helper_send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int
 void ble_hid_device_helper_send_consumer(uint16_t usage_id);
 bool ble_hid_device_helper_send_macctl_volume_delta(int8_t delta);
 bool ble_hid_device_helper_send_macctl_play_pause(void);
+bool ble_hid_device_helper_send_macctl_system_key(uint8_t key);
 bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity, uint8_t knob_mode);
 bool ble_hid_device_helper_send_macctl_power_config(uint8_t screen_timeout_s, uint8_t power_save_timeout_min);
 bool ble_hid_device_helper_send_macctl_audio_state(bool active);
@@ -54,6 +55,11 @@ enum {
     BLE_HID_CONSUMER_MUTE                = 226,
     BLE_HID_CONSUMER_VOLUME_UP           = 233,
     BLE_HID_CONSUMER_VOLUME_DOWN         = 234,
+};
+
+enum {
+    BLE_HID_MACCTL_SYSTEM_CONTROL_CENTER = 1,
+    BLE_HID_MACCTL_SYSTEM_SPOTLIGHT      = 2,
 };
 
 #ifdef __cplusplus

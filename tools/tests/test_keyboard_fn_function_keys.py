@@ -31,7 +31,10 @@ class KeyboardFnFunctionKeyTests(unittest.TestCase):
 
         self.assertIn("BLE_HID_CONSUMER_BRIGHTNESS_UP       = 111", ble_header)
         self.assertIn("BLE_HID_CONSUMER_BRIGHTNESS_DOWN     = 112", ble_header)
+        self.assertIn("BLE_HID_MACCTL_SYSTEM_CONTROL_CENTER = 1", ble_header)
+        self.assertIn("BLE_HID_MACCTL_SYSTEM_SPOTLIGHT      = 2", ble_header)
         self.assertIn("bool bleMacSystemControlKey(const Keyboard::KeyEvent_t& keyEvent);", hal_header)
+        self.assertIn("bool bleMacCtlSystemKey(uint8_t key);", hal_header)
 
         system_control = hal[hal.index("bool Hal::bleMacSystemControlKey"):
                              hal.index("bool Hal::bleMacCtlVolumeDelta")]
@@ -48,6 +51,14 @@ class KeyboardFnFunctionKeyTests(unittest.TestCase):
             self.assertIn(f"usageId = {usage};", system_control)
         self.assertIn("if (keyEvent.state)", system_control)
         self.assertIn("bleConsumerSend(usageId);", system_control)
+        self.assertIn("case KEY_F3:", system_control)
+        self.assertIn("bleMacCtlSystemKey(BLE_HID_MACCTL_SYSTEM_CONTROL_CENTER);", system_control)
+        self.assertIn("case KEY_F4:", system_control)
+        self.assertIn("bleMacCtlSystemKey(BLE_HID_MACCTL_SYSTEM_SPOTLIGHT);", system_control)
+
+        macctl_helper = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
+        self.assertIn("#define MACCTL_CMD_SYSTEM_KEY   3", macctl_helper)
+        self.assertIn("ble_hid_device_helper_send_macctl_system_key", macctl_helper)
 
         ble_forward = hal[hal.index("void Hal::handle_ble_keyboard_event"):
                           hal.index("/* -------------------------------------------------------------------------- */", hal.index("void Hal::handle_ble_keyboard_event"))]
@@ -56,6 +67,16 @@ class KeyboardFnFunctionKeyTests(unittest.TestCase):
         adv_forward = advctl[advctl.index("void AppHomeControl::forwardKeyboardEvent"):
                              advctl.index("void AppHomeControl::handlePointerKey")]
         self.assertIn("if (GetHAL().bleMacSystemControlKey(keyEvent))", adv_forward)
+
+    def test_home_screen_only_consumes_wake_key_in_power_save(self):
+        source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
+        handler = source[source.index("void AppHomeControl::handleKeyEvent"):
+                         source.index("void AppHomeControl::forwardKeyboardEvent")]
+
+        self.assertIn("if (_screen_off && _power_save_active)", handler)
+        self.assertNotIn("if (_screen_off) {\n        if (keyEvent.state)", handler)
+        self.assertLess(handler.index("if (_screen_off && _power_save_active)"),
+                        handler.index("markUserActivity();"))
 
 
 if __name__ == "__main__":

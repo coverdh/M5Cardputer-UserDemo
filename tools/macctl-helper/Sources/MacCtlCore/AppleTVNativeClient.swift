@@ -186,6 +186,8 @@ public final class AppleTVNativeClient {
             try await applyVolumeDelta(delta, identifier: identifier)
         case .playPause:
             _ = try await runBridge(arguments: ["remote", "--identifier", identifier, "--command", "play_pause"])
+        case .systemKey:
+            return
         }
     }
 

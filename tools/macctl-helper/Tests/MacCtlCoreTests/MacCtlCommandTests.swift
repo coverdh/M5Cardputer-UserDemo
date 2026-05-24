@@ -12,6 +12,12 @@ final class MacCtlCommandTests: XCTestCase {
         XCTAssertEqual(MacCtlCommand(payload: Data([2, 0, 0])), .playPause)
     }
 
+    func testParsesSystemKeys() {
+        XCTAssertEqual(MacCtlCommand(payload: Data([3, 1, 0])), .systemKey(.controlCenter))
+        XCTAssertEqual(MacCtlCommand(payload: Data([3, 2, 0])), .systemKey(.spotlight))
+        XCTAssertNil(MacCtlCommand(payload: Data([3, 99, 0])))
+    }
+
     func testRejectsUnknownPayloads() {
         XCTAssertNil(MacCtlCommand(payload: Data()))
         XCTAssertNil(MacCtlCommand(payload: Data([99, 0, 0])))
