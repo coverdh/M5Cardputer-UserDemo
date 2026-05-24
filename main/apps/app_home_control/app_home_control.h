@@ -49,8 +49,10 @@ private:
     int _pointer_sensitivity       = 2;
     uint32_t _screen_timeout_ms    = 30000;
     uint32_t _power_save_timeout_ms = 180000;
-    uint8_t _tv_power_addr         = 0x04;
-    uint8_t _tv_power_cmd          = 0x08;
+    uint8_t _tv_power_addr         = 0x3C;
+    uint8_t _tv_power_cmd          = 0xCC;
+    uint8_t _tv_input_addr         = 0x86;
+    uint8_t _tv_input_cmd          = 0x01;
     uint32_t _last_status_refresh  = 0;
     uint32_t _last_pointer_repeat  = 0;
     uint32_t _last_external_render = 0;
@@ -86,7 +88,7 @@ private:
     static constexpr uint32_t POINTER_REPEAT_MS  = 55;
     static constexpr uint32_t EXTERNAL_RENDER_MS = 250;
     static constexpr uint32_t SETUP_RENDER_MS    = 1000;
-    static constexpr uint32_t DASHBOARD_RENDER_MS = 1000;
+    static constexpr uint32_t DASHBOARD_RENDER_MS = 5000;
     static constexpr uint32_t DEFAULT_SCREEN_TIMEOUT_MS = 30000;
     static constexpr uint32_t DEFAULT_POWER_SAVE_TIMEOUT_MS = 180000;
     static constexpr int ACTION_COUNT            = 8;
@@ -161,9 +163,11 @@ private:
     void openVolumeSetter();
     void applyVolume();
     void sendTvPower();
+    void sendTvInputSource();
     void setStatus(const std::string& status);
     bool parseConfigLine(const std::string& line);
     bool parseTvPowerConfig(const std::string& value);
+    bool parseTvInputConfig(const std::string& value);
     bool isLeftKey(const Keyboard::KeyEvent_t& keyEvent) const;
     bool isRightKey(const Keyboard::KeyEvent_t& keyEvent) const;
     bool isUpKey(const Keyboard::KeyEvent_t& keyEvent) const;

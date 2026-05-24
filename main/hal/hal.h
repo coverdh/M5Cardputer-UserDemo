@@ -111,6 +111,8 @@ public:
     /* ----------------------------------- IR ----------------------------------- */
     void irInit();
     void irSend(uint8_t addr, uint8_t cmd);
+    void irSendXiaomi(uint8_t device, uint8_t function, uint8_t repeats = 3);
+    void irSendRaw(uint32_t carrier_hz, const uint32_t* durations_us, size_t duration_count);
 
     /* ----------------------------------- BLE ---------------------------------- */
     bool bleControlInit();

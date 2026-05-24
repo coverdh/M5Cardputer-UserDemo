@@ -651,6 +651,30 @@ void Hal::irSend(uint8_t addr, uint8_t cmd)
     ir_helper_send(addr, cmd);
 }
 
+void Hal::irSendXiaomi(uint8_t device, uint8_t function, uint8_t repeats)
+{
+    mclog::tagInfo(_tag, "xiaomi ir send: device: {:02X}, function: {:02X}", device, function);
+
+    if (!_is_ir_inited) {
+        mclog::tagError(_tag, "ir not inited");
+        return;
+    }
+
+    ir_helper_send_xiaomi(device, function, repeats);
+}
+
+void Hal::irSendRaw(uint32_t carrier_hz, const uint32_t* durations_us, size_t duration_count)
+{
+    mclog::tagInfo(_tag, "raw ir send: carrier: {}, durations: {}", carrier_hz, duration_count);
+
+    if (!_is_ir_inited) {
+        mclog::tagError(_tag, "ir not inited");
+        return;
+    }
+
+    ir_helper_send_raw(carrier_hz, durations_us, duration_count);
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                     BLE                                    */
 /* -------------------------------------------------------------------------- */
