@@ -17,9 +17,29 @@
 
 using namespace mooncake;
 
+namespace {
+constexpr uint8_t XIAOMI_TV_POWER_DEVICE = 0x3C;
+constexpr uint8_t XIAOMI_TV_POWER_FUNC   = 0xCC;
+constexpr uint8_t XIAOMI_TV_INPUT_DEVICE = 0x86;
+constexpr uint8_t XIAOMI_TV_INPUT_FUNC   = 0x01;
+constexpr uint8_t XIAOMI_TV_IR_REPEATS   = 5;
+constexpr uint8_t LEGACY_NEC_POWER_ADDR  = 0x04;
+constexpr uint8_t LEGACY_NEC_POWER_CMD   = 0x08;
+constexpr uint32_t MITV_RAW_CARRIER_HZ   = 38028;
+constexpr uint32_t MITV_RAW_POWER[] = {
+    1578, 1026, 579, 605, 579, 605, 1446, 605, 1446, 605, 579, 605, 1446, 605, 579, 605, 1446, 605,
+    579,  605,  1446, 605, 1446, 605, 10860, 1026, 579, 605, 579, 605, 1446, 605, 1446, 605, 579, 605,
+    1446, 605,  579,  605, 1446, 605, 579,  605, 1446, 605, 1446, 605, 10860, 1026, 579, 605, 579, 605,
+    1446, 605,  1446, 605, 579,  605, 1446, 605, 579,  605, 1446, 605, 579,  605, 1446, 605, 1446, 605,
+    10860, 1026, 579,  605, 579,  605, 1446, 605, 1446, 605, 579,  605, 1446, 605, 579,  605, 1446, 605,
+    579,  605,  1446, 605, 1446, 605, 10860, 1026, 579, 605, 579, 605, 1446, 605, 1446, 605, 579, 605,
+    1446, 605,  579,  605, 1446, 605, 579,  605, 1446, 605, 1446, 605, 32767,
+};
+}  // namespace
+
 const AppHomeControl::Action AppHomeControl::ACTIONS[AppHomeControl::ACTION_COUNT] = {
-    {"TV Power", "IR toggle"}, {"Pointer", "ADVCtl mouse"}, {"Keyboard", "BLE keys"}, {"HP Vol-", "HA volume"},
-    {"HP Play", "HA media"},   {"HP Vol+", "HA volume"}, {"Volume", "device"},     {"Config", "type setup"},
+    {"TV Pwr", "Xiaomi IR"}, {"Pointer", "ADVCtl mouse"}, {"Keyboard", "BLE keys"}, {"TV In", "Xiaomi IR"},
+    {"HP Play", "HA media"}, {"HP Vol+", "HA volume"},    {"Volume", "device"},     {"Config", "type setup"},
 };
 
 AppHomeControl::AppHomeControl()
@@ -128,8 +148,14 @@ void AppHomeControl::loadConfig()
     _ha_config.baseUrl       = settings.GetString("ha_url", "");
     _ha_config.token         = settings.GetString("ha_token", "");
     _ha_config.homepodEntity = settings.GetString("ha_homepod", "");
-    _tv_power_addr           = static_cast<uint8_t>(settings.GetInt("tv_power_addr", 0x04));
-    _tv_power_cmd            = static_cast<uint8_t>(settings.GetInt("tv_power_cmd", 0x08));
+    _tv_power_addr           = static_cast<uint8_t>(settings.GetInt("tv_power_addr", XIAOMI_TV_POWER_DEVICE));
+    _tv_power_cmd            = static_cast<uint8_t>(settings.GetInt("tv_power_cmd", XIAOMI_TV_POWER_FUNC));
+    _tv_input_addr           = static_cast<uint8_t>(settings.GetInt("tv_input_addr", XIAOMI_TV_INPUT_DEVICE));
+    _tv_input_cmd            = static_cast<uint8_t>(settings.GetInt("tv_input_cmd", XIAOMI_TV_INPUT_FUNC));
+    if (_tv_power_addr == LEGACY_NEC_POWER_ADDR && _tv_power_cmd == LEGACY_NEC_POWER_CMD) {
+        _tv_power_addr = XIAOMI_TV_POWER_DEVICE;
+        _tv_power_cmd  = XIAOMI_TV_POWER_FUNC;
+    }
     const int savedHalfStep  = settings.GetInt("ptr_sens2", 0);
     const int savedWholeStep = settings.GetInt("macctl_ptr_sens", 1);
     _pointer_sensitivity     = savedHalfStep >= 2 ? savedHalfStep : savedWholeStep * 2;
@@ -179,6 +205,8 @@ void AppHomeControl::saveHomeAssistantConfig()
     settings.SetString("ha_homepod", _ha_config.homepodEntity);
     settings.SetInt("tv_power_addr", _tv_power_addr);
     settings.SetInt("tv_power_cmd", _tv_power_cmd);
+    settings.SetInt("tv_input_addr", _tv_input_addr);
+    settings.SetInt("tv_input_cmd", _tv_input_cmd);
     _ha.setConfig(_ha_config);
 }
 
@@ -825,21 +853,10 @@ void AppHomeControl::renderWifiPrompt(const char* title, bool maskInput)
 
 void AppHomeControl::renderDashboard()
 {
-    const auto& nowPlaying = GetHAL().bleMacCtlNowPlaying();
-    if (GetHAL().bleMacCtlIsConnected() && nowPlaying.active) {
-        renderNowPlaying();
-        return;
-    }
-
     GetHAL().setFullscreenMode(false);
     auto& canvas = GetHAL().canvas;
-    canvas.fillScreen(THEME_COLOR_BG);
-    canvas.setTextSize(1);
-    canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
-    canvas.setCursor(0, 2);
-    canvas.println("ADVCtl");
-
     const auto& input = GetHAL().externalInput;
+    const auto& nowPlaying = GetHAL().bleMacCtlNowPlaying();
     const char* knobMode = "SysVol";
     if (_knob_scroll_mode) {
         knobMode = "Wheel";
@@ -849,27 +866,65 @@ void AppHomeControl::renderDashboard()
         knobMode = "Off";
     }
 
+    auto printShort = [&](const std::string& text, int maxChars) {
+        if (static_cast<int>(text.size()) <= maxChars) {
+            canvas.print(text.c_str());
+            return;
+        }
+        if (maxChars <= 1) {
+            canvas.print(".");
+            return;
+        }
+        canvas.print((text.substr(0, maxChars - 1) + ".").c_str());
+    };
+
+    canvas.fillScreen(THEME_COLOR_BG);
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_ORANGE, THEME_COLOR_BG);
+    canvas.setCursor(0, 0);
+    canvas.printf("ADVCtl B:%s A:%s",
+                  GetHAL().bleKeyboardIsConnected() ? "ok" : "adv",
+                  GetHAL().bleMacCtlIsConnected() ? "ok" : "--");
+
     canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
-    canvas.printf("BLE: %s\n", GetHAL().bleKeyboardIsConnected() ? "connected" : "advertising");
-    canvas.printf("Mac App: %s\n", GetHAL().bleMacCtlIsConnected() ? "connected" : "waiting");
-    canvas.printf("Time: %s\n", GetHAL().bleMacCtlTimeSynced() ? "synced" : "waiting");
-    canvas.printf("Knob: %s %s\n", input.isEncoderConnected() ? "ready" : "missing", knobMode);
+    canvas.setCursor(0, 12);
+    canvas.printf("Wi:%s T:%s Mic:%s M:%s",
+                  GetHAL().isWifiConnected() ? "ok" : "--",
+                  GetHAL().bleMacCtlTimeSynced() ? "ok" : "--",
+                  _audio_test_active ? "on" : "--",
+                  input.isConnected() ? "ok" : "--");
+
+    canvas.setCursor(0, 24);
+    canvas.printf("Knob:%s %s",
+                  input.isEncoderConnected() ? "ok" : "--",
+                  knobMode);
+    canvas.setCursor(98, 24);
+    canvas.printf("Ptr:%s", pointerSensitivityLabel().c_str());
+
+    canvas.setCursor(0, 36);
+    canvas.printf("XY:%s X:%s Y:%s",
+                  input.getSwapAxes() ? "sw" : "n",
+                  input.getFlipX() ? "inv" : "n",
+                  input.getFlipY() ? "inv" : "n");
 
     canvas.setTextColor(TFT_CYAN, THEME_COLOR_BG);
-    canvas.print("Last: ");
-    printClipped(_knob_status, 25);
-    canvas.println();
+    canvas.setCursor(0, 50);
+    canvas.print("TV Ent/T:Pwr Sp:In");
+    canvas.setCursor(0, 62);
+    canvas.print("Ptr E/S:Spd A:XY D:X R:Reset");
+    canvas.setCursor(0, 74);
+    canvas.print("Sys W:WiFi C:Cfg S:Sleep");
+    canvas.setCursor(0, 86);
+    canvas.print("Snd M:On [/]Vol  B:Pair");
 
-    canvas.setTextColor(TFT_WHITE, THEME_COLOR_BG);
-    canvas.printf("Mouse: %s %s\n", input.isConnected() ? "ready" : "missing", pointerSensitivityLabel().c_str());
-    canvas.print("Move: ");
-    printClipped(_pointer_status, 24);
-    canvas.println();
-    canvas.printf("Map: XY %s X %s Y %s\n",
-                  input.getSwapAxes() ? "swap" : "norm",
-                  input.getFlipX() ? "inv" : "norm",
-                  input.getFlipY() ? "inv" : "norm");
-    canvas.println(_audio_test_active ? "Mic: streaming" : "Fn+ESAD mouse");
+    canvas.setTextColor(TFT_GREEN, THEME_COLOR_BG);
+    canvas.setCursor(0, 98);
+    if (nowPlaying.active) {
+        canvas.printf("Now %s %u%% ", nowPlaying.playing ? ">" : "||", nowPlaying.volumePercent);
+        printShort(nowPlaying.title[0] ? nowPlaying.title : "Apple TV", 18);
+    } else {
+        canvas.print(GetHAL().bleMacCtlIsConnected() ? "Now idle" : "Now app--");
+    }
 
     renderStatusBar();
     GetHAL().pushCanvas();
@@ -1028,7 +1083,8 @@ void AppHomeControl::renderConfig()
     canvas.println("url=http://ha:8123");
     canvas.println("token=LONG_TOKEN");
     canvas.println("entity=media_player.xxx");
-    canvas.println("tv=0x04,0x08");
+    canvas.println("tv=0x3c,0xcc");
+    canvas.println("input=0x86,0x01");
     canvas.println("vol=35");
     canvas.println("hpvol=35");
     canvas.println("Esc: dashboard");
@@ -1340,11 +1396,7 @@ bool AppHomeControl::handleDashboardFnControl(const Keyboard::KeyEvent_t& keyEve
     } else if (isEnterKey(keyEvent)) {
         sendTvPower();
     } else if (keyEvent.keyCode == KEY_SPACE) {
-        if (GetHAL().bleMacCtlPlayPause()) {
-            setStatus("HomePod mute toggle");
-        } else {
-            setStatus("BLE not ready");
-        }
+        sendTvInputSource();
     } else if (keyEvent.keyCode == KEY_W) {
         _mode         = Mode::WifiSsid;
         _input_buffer = _wifi_ssid;
@@ -1494,11 +1546,7 @@ void AppHomeControl::activateSelectedAction()
             setStatus("BLE keyboard ready");
             break;
         case 3:
-            if (GetHAL().bleMacCtlVolumeDelta(-1)) {
-                setStatus("HomePod volume down");
-            } else {
-                setStatus("BLE not ready");
-            }
+            sendTvInputSource();
             break;
         case 4:
             if (GetHAL().bleMacCtlPlayPause()) {
@@ -1542,8 +1590,17 @@ void AppHomeControl::applyVolume()
 void AppHomeControl::sendTvPower()
 {
     GetHAL().irInit();
-    GetHAL().irSend(_tv_power_addr, _tv_power_cmd);
-    setStatus("TV power sent");
+    GetHAL().irSendXiaomi(_tv_power_addr, _tv_power_cmd, XIAOMI_TV_IR_REPEATS);
+    GetHAL().delay(40);
+    GetHAL().irSendRaw(MITV_RAW_CARRIER_HZ, MITV_RAW_POWER, sizeof(MITV_RAW_POWER) / sizeof(MITV_RAW_POWER[0]));
+    setStatus("TV power x2");
+}
+
+void AppHomeControl::sendTvInputSource()
+{
+    GetHAL().irInit();
+    GetHAL().irSendXiaomi(_tv_input_addr, _tv_input_cmd, XIAOMI_TV_IR_REPEATS);
+    setStatus("TV input");
 }
 
 void AppHomeControl::setStatus(const std::string& status)
@@ -1568,6 +1625,8 @@ bool AppHomeControl::parseConfigLine(const std::string& line)
         _ha_config.homepodEntity = value;
     } else if (key == "tv") {
         return parseTvPowerConfig(value);
+    } else if (key == "input" || key == "src") {
+        return parseTvInputConfig(value);
     } else if (key == "vol") {
         int volume = std::strtol(value.c_str(), nullptr, 0);
         if (volume < 0 || volume > 100) {
@@ -1598,6 +1657,24 @@ bool AppHomeControl::parseTvPowerConfig(const std::string& value)
 
     _tv_power_addr = static_cast<uint8_t>(addr);
     _tv_power_cmd  = static_cast<uint8_t>(cmd);
+    return true;
+}
+
+bool AppHomeControl::parseTvInputConfig(const std::string& value)
+{
+    auto comma = value.find(',');
+    if (comma == std::string::npos) {
+        return false;
+    }
+
+    int addr = std::strtol(value.substr(0, comma).c_str(), nullptr, 0);
+    int cmd  = std::strtol(value.substr(comma + 1).c_str(), nullptr, 0);
+    if (addr < 0 || addr > 255 || cmd < 0 || cmd > 255) {
+        return false;
+    }
+
+    _tv_input_addr = static_cast<uint8_t>(addr);
+    _tv_input_cmd  = static_cast<uint8_t>(cmd);
     return true;
 }
 
