@@ -11,11 +11,25 @@
 #include <esp_mac.h>
 #include "utils/ble_hid_device/ble_hid_device_helper.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string _tag = "HAL";
+static constexpr uint32_t AIR_MOUSE_HOLD_MS = 800;
+static constexpr uint32_t AIR_MOUSE_SAMPLE_MS = 12;
+static constexpr uint16_t AIR_MOUSE_CALIBRATION_MIN_SAMPLES = 12;
+static constexpr float AIR_MOUSE_CALIBRATION_MAX_GYRO_DPS = 12.0f;
+static constexpr float AIR_MOUSE_CALIBRATION_ACCEL_TOLERANCE_G = 0.18f;
+static constexpr float AIR_MOUSE_DEADZONE_DPS = 0.9f;
+static constexpr float AIR_MOUSE_SMOOTHING_TAU_MS = 32.0f;
+static constexpr float AIR_MOUSE_FILTER_SETTLE_DPS = 0.25f;
+static constexpr float AIR_MOUSE_PIXELS_PER_DEGREE = 8.0f;
+static constexpr float AIR_MOUSE_ACCEL_START_DPS = 45.0f;
+static constexpr float AIR_MOUSE_ACCEL_FULL_DPS = 260.0f;
+static constexpr float AIR_MOUSE_ACCEL_MAX_BOOST = 1.85f;
+static constexpr int AIR_MOUSE_MAX_DELTA = 24;
 
 Hal& GetHAL()
 {
@@ -46,6 +60,7 @@ void Hal::update()
 {
     M5.update();
     keyboard.update();
+    update_air_mouse(millis());
     externalInput.update(millis());
     capLora868.update();
     if (_is_ble_keyboard_inited && !bleKeyboardIsConnected() &&
@@ -1097,6 +1112,192 @@ bool Hal::bleConsumeAudioTestRequest(bool& active)
     return true;
 }
 
+static float apply_air_mouse_deadzone(float value)
+{
+    if (std::fabs(value) <= AIR_MOUSE_DEADZONE_DPS) {
+        return 0.0f;
+    }
+    return value > 0.0f ? value - AIR_MOUSE_DEADZONE_DPS : value + AIR_MOUSE_DEADZONE_DPS;
+}
+
+static float air_mouse_smoothing_alpha(float dt)
+{
+    const float tau = AIR_MOUSE_SMOOTHING_TAU_MS / 1000.0f;
+    return std::clamp(dt / (tau + dt), 0.0f, 1.0f);
+}
+
+static float air_mouse_response_boost(float rate)
+{
+    const float speed = std::fabs(rate);
+    const float range = AIR_MOUSE_ACCEL_FULL_DPS - AIR_MOUSE_ACCEL_START_DPS;
+    const float t = std::clamp((speed - AIR_MOUSE_ACCEL_START_DPS) / range, 0.0f, 1.0f);
+    return 1.0f + t * t * (AIR_MOUSE_ACCEL_MAX_BOOST - 1.0f);
+}
+
+void Hal::reset_air_mouse_calibration()
+{
+    _air_mouse_pending_gyro_samples = 0;
+    _air_mouse_pending_gyro_sum_x = 0.0f;
+    _air_mouse_pending_gyro_sum_y = 0.0f;
+    _air_mouse_pending_gyro_sum_z = 0.0f;
+}
+
+void Hal::sample_air_mouse_calibration(const m5::imu_data_t& data)
+{
+    const float gyro_mag = std::sqrt(data.gyro.x * data.gyro.x + data.gyro.y * data.gyro.y +
+                                     data.gyro.z * data.gyro.z);
+    const float accel_mag = std::sqrt(data.accel.x * data.accel.x + data.accel.y * data.accel.y +
+                                      data.accel.z * data.accel.z);
+    if (gyro_mag > AIR_MOUSE_CALIBRATION_MAX_GYRO_DPS ||
+        std::fabs(accel_mag - 1.0f) > AIR_MOUSE_CALIBRATION_ACCEL_TOLERANCE_G) {
+        return;
+    }
+
+    _air_mouse_pending_gyro_sum_x += data.gyro.x;
+    _air_mouse_pending_gyro_sum_y += data.gyro.y;
+    _air_mouse_pending_gyro_sum_z += data.gyro.z;
+    ++_air_mouse_pending_gyro_samples;
+}
+
+bool Hal::handle_air_mouse_space_event(const Keyboard::KeyEvent_t& keyEvent)
+{
+    if (keyEvent.keyCode != KEY_SPACE) {
+        return false;
+    }
+
+    const bool is_plain_space =
+        keyEvent.extraModifiers == 0 && keyboard.getModifierMask() == 0 && !keyboard.isFnPressed();
+    if (keyEvent.state) {
+        if (!is_plain_space) {
+            return false;
+        }
+        if (!_air_mouse_space_pending && !_air_mouse_active) {
+            _air_mouse_space_pending = true;
+            _air_mouse_space_pressed_ms = millis();
+            _air_mouse_last_sample_ms = 0;
+            reset_air_mouse_calibration();
+            if (!_air_mouse_imu_ready) {
+                imu.begin();
+                _air_mouse_imu_ready = true;
+            }
+        }
+        return true;
+    }
+
+    if (_air_mouse_active) {
+        stop_air_mouse();
+        return true;
+    }
+    if (_air_mouse_space_pending) {
+        _air_mouse_space_pending = false;
+        _air_mouse_space_pressed_ms = 0;
+        bleKeyboardTap(0, KEY_SPACE);
+        return true;
+    }
+    return false;
+}
+
+void Hal::start_air_mouse(uint32_t now)
+{
+    _air_mouse_space_pending = false;
+    _air_mouse_active = true;
+    _air_mouse_last_sample_ms = now;
+    _air_mouse_accum_x = 0.0f;
+    _air_mouse_accum_y = 0.0f;
+    _air_mouse_filtered_x = 0.0f;
+    _air_mouse_filtered_y = 0.0f;
+    if (!_air_mouse_imu_ready) {
+        imu.begin();
+        _air_mouse_imu_ready = true;
+    }
+    if (_air_mouse_pending_gyro_samples >= AIR_MOUSE_CALIBRATION_MIN_SAMPLES) {
+        const float samples = static_cast<float>(_air_mouse_pending_gyro_samples);
+        _air_mouse_gyro_bias_x = _air_mouse_pending_gyro_sum_x / samples;
+        _air_mouse_gyro_bias_y = _air_mouse_pending_gyro_sum_y / samples;
+        _air_mouse_gyro_bias_z = _air_mouse_pending_gyro_sum_z / samples;
+        _air_mouse_gyro_bias_ready = true;
+        mclog::tagInfo(_tag, "air mouse gyro bias: x={:.2f} y={:.2f} z={:.2f}", _air_mouse_gyro_bias_x,
+                       _air_mouse_gyro_bias_y, _air_mouse_gyro_bias_z);
+    }
+    reset_air_mouse_calibration();
+    bleMouseMove(0, 0);
+    mclog::tagInfo(_tag, "air mouse active");
+}
+
+void Hal::stop_air_mouse()
+{
+    _air_mouse_active = false;
+    _air_mouse_space_pending = false;
+    _air_mouse_space_pressed_ms = 0;
+    _air_mouse_last_sample_ms = 0;
+    _air_mouse_accum_x = 0.0f;
+    _air_mouse_accum_y = 0.0f;
+    _air_mouse_filtered_x = 0.0f;
+    _air_mouse_filtered_y = 0.0f;
+    reset_air_mouse_calibration();
+    bleMouseMove(0, 0);
+    mclog::tagInfo(_tag, "air mouse inactive");
+}
+
+void Hal::update_air_mouse(uint32_t now)
+{
+    if (_air_mouse_space_pending && !_air_mouse_active && _air_mouse_imu_ready &&
+        now - _air_mouse_last_sample_ms >= AIR_MOUSE_SAMPLE_MS) {
+        _air_mouse_last_sample_ms = now;
+        if (imu.update()) {
+            sample_air_mouse_calibration(imu.getImuData());
+        }
+    }
+
+    if (_air_mouse_space_pending && !_air_mouse_active && now - _air_mouse_space_pressed_ms >= AIR_MOUSE_HOLD_MS) {
+        start_air_mouse(now);
+    }
+
+    if (!_air_mouse_active || !_air_mouse_imu_ready || now - _air_mouse_last_sample_ms < AIR_MOUSE_SAMPLE_MS) {
+        return;
+    }
+
+    const uint32_t elapsed_ms = now - _air_mouse_last_sample_ms;
+    _air_mouse_last_sample_ms = now;
+    const float dt = std::min(0.050f, std::max(0.001f, elapsed_ms / 1000.0f));
+    if (!imu.update()) {
+        return;
+    }
+
+    const auto data = imu.getImuData();
+    const float bias_x = _air_mouse_gyro_bias_ready ? _air_mouse_gyro_bias_x : 0.0f;
+    const float bias_z = _air_mouse_gyro_bias_ready ? _air_mouse_gyro_bias_z : 0.0f;
+    const float yaw_rate = apply_air_mouse_deadzone(data.gyro.z - bias_z);
+    const float pitch_rate = apply_air_mouse_deadzone(data.gyro.x - bias_x);
+    const float alpha = air_mouse_smoothing_alpha(dt);
+
+    _air_mouse_filtered_x += (yaw_rate - _air_mouse_filtered_x) * alpha;
+    _air_mouse_filtered_y += (pitch_rate - _air_mouse_filtered_y) * alpha;
+    if (yaw_rate == 0.0f && std::fabs(_air_mouse_filtered_x) < AIR_MOUSE_FILTER_SETTLE_DPS) {
+        _air_mouse_filtered_x = 0.0f;
+    }
+    if (pitch_rate == 0.0f && std::fabs(_air_mouse_filtered_y) < AIR_MOUSE_FILTER_SETTLE_DPS) {
+        _air_mouse_filtered_y = 0.0f;
+    }
+
+    const float mouse_x_rate = _air_mouse_filtered_x * air_mouse_response_boost(_air_mouse_filtered_x);
+    const float mouse_y_rate = _air_mouse_filtered_y * air_mouse_response_boost(_air_mouse_filtered_y);
+    _air_mouse_accum_x += -mouse_x_rate * dt * AIR_MOUSE_PIXELS_PER_DEGREE;
+    _air_mouse_accum_y += -mouse_y_rate * dt * AIR_MOUSE_PIXELS_PER_DEGREE;
+
+    int dx = static_cast<int>(std::round(_air_mouse_accum_x));
+    int dy = static_cast<int>(std::round(_air_mouse_accum_y));
+    dx = std::clamp(dx, -AIR_MOUSE_MAX_DELTA, AIR_MOUSE_MAX_DELTA);
+    dy = std::clamp(dy, -AIR_MOUSE_MAX_DELTA, AIR_MOUSE_MAX_DELTA);
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+
+    _air_mouse_accum_x -= dx;
+    _air_mouse_accum_y -= dy;
+    bleMouseMove(static_cast<int8_t>(dx), static_cast<int8_t>(dy));
+}
+
 void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
 {
     if (keyboard.isFnPressed() && keyEvent.state &&
@@ -1110,6 +1311,10 @@ void Hal::handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent)
     }
 
     if (bleMacSystemControlKey(keyEvent)) {
+        return;
+    }
+
+    if (handle_air_mouse_space_event(keyEvent)) {
         return;
     }
 
