@@ -17,18 +17,24 @@
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string _tag = "HAL";
-static constexpr uint32_t AIR_MOUSE_HOLD_MS = 800;
-static constexpr uint32_t AIR_MOUSE_SAMPLE_MS = 12;
-static constexpr uint16_t AIR_MOUSE_CALIBRATION_MIN_SAMPLES = 12;
-static constexpr float AIR_MOUSE_CALIBRATION_MAX_GYRO_DPS = 12.0f;
+static constexpr uint32_t AIR_MOUSE_HOLD_MS = 450;
+static constexpr uint32_t AIR_MOUSE_SAMPLE_MS = 8;
+static constexpr uint16_t AIR_MOUSE_CALIBRATION_MIN_SAMPLES = 18;
+static constexpr float AIR_MOUSE_CALIBRATION_MAX_GYRO_DPS = 25.0f;
 static constexpr float AIR_MOUSE_CALIBRATION_ACCEL_TOLERANCE_G = 0.18f;
-static constexpr float AIR_MOUSE_DEADZONE_DPS = 0.9f;
-static constexpr float AIR_MOUSE_SMOOTHING_TAU_MS = 32.0f;
-static constexpr float AIR_MOUSE_FILTER_SETTLE_DPS = 0.25f;
-static constexpr float AIR_MOUSE_PIXELS_PER_DEGREE = 8.0f;
-static constexpr float AIR_MOUSE_ACCEL_START_DPS = 45.0f;
-static constexpr float AIR_MOUSE_ACCEL_FULL_DPS = 260.0f;
-static constexpr float AIR_MOUSE_ACCEL_MAX_BOOST = 1.85f;
+static constexpr float AIR_MOUSE_STILL_DEADZONE_DPS = 2.20f;
+static constexpr float AIR_MOUSE_MOTION_DEADZONE_DPS = 0.85f;
+static constexpr float AIR_MOUSE_STILL_FILTER_TAU_MS = 24.0f;
+static constexpr float AIR_MOUSE_FAST_FILTER_TAU_MS = 6.0f;
+static constexpr float AIR_MOUSE_FILTER_SETTLE_DPS = 0.20f;
+static constexpr float AIR_MOUSE_PIXELS_PER_DEGREE = 11.0f;
+static constexpr float AIR_MOUSE_ACCEL_START_DPS = 24.0f;
+static constexpr float AIR_MOUSE_ACCEL_FULL_DPS = 180.0f;
+static constexpr float AIR_MOUSE_ACCEL_MAX_BOOST = 1.80f;
+static constexpr float AIR_MOUSE_ZERO_LOCK_DPS = 2.40f;
+static constexpr float AIR_MOUSE_BIAS_UPDATE_MAX_GYRO_DPS = 3.20f;
+static constexpr float AIR_MOUSE_BIAS_UPDATE_ALPHA = 0.012f;
+static constexpr uint32_t AIR_MOUSE_AXIS_LOG_INTERVAL_MS = 500;
 static constexpr int AIR_MOUSE_MAX_DELTA = 24;
 
 Hal& GetHAL()
@@ -916,6 +922,15 @@ bool Hal::bleKeyboardIsConnected() const
     return ble_hid_device_helper_get_state() == BLE_HID_DEVICE_STATE_CONNECTED;
 }
 
+bool Hal::bleAirMouseHandleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
+{
+    if (!ble_hid_device_helper_is_ready()) {
+        return false;
+    }
+
+    return handle_air_mouse_space_event(keyEvent);
+}
+
 void Hal::bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode)
 {
     if (!ble_hid_device_helper_is_ready()) {
@@ -1112,17 +1127,40 @@ bool Hal::bleConsumeAudioTestRequest(bool& active)
     return true;
 }
 
-static float apply_air_mouse_deadzone(float value)
+static float apply_air_mouse_deadzone(float value, float deadzone)
 {
-    if (std::fabs(value) <= AIR_MOUSE_DEADZONE_DPS) {
+    if (std::fabs(value) <= deadzone) {
         return 0.0f;
     }
-    return value > 0.0f ? value - AIR_MOUSE_DEADZONE_DPS : value + AIR_MOUSE_DEADZONE_DPS;
+    return value > 0.0f ? value - deadzone : value + deadzone;
 }
 
-static float air_mouse_smoothing_alpha(float dt)
+static float air_mouse_deadzone_for_speed(float speed)
 {
-    const float tau = AIR_MOUSE_SMOOTHING_TAU_MS / 1000.0f;
+    const float t = std::clamp((speed - 3.0f) / 12.0f, 0.0f, 1.0f);
+    return AIR_MOUSE_STILL_DEADZONE_DPS +
+           t * (AIR_MOUSE_MOTION_DEADZONE_DPS - AIR_MOUSE_STILL_DEADZONE_DPS);
+}
+
+static float air_mouse_remote_axis_weight(const m5::imu_data_t& data)
+{
+    const float accel_mag = std::sqrt(data.accel.x * data.accel.x + data.accel.y * data.accel.y +
+                                      data.accel.z * data.accel.z);
+    if (accel_mag < 0.2f) {
+        return 0.0f;
+    }
+
+    const float y = std::fabs(data.accel.y) / accel_mag;
+    const float z = std::fabs(data.accel.z) / accel_mag;
+    return std::clamp((y - z + 0.30f) / 0.60f, 0.0f, 1.0f);
+}
+
+static float air_mouse_smoothing_alpha(float dt, float speed)
+{
+    const float t = std::clamp((speed - 6.0f) / 120.0f, 0.0f, 1.0f);
+    const float tau_ms = AIR_MOUSE_STILL_FILTER_TAU_MS +
+                         t * (AIR_MOUSE_FAST_FILTER_TAU_MS - AIR_MOUSE_STILL_FILTER_TAU_MS);
+    const float tau = tau_ms / 1000.0f;
     return std::clamp(dt / (tau + dt), 0.0f, 1.0f);
 }
 
@@ -1134,12 +1172,93 @@ static float air_mouse_response_boost(float rate)
     return 1.0f + t * t * (AIR_MOUSE_ACCEL_MAX_BOOST - 1.0f);
 }
 
+static bool air_mouse_is_still_for_bias(const m5::imu_data_t& data)
+{
+    const float gyro_mag = std::sqrt(data.gyro.x * data.gyro.x + data.gyro.y * data.gyro.y +
+                                     data.gyro.z * data.gyro.z);
+    const float accel_mag = std::sqrt(data.accel.x * data.accel.x + data.accel.y * data.accel.y +
+                                      data.accel.z * data.accel.z);
+    return gyro_mag <= AIR_MOUSE_BIAS_UPDATE_MAX_GYRO_DPS &&
+           std::fabs(accel_mag - 1.0f) <= AIR_MOUSE_CALIBRATION_ACCEL_TOLERANCE_G;
+}
+
+static char air_mouse_dominant_accel_axis(float ax, float ay, float az)
+{
+    ax = std::fabs(ax);
+    ay = std::fabs(ay);
+    az = std::fabs(az);
+    if (ax >= ay && ax >= az) {
+        return 'X';
+    }
+    if (ay >= ax && ay >= az) {
+        return 'Y';
+    }
+    return 'Z';
+}
+
+static void air_mouse_update_bias(float& bias, float value, float alpha)
+{
+    bias += (value - bias) * alpha;
+}
+
 void Hal::reset_air_mouse_calibration()
 {
     _air_mouse_pending_gyro_samples = 0;
     _air_mouse_pending_gyro_sum_x = 0.0f;
     _air_mouse_pending_gyro_sum_y = 0.0f;
     _air_mouse_pending_gyro_sum_z = 0.0f;
+}
+
+void Hal::reset_air_mouse_axis_log(uint32_t now)
+{
+    _air_mouse_last_axis_log_ms = now;
+    _air_mouse_axis_log_samples = 0;
+    _air_mouse_axis_accel_sum_x = 0.0f;
+    _air_mouse_axis_accel_sum_y = 0.0f;
+    _air_mouse_axis_accel_sum_z = 0.0f;
+    _air_mouse_axis_gyro_sum_x = 0.0f;
+    _air_mouse_axis_gyro_sum_y = 0.0f;
+    _air_mouse_axis_gyro_sum_z = 0.0f;
+    _air_mouse_axis_gyro_sq_sum_x = 0.0f;
+    _air_mouse_axis_gyro_sq_sum_y = 0.0f;
+    _air_mouse_axis_gyro_sq_sum_z = 0.0f;
+}
+
+void Hal::sample_air_mouse_axis_log(const m5::imu_data_t& data, uint32_t now)
+{
+    _air_mouse_axis_accel_sum_x += data.accel.x;
+    _air_mouse_axis_accel_sum_y += data.accel.y;
+    _air_mouse_axis_accel_sum_z += data.accel.z;
+    _air_mouse_axis_gyro_sum_x += data.gyro.x;
+    _air_mouse_axis_gyro_sum_y += data.gyro.y;
+    _air_mouse_axis_gyro_sum_z += data.gyro.z;
+    _air_mouse_axis_gyro_sq_sum_x += data.gyro.x * data.gyro.x;
+    _air_mouse_axis_gyro_sq_sum_y += data.gyro.y * data.gyro.y;
+    _air_mouse_axis_gyro_sq_sum_z += data.gyro.z * data.gyro.z;
+    ++_air_mouse_axis_log_samples;
+
+    if (now - _air_mouse_last_axis_log_ms < AIR_MOUSE_AXIS_LOG_INTERVAL_MS ||
+        _air_mouse_axis_log_samples == 0) {
+        return;
+    }
+
+    const float samples = static_cast<float>(_air_mouse_axis_log_samples);
+    const float ax = _air_mouse_axis_accel_sum_x / samples;
+    const float ay = _air_mouse_axis_accel_sum_y / samples;
+    const float az = _air_mouse_axis_accel_sum_z / samples;
+    const float gx = _air_mouse_axis_gyro_sum_x / samples;
+    const float gy = _air_mouse_axis_gyro_sum_y / samples;
+    const float gz = _air_mouse_axis_gyro_sum_z / samples;
+    const float grx = std::sqrt(_air_mouse_axis_gyro_sq_sum_x / samples);
+    const float gry = std::sqrt(_air_mouse_axis_gyro_sq_sum_y / samples);
+    const float grz = std::sqrt(_air_mouse_axis_gyro_sq_sum_z / samples);
+    const float accel_mag = std::sqrt(ax * ax + ay * ay + az * az);
+    const float remote_weight = air_mouse_remote_axis_weight(data);
+    mclog::tagInfo(_tag,
+                   "air mouse imu axes: accel avg x={:.2f} y={:.2f} z={:.2f} |g|={:.2f} dom={} gyro avg x={:.2f} y={:.2f} z={:.2f} rms x={:.2f} y={:.2f} z={:.2f} x-axis mix y={:.0f}% z={:.0f}%",
+                   ax, ay, az, accel_mag, air_mouse_dominant_accel_axis(ax, ay, az), gx, gy, gz, grx, gry, grz,
+                   remote_weight * 100.0f, (1.0f - remote_weight) * 100.0f);
+    reset_air_mouse_axis_log(now);
 }
 
 void Hal::sample_air_mouse_calibration(const m5::imu_data_t& data)
@@ -1176,6 +1295,7 @@ bool Hal::handle_air_mouse_space_event(const Keyboard::KeyEvent_t& keyEvent)
             _air_mouse_space_pressed_ms = millis();
             _air_mouse_last_sample_ms = 0;
             reset_air_mouse_calibration();
+            reset_air_mouse_axis_log(_air_mouse_space_pressed_ms);
             if (!_air_mouse_imu_ready) {
                 imu.begin();
                 _air_mouse_imu_ready = true;
@@ -1206,6 +1326,7 @@ void Hal::start_air_mouse(uint32_t now)
     _air_mouse_accum_y = 0.0f;
     _air_mouse_filtered_x = 0.0f;
     _air_mouse_filtered_y = 0.0f;
+    reset_air_mouse_axis_log(now);
     if (!_air_mouse_imu_ready) {
         imu.begin();
         _air_mouse_imu_ready = true;
@@ -1235,6 +1356,7 @@ void Hal::stop_air_mouse()
     _air_mouse_filtered_x = 0.0f;
     _air_mouse_filtered_y = 0.0f;
     reset_air_mouse_calibration();
+    reset_air_mouse_axis_log(millis());
     bleMouseMove(0, 0);
     mclog::tagInfo(_tag, "air mouse inactive");
 }
@@ -1245,7 +1367,9 @@ void Hal::update_air_mouse(uint32_t now)
         now - _air_mouse_last_sample_ms >= AIR_MOUSE_SAMPLE_MS) {
         _air_mouse_last_sample_ms = now;
         if (imu.update()) {
-            sample_air_mouse_calibration(imu.getImuData());
+            const auto data = imu.getImuData();
+            sample_air_mouse_calibration(data);
+            sample_air_mouse_axis_log(data, now);
         }
     }
 
@@ -1265,11 +1389,57 @@ void Hal::update_air_mouse(uint32_t now)
     }
 
     const auto data = imu.getImuData();
+    sample_air_mouse_axis_log(data, now);
+    if (!_air_mouse_gyro_bias_ready) {
+        _air_mouse_gyro_bias_x = data.gyro.x;
+        _air_mouse_gyro_bias_y = data.gyro.y;
+        _air_mouse_gyro_bias_z = data.gyro.z;
+        _air_mouse_gyro_bias_ready = true;
+        _air_mouse_filtered_x = 0.0f;
+        _air_mouse_filtered_y = 0.0f;
+        _air_mouse_accum_x = 0.0f;
+        _air_mouse_accum_y = 0.0f;
+        return;
+    }
+    if (air_mouse_is_still_for_bias(data)) {
+        air_mouse_update_bias(_air_mouse_gyro_bias_x, data.gyro.x, AIR_MOUSE_BIAS_UPDATE_ALPHA);
+        air_mouse_update_bias(_air_mouse_gyro_bias_y, data.gyro.y, AIR_MOUSE_BIAS_UPDATE_ALPHA);
+        air_mouse_update_bias(_air_mouse_gyro_bias_z, data.gyro.z, AIR_MOUSE_BIAS_UPDATE_ALPHA);
+    }
+
     const float bias_x = _air_mouse_gyro_bias_ready ? _air_mouse_gyro_bias_x : 0.0f;
+    const float bias_y = _air_mouse_gyro_bias_ready ? _air_mouse_gyro_bias_y : 0.0f;
     const float bias_z = _air_mouse_gyro_bias_ready ? _air_mouse_gyro_bias_z : 0.0f;
-    const float yaw_rate = apply_air_mouse_deadzone(data.gyro.z - bias_z);
-    const float pitch_rate = apply_air_mouse_deadzone(data.gyro.x - bias_x);
-    const float alpha = air_mouse_smoothing_alpha(dt);
+    const float remote_weight = air_mouse_remote_axis_weight(data);
+    const float flat_yaw_rate = data.gyro.z - bias_z;
+    const float remote_yaw_rate = data.gyro.y - bias_y;
+    const float raw_yaw_rate = flat_yaw_rate * (1.0f - remote_weight) + remote_yaw_rate * remote_weight;
+    const float raw_pitch_rate = data.gyro.x - bias_x;
+    const float raw_speed = std::sqrt(raw_yaw_rate * raw_yaw_rate + raw_pitch_rate * raw_pitch_rate);
+    if (raw_speed <= AIR_MOUSE_ZERO_LOCK_DPS) {
+        air_mouse_update_bias(_air_mouse_gyro_bias_x, data.gyro.x, AIR_MOUSE_BIAS_UPDATE_ALPHA);
+        air_mouse_update_bias(_air_mouse_gyro_bias_y, data.gyro.y, AIR_MOUSE_BIAS_UPDATE_ALPHA);
+        air_mouse_update_bias(_air_mouse_gyro_bias_z, data.gyro.z, AIR_MOUSE_BIAS_UPDATE_ALPHA);
+        _air_mouse_filtered_x = 0.0f;
+        _air_mouse_filtered_y = 0.0f;
+        _air_mouse_accum_x = 0.0f;
+        _air_mouse_accum_y = 0.0f;
+        return;
+    }
+
+    const float deadzone = air_mouse_deadzone_for_speed(raw_speed);
+    const float yaw_rate = apply_air_mouse_deadzone(raw_yaw_rate, deadzone);
+    const float pitch_rate = apply_air_mouse_deadzone(raw_pitch_rate, deadzone);
+    const float motion_speed = std::sqrt(yaw_rate * yaw_rate + pitch_rate * pitch_rate);
+    if (motion_speed == 0.0f) {
+        _air_mouse_filtered_x = 0.0f;
+        _air_mouse_filtered_y = 0.0f;
+        _air_mouse_accum_x = 0.0f;
+        _air_mouse_accum_y = 0.0f;
+        return;
+    }
+
+    const float alpha = air_mouse_smoothing_alpha(dt, motion_speed);
 
     _air_mouse_filtered_x += (yaw_rate - _air_mouse_filtered_x) * alpha;
     _air_mouse_filtered_y += (pitch_rate - _air_mouse_filtered_y) * alpha;

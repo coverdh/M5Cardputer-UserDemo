@@ -75,6 +75,21 @@ public:
         return _joystick_sensitivity;
     }
 
+    float getPointerAxisX() const
+    {
+        return _pointer_axis_x;
+    }
+
+    float getPointerAxisY() const
+    {
+        return _pointer_axis_y;
+    }
+
+    float getPointerMagnitude() const
+    {
+        return _pointer_magnitude;
+    }
+
     bool isEncoderConnected() const
     {
         return _encoder_type != EncoderType::None;
@@ -166,6 +181,9 @@ private:
     bool _flip_x                      = false;
     bool _flip_y                      = false;
     bool _swap_axes                   = false;
+    float _pointer_axis_x             = 0.0f;
+    float _pointer_axis_y             = 0.0f;
+    float _pointer_magnitude          = 0.0f;
     uint8_t _joystick_sensitivity     = DEFAULT_JOYSTICK_SENSITIVITY;
     Settings* _settings               = nullptr;
 
@@ -185,6 +203,10 @@ private:
     bool initChainBusButtons();
     bool chainBusReadInput(uint8_t gpio, uint8_t& level);
     uint8_t applyDirectionTransform(uint8_t buttons) const;
+    void applyAxisTransform(float& x, float& y) const;
+    void setPointerAxis(float x, float y);
+    void setPointerAxis(float x, float y, float magnitude);
+    void clearPointerAxis();
     int chainJoystickDeadZone(int baseDeadZone) const;
     void saveDirectionSettings();
     void resetChainJoystickCenterSamples();

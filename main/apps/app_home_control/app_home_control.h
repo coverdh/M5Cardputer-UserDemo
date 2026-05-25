@@ -55,6 +55,8 @@ private:
     uint8_t _tv_input_cmd          = 0x01;
     uint32_t _last_status_refresh  = 0;
     uint32_t _last_pointer_repeat  = 0;
+    uint32_t _last_external_pointer_move = 0;
+    uint32_t _external_pointer_hold_start = 0;
     uint32_t _last_external_render = 0;
     uint32_t _last_volume_apply    = 0;
     uint32_t _last_setup_render    = 0;
@@ -72,6 +74,12 @@ private:
     bool _hold_up                  = false;
     bool _hold_down                = false;
     bool _audio_test_active        = false;
+    bool _external_pointer_active  = false;
+    bool _external_pointer_accel_active = false;
+    float _external_pointer_accum_x = 0.0f;
+    float _external_pointer_accum_y = 0.0f;
+    float _external_pointer_dir_x   = 0.0f;
+    float _external_pointer_dir_y   = 0.0f;
     uint8_t _audio_frame_sequence  = 0;
     uint32_t _last_audio_error_log = 0;
     uint8_t _knob_mode             = 0;
@@ -113,6 +121,7 @@ private:
     void repeatPointerMove();
     void handleExternalInput();
     void handleExternalPointer(uint8_t buttons, uint8_t pressed, uint8_t released);
+    bool moveExternalPointer(float axisX, float axisY, float triggerMagnitude, uint32_t now);
     void handleExternalEncoder();
     void handleBleControlRequests();
     void applyHardwareSettings(uint8_t flags, uint8_t sensitivity, uint8_t knobMode);

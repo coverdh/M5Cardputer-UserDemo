@@ -120,6 +120,7 @@ public:
     bool bleControlForgetBonds();
     void bleKeyboardInit();
     bool bleKeyboardIsConnected() const;
+    bool bleAirMouseHandleKeyEvent(const Keyboard::KeyEvent_t& keyEvent);
     void bleKeyboardSendReport(uint8_t modifier, KeScanCode_t keyCode);
     void bleKeyboardTap(uint8_t modifier, KeScanCode_t keyCode);
     void bleMouseReport(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel = 0);
@@ -215,6 +216,17 @@ private:
     float _air_mouse_gyro_bias_x = 0.0f;
     float _air_mouse_gyro_bias_y = 0.0f;
     float _air_mouse_gyro_bias_z = 0.0f;
+    uint32_t _air_mouse_last_axis_log_ms = 0;
+    uint16_t _air_mouse_axis_log_samples = 0;
+    float _air_mouse_axis_accel_sum_x = 0.0f;
+    float _air_mouse_axis_accel_sum_y = 0.0f;
+    float _air_mouse_axis_accel_sum_z = 0.0f;
+    float _air_mouse_axis_gyro_sum_x = 0.0f;
+    float _air_mouse_axis_gyro_sum_y = 0.0f;
+    float _air_mouse_axis_gyro_sum_z = 0.0f;
+    float _air_mouse_axis_gyro_sq_sum_x = 0.0f;
+    float _air_mouse_axis_gyro_sq_sum_y = 0.0f;
+    float _air_mouse_axis_gyro_sq_sum_z = 0.0f;
 
     void display_init(bool create_ui_sprites);
     void i2c_scan();
@@ -231,6 +243,8 @@ private:
     void start_air_mouse(uint32_t now);
     void stop_air_mouse();
     void reset_air_mouse_calibration();
+    void reset_air_mouse_axis_log(uint32_t now);
+    void sample_air_mouse_axis_log(const m5::imu_data_t& data, uint32_t now);
     void sample_air_mouse_calibration(const m5::imu_data_t& data);
 };
 
