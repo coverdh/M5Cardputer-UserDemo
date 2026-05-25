@@ -12,6 +12,7 @@
 #include <hal/utils/ble_hid_device/ble_hid_device_helper.h>
 #include <mooncake_log.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 
@@ -25,6 +26,22 @@ constexpr uint8_t XIAOMI_TV_INPUT_FUNC   = 0x01;
 constexpr uint8_t XIAOMI_TV_IR_REPEATS   = 5;
 constexpr uint8_t LEGACY_NEC_POWER_ADDR  = 0x04;
 constexpr uint8_t LEGACY_NEC_POWER_CMD   = 0x08;
+constexpr float POINTER_JOYSTICK_DEADZONE       = 0.10f;
+constexpr float POINTER_JOYSTICK_MIN_SPEED      = 18.0f;
+constexpr float POINTER_JOYSTICK_ACCEL_ENTER    = 0.70f;
+constexpr float POINTER_JOYSTICK_ACCEL_EXIT     = 0.62f;
+constexpr float POINTER_JOYSTICK_MAX_BASE_SPEED = 720.0f;
+constexpr float POINTER_JOYSTICK_AXIS_CURVE     = 1.45f;
+constexpr float POINTER_JOYSTICK_MIN_ACCEL      = 0.50f;
+constexpr float POINTER_JOYSTICK_MAX_ACCEL      = 3.00f;
+constexpr float POINTER_JOYSTICK_TIME_CURVE     = 1.60f;
+constexpr uint32_t POINTER_JOYSTICK_RAMP_MS     = 1500;
+constexpr float POINTER_JOYSTICK_DIR_RESET_DOT  = 0.50f;
+constexpr float POINTER_JOYSTICK_AXIS_LOCK      = 0.20f;
+constexpr int POINTER_JOYSTICK_MAX_DELTA        = 20;
+constexpr float POINTER_DIGITAL_AXIS            = 1.0f;
+constexpr uint32_t POINTER_JOYSTICK_DEFAULT_DT_MS = 12;
+constexpr uint32_t POINTER_JOYSTICK_MAX_DT_MS     = 45;
 constexpr uint32_t MITV_RAW_CARRIER_HZ   = 38028;
 constexpr uint32_t MITV_RAW_POWER[] = {
     1578, 1026, 579, 605, 579, 605, 1446, 605, 1446, 605, 579, 605, 1446, 605, 579, 605, 1446, 605,
@@ -263,6 +280,14 @@ void AppHomeControl::resetPointerHolds()
     _hold_right = false;
     _hold_up    = false;
     _hold_down  = false;
+    _last_external_pointer_move = 0;
+    _external_pointer_hold_start = 0;
+    _external_pointer_accum_x   = 0.0f;
+    _external_pointer_accum_y   = 0.0f;
+    _external_pointer_active    = false;
+    _external_pointer_accel_active = false;
+    _external_pointer_dir_x     = 0.0f;
+    _external_pointer_dir_y     = 0.0f;
 }
 
 void AppHomeControl::updatePointerHold(const Keyboard::KeyEvent_t& keyEvent)
@@ -333,28 +358,26 @@ void AppHomeControl::handleExternalPointer(uint8_t buttons, uint8_t pressed, uin
 {
     (void)released;
     const uint32_t now = GetHAL().millis();
-    int8_t dx = 0;
-    int8_t dy = 0;
-    if (buttons & ExternalInput::PAD_LEFT) {
-        dx -= pointerStep();
-    }
-    if (buttons & ExternalInput::PAD_RIGHT) {
-        dx += pointerStep();
-    }
-    if (buttons & ExternalInput::PAD_UP) {
-        dy -= pointerStep();
-    }
-    if (buttons & ExternalInput::PAD_DOWN) {
-        dy += pointerStep();
-    }
-    bool moved = false;
-    if (dx != 0 || dy != 0) {
-        if (now - _last_pointer_repeat >= POINTER_REPEAT_MS) {
-            _last_pointer_repeat = now;
-            GetHAL().bleMouseMove(dx, dy);
-            moved = true;
+    auto& input = GetHAL().externalInput;
+    float axisX = input.getPointerAxisX();
+    float axisY = input.getPointerAxisY();
+    float triggerMagnitude = input.getPointerMagnitude();
+    if (std::fabs(axisX) < 0.001f && std::fabs(axisY) < 0.001f) {
+        if (buttons & ExternalInput::PAD_LEFT) {
+            axisX -= POINTER_DIGITAL_AXIS;
         }
+        if (buttons & ExternalInput::PAD_RIGHT) {
+            axisX += POINTER_DIGITAL_AXIS;
+        }
+        if (buttons & ExternalInput::PAD_UP) {
+            axisY -= POINTER_DIGITAL_AXIS;
+        }
+        if (buttons & ExternalInput::PAD_DOWN) {
+            axisY += POINTER_DIGITAL_AXIS;
+        }
+        triggerMagnitude = std::min(1.0f, std::sqrt(axisX * axisX + axisY * axisY));
     }
+    const bool moved = moveExternalPointer(axisX, axisY, triggerMagnitude, now);
 
     if (pressed & ExternalInput::PAD_A) {
         GetHAL().bleMouseClick(1);
@@ -382,6 +405,111 @@ void AppHomeControl::handleExternalPointer(uint8_t buttons, uint8_t pressed, uin
         _last_external_render = now;
         render();
     }
+}
+
+bool AppHomeControl::moveExternalPointer(float axisX, float axisY, float triggerMagnitude, uint32_t now)
+{
+    const float absX = std::fabs(axisX);
+    const float absY = std::fabs(axisY);
+    if (std::max(absX, absY) < POINTER_JOYSTICK_DEADZONE) {
+        _last_external_pointer_move = 0;
+        _external_pointer_hold_start = 0;
+        _external_pointer_accum_x   = 0.0f;
+        _external_pointer_accum_y   = 0.0f;
+        _external_pointer_active    = false;
+        _external_pointer_accel_active = false;
+        _external_pointer_dir_x     = 0.0f;
+        _external_pointer_dir_y     = 0.0f;
+        return false;
+    }
+    _external_pointer_active = true;
+    triggerMagnitude = std::max(0.0f, std::min(1.0f, triggerMagnitude));
+
+    if (absX > 0.0f && absY > 0.0f) {
+        if (absY < absX * POINTER_JOYSTICK_AXIS_LOCK) {
+            axisY = 0.0f;
+        } else if (absX < absY * POINTER_JOYSTICK_AXIS_LOCK) {
+            axisX = 0.0f;
+        }
+    }
+
+    const float magnitude = std::min(1.0f, std::sqrt(axisX * axisX + axisY * axisY));
+    if (magnitude < POINTER_JOYSTICK_DEADZONE) {
+        _last_external_pointer_move = 0;
+        _external_pointer_hold_start = 0;
+        _external_pointer_accum_x   = 0.0f;
+        _external_pointer_accum_y   = 0.0f;
+        _external_pointer_active    = false;
+        _external_pointer_accel_active = false;
+        _external_pointer_dir_x     = 0.0f;
+        _external_pointer_dir_y     = 0.0f;
+        return false;
+    }
+
+    const float unitX = axisX / magnitude;
+    const float unitY = axisY / magnitude;
+    const float normalized =
+        std::max(0.0f, std::min(1.0f, (magnitude - POINTER_JOYSTICK_DEADZONE) /
+                                           (1.0f - POINTER_JOYSTICK_DEADZONE)));
+    const bool directionChanged =
+        _external_pointer_hold_start != 0 &&
+        (_external_pointer_dir_x * unitX + _external_pointer_dir_y * unitY) < POINTER_JOYSTICK_DIR_RESET_DOT;
+    if (directionChanged) {
+        _external_pointer_accel_active = false;
+        _external_pointer_hold_start   = 0;
+    }
+    if (_external_pointer_accel_active) {
+        if (triggerMagnitude <= POINTER_JOYSTICK_ACCEL_EXIT) {
+            _external_pointer_accel_active = false;
+            _external_pointer_hold_start   = 0;
+        }
+    } else if (triggerMagnitude >= POINTER_JOYSTICK_ACCEL_ENTER) {
+        _external_pointer_accel_active = true;
+        _external_pointer_hold_start = now;
+    }
+    _external_pointer_dir_x = unitX;
+    _external_pointer_dir_y = unitY;
+
+    pointerStep();
+    const float sensitivity = static_cast<float>(_pointer_sensitivity) / 2.0f;
+    const float maxBaseSpeed = POINTER_JOYSTICK_MAX_BASE_SPEED * (0.85f + sensitivity * 0.075f);
+    float speed = POINTER_JOYSTICK_MIN_SPEED +
+                  std::pow(normalized, POINTER_JOYSTICK_AXIS_CURVE) *
+                      (maxBaseSpeed - POINTER_JOYSTICK_MIN_SPEED);
+    float accel = POINTER_JOYSTICK_MIN_ACCEL;
+    if (_external_pointer_accel_active) {
+        const uint32_t holdMs = now - _external_pointer_hold_start;
+        const float holdT =
+            std::max(0.0f, std::min(1.0f, static_cast<float>(holdMs) /
+                                               static_cast<float>(POINTER_JOYSTICK_RAMP_MS)));
+        accel = POINTER_JOYSTICK_MIN_ACCEL +
+                std::pow(holdT, POINTER_JOYSTICK_TIME_CURVE) *
+                    (POINTER_JOYSTICK_MAX_ACCEL - POINTER_JOYSTICK_MIN_ACCEL);
+    }
+    speed *= accel;
+    uint32_t dtMs = POINTER_JOYSTICK_DEFAULT_DT_MS;
+    if (_last_external_pointer_move != 0) {
+        dtMs = std::max<uint32_t>(1, std::min<uint32_t>(POINTER_JOYSTICK_MAX_DT_MS,
+                                                       now - _last_external_pointer_move));
+    }
+    _last_external_pointer_move = now;
+
+    const float dt = static_cast<float>(dtMs) / 1000.0f;
+    _external_pointer_accum_x += unitX * speed * dt;
+    _external_pointer_accum_y += unitY * speed * dt;
+
+    int dx = static_cast<int>(std::lround(_external_pointer_accum_x));
+    int dy = static_cast<int>(std::lround(_external_pointer_accum_y));
+    dx     = std::max(-POINTER_JOYSTICK_MAX_DELTA, std::min(POINTER_JOYSTICK_MAX_DELTA, dx));
+    dy     = std::max(-POINTER_JOYSTICK_MAX_DELTA, std::min(POINTER_JOYSTICK_MAX_DELTA, dy));
+    if (dx == 0 && dy == 0) {
+        return false;
+    }
+
+    _external_pointer_accum_x -= static_cast<float>(dx);
+    _external_pointer_accum_y -= static_cast<float>(dy);
+    GetHAL().bleMouseMove(static_cast<int8_t>(dx), static_cast<int8_t>(dy));
+    return true;
 }
 
 void AppHomeControl::handleExternalEncoder()
@@ -1224,6 +1352,11 @@ void AppHomeControl::handleKeyEvent(const Keyboard::KeyEvent_t& keyEvent)
         if (_mode == Mode::Dashboard) {
             render();
         }
+        return;
+    }
+
+    if ((_mode == Mode::Dashboard || _mode == Mode::Keyboard || _mode == Mode::Pointer) &&
+        GetHAL().bleAirMouseHandleKeyEvent(keyEvent)) {
         return;
     }
 

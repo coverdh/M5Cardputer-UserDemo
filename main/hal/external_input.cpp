@@ -10,10 +10,11 @@
 #include <mooncake_log.h>
 #include <string>
 #include <algorithm>
+#include <cmath>
 
 static constexpr uint32_t EXTERNAL_INPUT_I2C_FREQ             = 100000;
 static constexpr uint32_t EXTERNAL_INPUT_POLL_INTERVAL_MS     = 12;
-static constexpr uint32_t CHAIN_INPUT_POLL_INTERVAL_MS        = 50;
+static constexpr uint32_t CHAIN_INPUT_POLL_INTERVAL_MS        = 12;
 static constexpr uint32_t EXTERNAL_INPUT_PROBE_INTERVAL_MS    = 1000;
 static constexpr uint32_t EXTERNAL_INPUT_SCAN_LOG_INTERVAL_MS = 5000;
 static constexpr uint32_t EXTERNAL_INPUT_RETRY_INTERVAL_MS    = 5000;
@@ -33,8 +34,8 @@ static constexpr int JOYSTICK_UNIT_DEAD_ZONE                  = 38;
 static constexpr int JOYSTICK2_DEAD_ZONE                      = 24;
 static constexpr uint8_t CHAIN_JOYSTICK_MIN_SENSITIVITY       = 1;
 static constexpr uint8_t CHAIN_JOYSTICK_MAX_SENSITIVITY       = 100;
-static constexpr int CHAIN_JOYSTICK_BASE_DEAD_ZONE_X          = 8;
-static constexpr int CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y          = 20;
+static constexpr int CHAIN_JOYSTICK_BASE_DEAD_ZONE_X          = 18;
+static constexpr int CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y          = 24;
 static constexpr int CHAIN_JOYSTICK_CENTER_ACCEPTANCE         = CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y * 2;
 static constexpr int CHAIN_JOYSTICK_CENTER_AUTO_RANGE         = 112;
 static constexpr int CHAIN_JOYSTICK_CENTER_STABLE_SPREAD      = 16;
@@ -104,6 +105,29 @@ static uint8_t clampChainJoystickSensitivity(int value)
         std::max<int>(CHAIN_JOYSTICK_MIN_SENSITIVITY, std::min<int>(CHAIN_JOYSTICK_MAX_SENSITIVITY, value)));
 }
 
+static float normalizeJoystickAxis(int delta, int deadZone, int negativeRange, int positiveRange)
+{
+    const int magnitude = std::abs(delta);
+    if (magnitude <= deadZone) {
+        return 0.0f;
+    }
+
+    const int range = std::max(1, (delta < 0 ? negativeRange : positiveRange) - deadZone);
+    const float normalized =
+        static_cast<float>(magnitude - deadZone) / static_cast<float>(range);
+    return (delta < 0 ? -1.0f : 1.0f) * std::min(1.0f, normalized);
+}
+
+static float normalizeJoystickMagnitude(int deltaX, int deltaY, int negativeRangeX, int positiveRangeX,
+                                        int negativeRangeY, int positiveRangeY)
+{
+    const int rangeX = std::max(1, deltaX < 0 ? negativeRangeX : positiveRangeX);
+    const int rangeY = std::max(1, deltaY < 0 ? negativeRangeY : positiveRangeY);
+    const float x = static_cast<float>(deltaX) / static_cast<float>(rangeX);
+    const float y = static_cast<float>(deltaY) / static_cast<float>(rangeY);
+    return std::min(1.0f, std::sqrt(x * x + y * y));
+}
+
 void ExternalInput::init()
 {
     probeBus(0);
@@ -120,6 +144,7 @@ void ExternalInput::update(uint32_t now)
         _buttons        = 0;
         _encoder_button = false;
         _connected      = false;
+        clearPointerAxis();
         return;
     }
     const uint32_t pollInterval =
@@ -135,6 +160,7 @@ void ExternalInput::update(uint32_t now)
     const bool connected = read(buttons, now);
     if (!connected) {
         buttons = 0;
+        clearPointerAxis();
     }
 
     const uint8_t changed = buttons ^ _buttons;
@@ -169,6 +195,7 @@ void ExternalInput::setPaused(bool paused)
     _encoder_pressed  = false;
     _encoder_released = false;
     _connected        = false;
+    clearPointerAxis();
 }
 
 void ExternalInput::loadSettings(Settings& settings)
@@ -451,6 +478,7 @@ void ExternalInput::probeBus(uint32_t now)
     _last_center_wait_log          = 0;
     _last_chain_joystick_log       = 0;
     _unit_encoder_has_last_value   = false;
+    clearPointerAxis();
     uart_driver_delete(CHAIN_UART);
 
     M5.Ex_I2C.begin();
@@ -843,6 +871,13 @@ bool ExternalInput::readJoystickUnit(uint8_t& buttons)
 
     const int x = data[0];
     const int y = data[1];
+    setPointerAxis(normalizeJoystickAxis(x - JOYSTICK_UNIT_CENTER, JOYSTICK_UNIT_DEAD_ZONE,
+                                         JOYSTICK_UNIT_CENTER, 255 - JOYSTICK_UNIT_CENTER),
+                   normalizeJoystickAxis(y - JOYSTICK_UNIT_CENTER, JOYSTICK_UNIT_DEAD_ZONE,
+                                         JOYSTICK_UNIT_CENTER, 255 - JOYSTICK_UNIT_CENTER),
+                   normalizeJoystickMagnitude(x - JOYSTICK_UNIT_CENTER, y - JOYSTICK_UNIT_CENTER,
+                                              JOYSTICK_UNIT_CENTER, 255 - JOYSTICK_UNIT_CENTER,
+                                              JOYSTICK_UNIT_CENTER, 255 - JOYSTICK_UNIT_CENTER));
     if (x < JOYSTICK_UNIT_CENTER - JOYSTICK_UNIT_DEAD_ZONE) {
         buttons |= PAD_LEFT;
     } else if (x > JOYSTICK_UNIT_CENTER + JOYSTICK_UNIT_DEAD_ZONE) {
@@ -874,6 +909,9 @@ bool ExternalInput::readJoystick2(uint8_t& buttons)
 
     const int x = static_cast<int8_t>(offsets[0]);
     const int y = static_cast<int8_t>(offsets[1]);
+    setPointerAxis(normalizeJoystickAxis(x, JOYSTICK2_DEAD_ZONE, 128, 127),
+                   normalizeJoystickAxis(y, JOYSTICK2_DEAD_ZONE, 128, 127),
+                   normalizeJoystickMagnitude(x, y, 128, 127, 128, 127));
     if (x < -JOYSTICK2_DEAD_ZONE) {
         buttons |= PAD_LEFT;
     } else if (x > JOYSTICK2_DEAD_ZONE) {
@@ -955,6 +993,7 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
     if (!axisOk) {
         ++_chain_read_failures;
         if (_chain_read_failures < CHAIN_INPUT_FAILURE_LIMIT) {
+            clearPointerAxis();
             mclog::tagWarn(TAG, "chain joystick axis read miss {}/{}", _chain_read_failures,
                            CHAIN_INPUT_FAILURE_LIMIT);
             return true;
@@ -969,6 +1008,14 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
         const int y = rawY - _chain_joystick_center_y;
         const int deadZoneX = chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_X);
         const int deadZoneY = chainJoystickDeadZone(CHAIN_JOYSTICK_BASE_DEAD_ZONE_Y);
+        setPointerAxis(normalizeJoystickAxis(x, deadZoneX, _chain_joystick_center_x + 128,
+                                             127 - _chain_joystick_center_x),
+                       normalizeJoystickAxis(y, deadZoneY, _chain_joystick_center_y + 128,
+                                             127 - _chain_joystick_center_y),
+                       normalizeJoystickMagnitude(x, y, _chain_joystick_center_x + 128,
+                                                  127 - _chain_joystick_center_x,
+                                                  _chain_joystick_center_y + 128,
+                                                  127 - _chain_joystick_center_y));
         if (x < -deadZoneX) {
             buttons |= PAD_LEFT;
         } else if (x > deadZoneX) {
@@ -988,6 +1035,8 @@ bool ExternalInput::readChainJoystick(uint8_t& buttons)
                            _chain_joystick_center_x, _chain_joystick_center_y, x, y, _joystick_sensitivity,
                            deadZoneX, deadZoneY, buttons);
         }
+    } else {
+        clearPointerAxis();
     }
 
     responseSize = sizeof(response);
@@ -1152,6 +1201,41 @@ uint8_t ExternalInput::applyDirectionTransform(uint8_t buttons) const
         mapped |= PAD_DOWN;
     }
     return mapped;
+}
+
+void ExternalInput::applyAxisTransform(float& x, float& y) const
+{
+    if (_swap_axes) {
+        std::swap(x, y);
+    }
+    if (_flip_x) {
+        x = -x;
+    }
+    if (_flip_y) {
+        y = -y;
+    }
+}
+
+void ExternalInput::setPointerAxis(float x, float y)
+{
+    setPointerAxis(x, y, std::min(1.0f, std::sqrt(x * x + y * y)));
+}
+
+void ExternalInput::setPointerAxis(float x, float y, float magnitude)
+{
+    x = std::max(-1.0f, std::min(1.0f, x));
+    y = std::max(-1.0f, std::min(1.0f, y));
+    applyAxisTransform(x, y);
+    _pointer_axis_x = x;
+    _pointer_axis_y = y;
+    _pointer_magnitude = std::max(0.0f, std::min(1.0f, magnitude));
+}
+
+void ExternalInput::clearPointerAxis()
+{
+    _pointer_axis_x = 0.0f;
+    _pointer_axis_y = 0.0f;
+    _pointer_magnitude = 0.0f;
 }
 
 void ExternalInput::saveDirectionSettings()
