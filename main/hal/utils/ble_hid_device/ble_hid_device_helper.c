@@ -1434,8 +1434,7 @@ bool _demo_app_main(void)
         return false;
     }
 
-    ESP_LOGI(TAG, "Setting battery level to 100%%");
-    ble_svc_bas_battery_level_set(100);
+    ble_hid_device_helper_set_battery_level(0);
 #endif
     return true;
 }
@@ -1444,6 +1443,15 @@ bool ble_hid_device_helper_init(void)
 {
     ble_hid_device_helper_ensure_report_task();
     return _demo_app_main();
+}
+
+void ble_hid_device_helper_set_battery_level(uint8_t level)
+{
+#if CONFIG_BT_NIMBLE_ENABLED
+    ble_svc_bas_battery_level_set(level);
+#else
+    (void)level;
+#endif
 }
 
 void ble_hid_device_helper_stop(void)

@@ -25,6 +25,9 @@ void Launcher::start_system_bar()
 
 void Launcher::update_system_bar()
 {
+    if (GetHAL().isFullscreenMode()) {
+        return;
+    }
     if ((GetHAL().millis() - _data.system_bar_update_count) > _data.system_bar_update_preiod) {
         render_system_bar();
         _data.system_bar_update_count = GetHAL().millis();
@@ -33,6 +36,10 @@ void Launcher::update_system_bar()
 
 void Launcher::render_system_bar()
 {
+    if (GetHAL().isFullscreenMode()) {
+        return;
+    }
+
     // Update state
     _data.system_state.wifi_state = GetHAL().isWifiConnected() ? 1 : 4;
 
@@ -45,18 +52,24 @@ void Launcher::render_system_bar()
 
     // Bat
     if ((GetHAL().millis() - _data.bat_update_time_count) > 5000 || _data.bat_update_time_count == 0) {
-        auto bat_level               = GetHAL().getBatLevel();
-        _data.system_state.bat_level = fmt::format("{}", bat_level);
+        const int bat_level = GetHAL().getBatLevel();
         // mclog::tagInfo("system_bar", "get bat level: {}", bat_level);
         // printf("b:%d\n", bat_level);
 
-        if (bat_level >= 100) {
+        if (bat_level < 0) {
+            _data.system_state.bat_level = "--";
+            _data.system_state.bat_state = 4;
+        } else if (bat_level >= 100) {
+            _data.system_state.bat_level = fmt::format("{}", bat_level);
             _data.system_state.bat_state = 1;
         } else if (bat_level >= 75) {
+            _data.system_state.bat_level = fmt::format("{}", bat_level);
             _data.system_state.bat_state = 2;
         } else if (bat_level >= 50) {
+            _data.system_state.bat_level = fmt::format("{}", bat_level);
             _data.system_state.bat_state = 3;
         } else {
+            _data.system_state.bat_level = fmt::format("{}", bat_level);
             _data.system_state.bat_state = 4;
         }
 

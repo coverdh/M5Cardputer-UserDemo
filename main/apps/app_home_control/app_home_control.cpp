@@ -88,6 +88,7 @@ AppHomeControl::~AppHomeControl()
 void AppHomeControl::onOpen()
 {
     mclog::tagInfo(getAppInfo().name, "on open");
+    GetHAL().setFullscreenMode(true);
     _mode            = Mode::Setup;
     _selected_action = 0;
     _input_buffer.clear();
@@ -975,9 +976,7 @@ void AppHomeControl::refreshHomePodState()
 
 void AppHomeControl::render()
 {
-    if (_mode != Mode::Dashboard) {
-        GetHAL().setFullscreenMode(false);
-    }
+    GetHAL().setFullscreenMode(true);
 
     switch (_mode) {
         case Mode::Setup:
@@ -1070,7 +1069,6 @@ void AppHomeControl::renderWifiPrompt(const char* title, bool maskInput)
 
 void AppHomeControl::renderDashboard()
 {
-    GetHAL().setFullscreenMode(false);
     auto& canvas = GetHAL().canvas;
     const auto& input = GetHAL().externalInput;
     const auto& nowPlaying = GetHAL().bleMacCtlNowPlaying();
@@ -1223,7 +1221,6 @@ void AppHomeControl::renderNowPlaying()
 
 void AppHomeControl::renderPointer()
 {
-    GetHAL().setFullscreenMode(false);
     auto& canvas = GetHAL().canvas;
     canvas.fillScreen(THEME_COLOR_BG);
     canvas.setCursor(0, 0);

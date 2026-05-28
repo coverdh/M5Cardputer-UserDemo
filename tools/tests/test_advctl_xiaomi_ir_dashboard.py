@@ -61,12 +61,18 @@ class AdvCtlXiaomiIrDashboardTests(unittest.TestCase):
         self.assertIn("sendTvInputSource();", space_branch)
         self.assertNotIn("bleMacCtlPlayPause", space_branch)
 
-    def test_home_dashboard_keeps_system_bars_and_uses_compact_shortcut_layout(self):
+    def test_home_dashboard_hides_system_bars_and_uses_fullscreen_canvas(self):
         source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
         dashboard = source[source.index("void AppHomeControl::renderDashboard()"):
                            source.index("void AppHomeControl::renderNowPlaying()")]
+        render = source[source.index("void AppHomeControl::render()"):
+                        source.index("void AppHomeControl::renderSetup()")]
+        on_open = source[source.index("void AppHomeControl::onOpen()"):
+                         source.index("void AppHomeControl::onRunning()")]
 
-        self.assertIn("GetHAL().setFullscreenMode(false);", dashboard)
+        self.assertIn("GetHAL().setFullscreenMode(true);", on_open)
+        self.assertIn("GetHAL().setFullscreenMode(true);", render)
+        self.assertNotIn("GetHAL().setFullscreenMode(false);", dashboard)
         self.assertIn("auto& canvas = GetHAL().canvas;", dashboard)
         self.assertIn("GetHAL().pushCanvas();", dashboard)
         self.assertIn("renderStatusBar();", dashboard)
@@ -79,6 +85,24 @@ class AdvCtlXiaomiIrDashboardTests(unittest.TestCase):
         self.assertIn("Sys W:WiFi C:Cfg S:Sleep", dashboard)
         self.assertIn("Snd M:On [/]Vol  B:Pair", dashboard)
 
+        hal_header = (ROOT / "main/hal/hal.h").read_text()
+        push_canvas = hal_header[hal_header.index("inline void pushCanvas()"):
+                                 hal_header.index("void setFullscreenMode", hal_header.index("inline void pushCanvas()"))]
+        self.assertIn("if (_fullscreen_mode)", push_canvas)
+        self.assertIn("canvas.pushSprite(0, 0);", push_canvas)
+
+        hal_source = (ROOT / "main/hal/hal.cpp").read_text()
+        fullscreen = hal_source[hal_source.index("void Hal::setFullscreenMode"):
+                                hal_source.index("void Hal::setDeviceBrightnessPercent")]
+        self.assertIn("canvas.deleteSprite();", fullscreen)
+        self.assertIn("canvas.createSprite(display.width(), display.height());", fullscreen)
+        self.assertIn("canvas.createSprite(204, 109);", fullscreen)
+
+        system_bar = (ROOT / "main/apps/app_launcher/view/system_bar/system_bar.cpp").read_text()
+        keyboard_bar = (ROOT / "main/apps/app_launcher/view/keyboard_bar/keyboard_bar.cpp").read_text()
+        self.assertIn("if (GetHAL().isFullscreenMode())", system_bar)
+        self.assertIn("if (GetHAL().isFullscreenMode())", keyboard_bar)
+
     def test_ble_hid_identity_is_unchanged(self):
         hid = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
         gap = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_gap.c").read_text()
@@ -88,6 +112,26 @@ class AdvCtlXiaomiIrDashboardTests(unittest.TestCase):
         self.assertIn("GATT_SVR_SVC_HID_UUID 0x1812", gap)
         self.assertIn("ble_svc_gap_device_name_set(device_name)", gap)
         self.assertNotIn("XIAOMI_IR", hid)
+
+    def test_advctl_battery_level_is_not_reported_as_static_full(self):
+        hal_header = (ROOT / "main/hal/hal.h").read_text()
+        hal_source = (ROOT / "main/hal/hal.cpp").read_text()
+        system_bar = (ROOT / "main/apps/app_launcher/view/system_bar/system_bar.cpp").read_text()
+        ble_header = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.h").read_text()
+        ble_source = (ROOT / "main/hal/utils/ble_hid_device/ble_hid_device_helper.c").read_text()
+
+        self.assertIn("inline int getBatLevel()", hal_header)
+        self.assertIn("if (level < 0)", hal_header)
+        self.assertIn("ble_hid_device_helper_set_battery_level(uint8_t level)", ble_header)
+        self.assertIn("ble_hid_device_helper_set_battery_level(0);", ble_source)
+        self.assertNotIn("Setting battery level to 100", ble_source)
+        self.assertIn("void Hal::updateBleBatteryLevel(bool force)", hal_source)
+        self.assertIn("const int level = getBatLevel();", hal_source)
+        self.assertIn("ble_hid_device_helper_set_battery_level(batteryLevel);", hal_source)
+        self.assertIn("updateBleBatteryLevel(true);", hal_source)
+        self.assertIn("updateBleBatteryLevel();", hal_source)
+        self.assertIn('bat_level < 0', system_bar)
+        self.assertIn('bat_level = "--"', system_bar)
 
 
 if __name__ == "__main__":

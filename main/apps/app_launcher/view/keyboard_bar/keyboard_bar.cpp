@@ -21,6 +21,10 @@
 
 void Launcher::render_keyboard_bar()
 {
+    if (GetHAL().isFullscreenMode()) {
+        return;
+    }
+
     // Backgound
     int margin_x = 4;
     int margin_y = 6;

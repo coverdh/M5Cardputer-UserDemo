@@ -36,6 +36,7 @@ static constexpr float AIR_MOUSE_BIAS_UPDATE_MAX_GYRO_DPS = 3.20f;
 static constexpr float AIR_MOUSE_BIAS_UPDATE_ALPHA = 0.012f;
 static constexpr uint32_t AIR_MOUSE_AXIS_LOG_INTERVAL_MS = 500;
 static constexpr int AIR_MOUSE_MAX_DELTA = 24;
+static constexpr uint32_t BLE_BATTERY_UPDATE_INTERVAL_MS = 30000;
 
 Hal& GetHAL()
 {
@@ -74,11 +75,41 @@ void Hal::update()
         _last_ble_advertising_ensure_ms = millis();
         ble_hid_device_helper_ensure_advertising();
     }
+    updateBleBatteryLevel();
 }
 
 void Hal::feedTheDog()
 {
     vTaskDelay(1);
+}
+
+void Hal::updateBleBatteryLevel(bool force)
+{
+    if (!_is_ble_keyboard_inited) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (!force && now - _last_ble_battery_update_ms < BLE_BATTERY_UPDATE_INTERVAL_MS) {
+        return;
+    }
+    _last_ble_battery_update_ms = now;
+
+    const int level = getBatLevel();
+    if (level < 0) {
+        if (force || _last_ble_battery_level != level) {
+            mclog::tagWarn(_tag, "battery level unavailable: {}", level);
+        }
+        _last_ble_battery_level = level;
+        return;
+    }
+
+    if (force || _last_ble_battery_level != level) {
+        const uint8_t batteryLevel = static_cast<uint8_t>(level);
+        ble_hid_device_helper_set_battery_level(batteryLevel);
+        mclog::tagInfo(_tag, "ble battery level: {}%", batteryLevel);
+        _last_ble_battery_level = level;
+    }
 }
 
 std::vector<uint8_t> Hal::getDeviceMac()
@@ -118,6 +149,14 @@ void Hal::setFullscreenMode(bool fullscreen)
         return;
     }
     _fullscreen_mode = fullscreen;
+    if (_ui_sprites_enabled) {
+        canvas.deleteSprite();
+        if (_fullscreen_mode) {
+            canvas.createSprite(display.width(), display.height());
+        } else {
+            canvas.createSprite(204, 109);
+        }
+    }
     mclog::tagInfo(_tag, "set fullscreen mode: {}", fullscreen ? "on" : "off");
 }
 
@@ -866,6 +905,7 @@ bool Hal::bleControlInit()
         return false;
     }
     _is_ble_keyboard_inited = true;
+    updateBleBatteryLevel(true);
     return true;
 }
 

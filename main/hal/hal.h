@@ -58,6 +58,10 @@ public:
         if (!_ui_sprites_enabled) {
             return;
         }
+        if (_fullscreen_mode) {
+            canvas.pushSprite(0, 0);
+            return;
+        }
         canvas.pushSprite(canvasKeyboardBar.width(), canvasSystemBar.height());
     }
     void setFullscreenMode(bool fullscreen);
@@ -83,9 +87,16 @@ public:
     ExternalInput externalInput;
 
     /* ---------------------------------- Power --------------------------------- */
-    inline uint8_t getBatLevel()
+    inline int getBatLevel()
     {
-        return M5.Power.getBatteryLevel();
+        const int level = static_cast<int>(M5.Power.getBatteryLevel());
+        if (level < 0) {
+            return level;
+        }
+        if (level > 100) {
+            return 100;
+        }
+        return level;
     }
 
     /* ---------------------------------- WiFi ---------------------------------- */
@@ -193,6 +204,8 @@ private:
     bool _is_ir_inited              = false;
     bool _is_ble_keyboard_inited    = false;
     uint32_t _last_ble_advertising_ensure_ms = 0;
+    uint32_t _last_ble_battery_update_ms = 0;
+    int _last_ble_battery_level = -1;
     bool _is_usb_keyboard_inited    = false;
     bool _is_sd_card_mounted        = false;
     bool _fullscreen_mode           = false;
@@ -238,6 +251,7 @@ private:
     void setting_init();
     void spi_init();
     void sd_card_init();
+    void updateBleBatteryLevel(bool force = false);
     void handle_ble_keyboard_event(const Keyboard::KeyEvent_t& keyEvent);
     void handle_usb_keyboard_event(const Keyboard::KeyEvent_t& keyEvent);
     bool handle_air_mouse_space_event(const Keyboard::KeyEvent_t& keyEvent);
