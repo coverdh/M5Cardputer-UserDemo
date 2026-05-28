@@ -7,6 +7,9 @@ private let advCtlAudioRingVersion: UInt32 = 1
 private let advCtlAudioRingHeaderSize = 64
 private let advCtlAudioRingCapacityFrames = 48_000 * 5
 private let advCtlAudioUpsampleFactor = 6
+private let advCtlAudioSpeechGain: Float32 = 2.4
+private let advCtlAudioHighPassAlpha: Float32 = 0.985
+private let advCtlAudioSoftClipKnee: Float32 = 0.35
 
 final class ADVCtlAudioRingSink {
     private var mapped: UnsafeMutableRawPointer?
@@ -14,6 +17,9 @@ final class ADVCtlAudioRingSink {
     private var fileHandle: FileHandle?
     private var ringDevice: UInt64 = 0
     private var ringInode: UInt64 = 0
+    private var previousUpsampleSample: Float32?
+    private var highPassPreviousInput: Float32 = 0
+    private var highPassPreviousOutput: Float32 = 0
 
     var isRunning: Bool {
         isInputRequested()
@@ -83,7 +89,9 @@ final class ADVCtlAudioRingSink {
         refreshDevice()
     }
 
-    func stop() {}
+    func stop() {
+        resetSpeechEnhancer(to: 0)
+    }
 
     func isInputRequested() -> Bool {
         guard refreshDevice(), let mapped else {
@@ -100,9 +108,7 @@ final class ADVCtlAudioRingSink {
         samples.reserveCapacity(data.count * advCtlAudioUpsampleFactor)
         for byte in data {
             let decoded = Float32(Self.decodeULaw(byte)) / 32768.0
-            for _ in 0..<advCtlAudioUpsampleFactor {
-                samples.append(decoded)
-            }
+            appendUpsampledSpeechSample(enhanceSpeech(decoded), to: &samples)
         }
         write(samples)
         return samples.count
@@ -113,6 +119,7 @@ final class ADVCtlAudioRingSink {
             return 0
         }
         let samples = [Float32](repeating: 0.0, count: uLawSampleCount * advCtlAudioUpsampleFactor)
+        resetSpeechEnhancer(to: 0)
         write(samples)
         return samples.count
     }
@@ -185,6 +192,37 @@ final class ADVCtlAudioRingSink {
         }
         writeIndex += UInt64(samples.count)
         mapped.storeBytes(of: writeIndex, toByteOffset: 32, as: UInt64.self)
+    }
+
+    private func appendUpsampledSpeechSample(_ sample: Float32, to samples: inout [Float32]) {
+        guard let previous = previousUpsampleSample else {
+            samples.append(contentsOf: repeatElement(sample, count: advCtlAudioUpsampleFactor))
+            previousUpsampleSample = sample
+            return
+        }
+
+        let delta = sample - previous
+        for step in 1...advCtlAudioUpsampleFactor {
+            let fraction = Float32(step) / Float32(advCtlAudioUpsampleFactor)
+            samples.append(previous + delta * fraction)
+        }
+        previousUpsampleSample = sample
+    }
+
+    private func enhanceSpeech(_ sample: Float32) -> Float32 {
+        let highPassed = sample - highPassPreviousInput + advCtlAudioHighPassAlpha * highPassPreviousOutput
+        highPassPreviousInput = sample
+        highPassPreviousOutput = highPassed
+
+        let boosted = highPassed * advCtlAudioSpeechGain
+        let shaped = boosted / (1.0 + advCtlAudioSoftClipKnee * abs(boosted))
+        return max(-0.98, min(0.98, shaped))
+    }
+
+    private func resetSpeechEnhancer(to sample: Float32) {
+        previousUpsampleSample = sample
+        highPassPreviousInput = sample
+        highPassPreviousOutput = 0
     }
 
     private static func decodeULaw(_ byte: UInt8) -> Int16 {
