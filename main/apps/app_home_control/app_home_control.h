@@ -100,9 +100,9 @@ private:
     static constexpr uint32_t DEFAULT_SCREEN_TIMEOUT_MS = 30000;
     static constexpr uint32_t DEFAULT_POWER_SAVE_TIMEOUT_MS = 180000;
     static constexpr int ACTION_COUNT            = 8;
-    static constexpr size_t AUDIO_TEST_LENGTH    = 120;
+    static constexpr size_t AUDIO_TEST_LENGTH    = 320;
     static constexpr size_t AUDIO_TEST_RATE      = 16000;
-    static constexpr size_t AUDIO_STREAM_PAYLOAD = 60;
+    static constexpr size_t AUDIO_ADPCM_FRAGMENT_PAYLOAD = 58;
     static constexpr uint32_t AUDIO_ERROR_LOG_MS = 2000;
     static const Action ACTIONS[ACTION_COUNT];
 
@@ -130,6 +130,8 @@ private:
     void startAudioTest();
     void stopAudioTest();
     uint8_t encodeULaw(int16_t sample) const;
+    void encodeAdpcmFrame(const int16_t* samples, size_t sampleCount, std::vector<uint8_t>& output) const;
+    uint8_t encodeAdpcmNibble(int16_t sample, int& predictor, int& index) const;
     void streamAudioFrame();
     void sendKnobWheelStep(int8_t step);
     void sendKnobControlStep(int8_t step);

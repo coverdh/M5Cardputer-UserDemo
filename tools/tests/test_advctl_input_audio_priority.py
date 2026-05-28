@@ -25,9 +25,9 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertLess(block.index("handleExternalInput();"), block.index("renderAudioWaveform();"))
 
         header = (ROOT / "main/apps/app_home_control/app_home_control.h").read_text()
-        self.assertIn("AUDIO_TEST_LENGTH    = 120", header)
+        self.assertIn("AUDIO_TEST_LENGTH    = 320", header)
         self.assertIn("AUDIO_TEST_RATE      = 16000", header)
-        self.assertIn("AUDIO_STREAM_PAYLOAD = 60", header)
+        self.assertIn("AUDIO_ADPCM_FRAGMENT_PAYLOAD = 58", header)
 
     def test_chain_joystick_center_and_sensitivity_are_managed_by_input_layer(self):
         app_source = (ROOT / "main/apps/app_home_control/app_home_control.cpp").read_text()
@@ -182,19 +182,23 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn('.device_name = "ADVCtl"', source)
         self.assertIn("ble_svc_gap_device_name_set(device_name)", (ROOT / "main/hal/utils/ble_hid_device/ble_hid_gap.c").read_text())
         self.assertIn("static constexpr size_t AUDIO_TEST_RATE      = 16000", header)
-        self.assertIn("static constexpr size_t AUDIO_STREAM_PAYLOAD = 60", header)
-        self.assertIn("for (size_t i = 0; i < _audio_test_buffer.size(); i += 2)", app)
+        self.assertIn("static constexpr size_t AUDIO_TEST_LENGTH    = 320", header)
+        self.assertIn("static constexpr size_t AUDIO_ADPCM_FRAGMENT_PAYLOAD = 58", header)
+        self.assertIn("encodeAdpcmFrame(_audio_test_buffer.data(), _audio_test_buffer.size(), _audio_stream_buffer)", app)
+        self.assertIn("GetHAL().bleMacCtlAudioAdpcmFrame", app)
         self.assertIn("MACCTL_REPORT_AUDIO_STATE", source)
+        self.assertIn("ble_hid_device_helper_send_macctl_audio_adpcm", source)
         self.assertIn("bool ble_hid_device_helper_send_macctl_audio_state(bool active)", source)
         self.assertIn("GetHAL().bleMacCtlAudioState(true);", app)
         self.assertIn("GetHAL().bleMacCtlAudioState(false);", app)
         self.assertIn("private let advCtlAudioStateReport: UInt8 = 0xA1", mac)
+        self.assertIn("private let advCtlAudioAdpcmFrameReport: UInt8 = 0xA2", mac)
         self.assertIn("ADV microphone start not acknowledged; retrying", mac)
         self.assertIn("ADV microphone streaming", mac)
-        self.assertIn("Received ADV audio frames", mac)
+        self.assertIn("Received ADV ADPCM frames", mac)
         self.assertIn("audio request consumed", app)
-        self.assertIn("audio frame sent", app)
-        self.assertIn("@discardableResult func enqueueULaw(_ data: Data) -> Int", mac)
+        self.assertIn("audio adpcm frame sent", app)
+        self.assertIn("@discardableResult func enqueueIMAADPCM(_ data: Data) -> Int", mac)
         self.assertIn("speech recognition", agents)
         self.assertNotIn("A2DP", source)
         self.assertNotIn("Bluetooth audio", source)
@@ -262,14 +266,17 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
 
         self.assertIn("private let advCtlAudioMaxConcealedPackets = 16", app)
         self.assertIn("private var expectedAudioFrameSequence: UInt8?", app)
-        self.assertIn("private func acceptAudioPacketAndConcealGaps(before sequence: UInt8, payloadBytes: Int) -> Int?", app)
+        self.assertIn("private func acceptAudioSequence(_ sequence: UInt8, concealMissing: (Int) -> Int) -> Int?", app)
         self.assertIn("let distance = (Int(sequence) - Int(expected) + 256) % 256", app)
         self.assertIn("guard distance <= 127 else", app)
         self.assertIn("return nil", app)
-        self.assertIn("guard let concealedFrames = acceptAudioPacketAndConcealGaps", app)
+        self.assertIn("guard let concealedFrames = acceptULawAudioPacketAndConcealGaps", app)
+        self.assertIn("guard let concealedFrames = acceptAdpcmAudioFrameAndConcealGaps", app)
         self.assertIn("audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)", app)
+        self.assertIn("audioSink.enqueuePCMSilence(sampleCount: missingPackets * advCtlAudioAdpcmFrameSamples)", app)
         self.assertIn("resetAudioPacketTracking()", app[app.index("if payload.count >= 2, payload[0] == advCtlAudioStateReport"):])
         self.assertIn("private let advCtlAudioUpsampleFactor = 6", sink)
+        self.assertIn("private let advCtlAudioAdpcmUpsampleFactor = 3", sink)
         self.assertIn("@discardableResult func enqueueSilence(uLawSampleCount: Int) -> Int", sink)
 
     def test_voice_e2e_automation_uses_driver_demand_and_hid_audio(self):
@@ -409,7 +416,7 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
                 const uint8_t macctl_report = 4;
                 const uint8_t mouse_map = 1;
                 const uint8_t mouse_report = 2;
-                const uint8_t audio[] = {0xA0, 0x01, 0x02};
+                const uint8_t audio[] = {0xA2, 0x01, 0x00, 0x03, 0x02};
                 const uint8_t command[] = {0x01, 0x01, 0x00};
                 const uint8_t keyboard[] = {0x01, 0x00, 0x04};
                 const uint8_t mouse_move[] = {0x00, 0x05, 0x00, 0x00};

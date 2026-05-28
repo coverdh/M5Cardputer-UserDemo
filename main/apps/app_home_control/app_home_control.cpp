@@ -26,6 +26,21 @@ constexpr uint8_t XIAOMI_TV_INPUT_FUNC   = 0x01;
 constexpr uint8_t XIAOMI_TV_IR_REPEATS   = 5;
 constexpr uint8_t LEGACY_NEC_POWER_ADDR  = 0x04;
 constexpr uint8_t LEGACY_NEC_POWER_CMD   = 0x08;
+constexpr int ADPCM_INDEX_TABLE[16] = {
+    -1, -1, -1, -1, 2, 4, 6, 8,
+    -1, -1, -1, -1, 2, 4, 6, 8,
+};
+constexpr int ADPCM_STEP_TABLE[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+    19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+    130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+    337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+    5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+};
 constexpr float POINTER_JOYSTICK_DEADZONE       = 0.10f;
 constexpr float POINTER_JOYSTICK_MIN_SPEED      = 18.0f;
 constexpr float POINTER_JOYSTICK_ACCEL_ENTER    = 0.70f;
@@ -696,27 +711,101 @@ uint8_t AppHomeControl::encodeULaw(int16_t sample) const
     return static_cast<uint8_t>(~(sign | (segment << 4) | mantissa));
 }
 
+uint8_t AppHomeControl::encodeAdpcmNibble(int16_t sample, int& predictor, int& index) const
+{
+    const int step = ADPCM_STEP_TABLE[index];
+    int diff = static_cast<int>(sample) - predictor;
+    uint8_t code = 0;
+    if (diff < 0) {
+        code = 8;
+        diff = -diff;
+    }
+
+    int delta = step >> 3;
+    if (diff >= step) {
+        code |= 4;
+        diff -= step;
+        delta += step;
+    }
+    if (diff >= (step >> 1)) {
+        code |= 2;
+        diff -= step >> 1;
+        delta += step >> 1;
+    }
+    if (diff >= (step >> 2)) {
+        code |= 1;
+        delta += step >> 2;
+    }
+
+    predictor += (code & 8) ? -delta : delta;
+    predictor = std::max(-32768, std::min(32767, predictor));
+    index += ADPCM_INDEX_TABLE[code & 0x0F];
+    index = std::max(0, std::min(88, index));
+    return code & 0x0F;
+}
+
+void AppHomeControl::encodeAdpcmFrame(const int16_t* samples, size_t sampleCount, std::vector<uint8_t>& output) const
+{
+    output.clear();
+    if (!samples || sampleCount == 0) {
+        return;
+    }
+
+    int predictor = samples[0];
+    int index = 0;
+    output.reserve(4 + (sampleCount + 1) / 2);
+    output.push_back(static_cast<uint8_t>(predictor & 0xFF));
+    output.push_back(static_cast<uint8_t>((predictor >> 8) & 0xFF));
+    output.push_back(static_cast<uint8_t>(index));
+    output.push_back(0);
+
+    bool has_low_nibble = false;
+    uint8_t packed = 0;
+    for (size_t i = 1; i < sampleCount; ++i) {
+        const uint8_t nibble = encodeAdpcmNibble(samples[i], predictor, index);
+        if (!has_low_nibble) {
+            packed = nibble;
+            has_low_nibble = true;
+        } else {
+            output.push_back(packed | static_cast<uint8_t>(nibble << 4));
+            has_low_nibble = false;
+            packed = 0;
+        }
+    }
+    if (has_low_nibble) {
+        output.push_back(packed);
+    }
+}
+
 void AppHomeControl::streamAudioFrame()
 {
     if (!GetHAL().bleMacCtlIsConnected() || _audio_test_buffer.empty()) {
         return;
     }
 
-    for (size_t i = 0; i < _audio_test_buffer.size(); i += 2) {
-        _audio_stream_buffer.push_back(encodeULaw(_audio_test_buffer[i]));
+    encodeAdpcmFrame(_audio_test_buffer.data(), _audio_test_buffer.size(), _audio_stream_buffer);
+    if (_audio_stream_buffer.empty()) {
+        return;
     }
-    while (_audio_stream_buffer.size() >= AUDIO_STREAM_PAYLOAD) {
-        const uint8_t sequence = _audio_frame_sequence++;
-        const bool sent = GetHAL().bleMacCtlAudioFrame(sequence,
-                                                       _audio_stream_buffer.data(),
-                                                       static_cast<uint8_t>(AUDIO_STREAM_PAYLOAD));
-        if (sent && (sequence == 0 || (sequence % 100) == 0)) {
-            mclog::tagInfo(getAppInfo().name, "audio frame sent: seq={}", sequence);
-        } else if (!sent && GetHAL().millis() - _last_audio_error_log > AUDIO_ERROR_LOG_MS) {
-            _last_audio_error_log = GetHAL().millis();
-            mclog::tagWarn(getAppInfo().name, "audio frame not sent: ble not ready");
-        }
-        _audio_stream_buffer.erase(_audio_stream_buffer.begin(), _audio_stream_buffer.begin() + AUDIO_STREAM_PAYLOAD);
+
+    const uint8_t sequence = _audio_frame_sequence++;
+    const uint8_t fragment_count = static_cast<uint8_t>(
+        (_audio_stream_buffer.size() + AUDIO_ADPCM_FRAGMENT_PAYLOAD - 1) / AUDIO_ADPCM_FRAGMENT_PAYLOAD);
+    bool all_sent = true;
+    for (uint8_t fragment = 0; fragment < fragment_count; ++fragment) {
+        const size_t offset = static_cast<size_t>(fragment) * AUDIO_ADPCM_FRAGMENT_PAYLOAD;
+        const size_t remaining = _audio_stream_buffer.size() - offset;
+        const uint8_t payload_len = static_cast<uint8_t>(std::min(remaining, AUDIO_ADPCM_FRAGMENT_PAYLOAD));
+        const bool sent = GetHAL().bleMacCtlAudioAdpcmFrame(sequence, fragment, fragment_count,
+                                                            &_audio_stream_buffer[offset], payload_len);
+        all_sent = all_sent && sent;
+    }
+
+    if (all_sent && (sequence == 0 || (sequence % 100) == 0)) {
+        mclog::tagInfo(getAppInfo().name, "audio adpcm frame sent: seq={} fragments={}", sequence, fragment_count);
+    } else if (!all_sent && GetHAL().millis() - _last_audio_error_log > AUDIO_ERROR_LOG_MS) {
+        _last_audio_error_log = GetHAL().millis();
+        mclog::tagWarn(getAppInfo().name, "audio adpcm frame not sent: ble not ready");
     }
 }
 

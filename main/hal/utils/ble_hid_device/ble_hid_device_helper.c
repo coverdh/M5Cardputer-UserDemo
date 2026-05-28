@@ -1634,6 +1634,22 @@ bool ble_hid_device_helper_send_macctl_audio(uint8_t sequence, const uint8_t* da
     return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
 }
 
+bool ble_hid_device_helper_send_macctl_audio_adpcm(uint8_t sequence, uint8_t fragment_index, uint8_t fragment_count,
+                                                   const uint8_t* data, uint8_t len)
+{
+    uint8_t buffer[BLE_HID_MACCTL_REPORT_LEN] = {0};
+    buffer[0] = 0xA2;
+    buffer[1] = sequence;
+    buffer[2] = fragment_index;
+    buffer[3] = fragment_count;
+    if (data && len > 0) {
+        const uint8_t payload_len = len > (BLE_HID_MACCTL_REPORT_LEN - 5) ? (BLE_HID_MACCTL_REPORT_LEN - 5) : len;
+        buffer[4] = payload_len;
+        memcpy(&buffer[5], data, payload_len);
+    }
+    return ble_hid_device_helper_queue_macctl_report(buffer, sizeof(buffer));
+}
+
 void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback)
 {
     s_ble_hid_output_callback = callback;

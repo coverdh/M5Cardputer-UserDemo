@@ -35,8 +35,10 @@ private let advCtlNowPlayingTitleCommand: UInt8 = 0x88
 private let advCtlNowPlayingArtistCommand: UInt8 = 0x89
 private let advCtlAudioFrameReport: UInt8 = 0xA0
 private let advCtlAudioStateReport: UInt8 = 0xA1
+private let advCtlAudioAdpcmFrameReport: UInt8 = 0xA2
 private let advCtlAudioAckRetryInterval: TimeInterval = 2.0
 private let advCtlAudioMaxConcealedPackets = 16
+private let advCtlAudioAdpcmFrameSamples = 320
 private let appleTVCommandSessionMaxIdle: TimeInterval = 5 * 60
 private let appleTVCommandSessionMaxAge: TimeInterval = 30 * 60
 private let advCtlConfigReport: UInt8 = 0x90
@@ -294,6 +296,9 @@ private final class ADVCtlBridge {
     private var audioFrameCount = 0
     private var expectedAudioFrameSequence: UInt8?
     private var concealedAudioPacketCount = 0
+    private var pendingAdpcmSequence: UInt8?
+    private var pendingAdpcmFragmentCount = 0
+    private var pendingAdpcmFragments: [Data?] = []
     private var lastNowPlayingTextSignature = ""
     private var lastPublishedAppleTVVolumePercent: UInt8?
     weak var delegate: ADVCtlBridgeDelegate?
@@ -653,10 +658,17 @@ private final class ADVCtlBridge {
         expectedAudioFrameSequence = nil
         audioFrameCount = 0
         concealedAudioPacketCount = 0
+        resetPendingAdpcmFrame()
     }
 
-    private func acceptAudioPacketAndConcealGaps(before sequence: UInt8, payloadBytes: Int) -> Int? {
-        guard let expected = expectedAudioFrameSequence, payloadBytes > 0 else {
+    private func resetPendingAdpcmFrame() {
+        pendingAdpcmSequence = nil
+        pendingAdpcmFragmentCount = 0
+        pendingAdpcmFragments = []
+    }
+
+    private func acceptAudioSequence(_ sequence: UInt8, concealMissing: (Int) -> Int) -> Int? {
+        guard let expected = expectedAudioFrameSequence else {
             expectedAudioFrameSequence = sequence &+ 1
             return 0
         }
@@ -675,11 +687,61 @@ private final class ADVCtlBridge {
         expectedAudioFrameSequence = sequence &+ 1
         let missingPackets = min(distance, advCtlAudioMaxConcealedPackets)
         concealedAudioPacketCount += missingPackets
-        let written = audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)
+        let written = concealMissing(missingPackets)
         if distance > advCtlAudioMaxConcealedPackets {
             log("ADV audio gap capped: missing=\(distance) concealed=\(missingPackets)")
         }
         return written
+    }
+
+    private func acceptULawAudioPacketAndConcealGaps(before sequence: UInt8, payloadBytes: Int) -> Int? {
+        guard payloadBytes > 0 else {
+            return nil
+        }
+        return acceptAudioSequence(sequence) { missingPackets in
+            audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)
+        }
+    }
+
+    private func acceptAdpcmAudioFrameAndConcealGaps(before sequence: UInt8) -> Int? {
+        acceptAudioSequence(sequence) { missingPackets in
+            audioSink.enqueuePCMSilence(sampleCount: missingPackets * advCtlAudioAdpcmFrameSamples)
+        }
+    }
+
+    private func isStaleAudioSequence(_ sequence: UInt8) -> Bool {
+        guard let expected = expectedAudioFrameSequence else {
+            return false
+        }
+        let distance = (Int(sequence) - Int(expected) + 256) % 256
+        return distance > 127
+    }
+
+    private func assembleAdpcmFrame(sequence: UInt8, fragmentIndex: Int, fragmentCount: Int, data: Data) -> Data? {
+        guard fragmentCount > 0, fragmentCount <= 8, fragmentIndex >= 0, fragmentIndex < fragmentCount else {
+            return nil
+        }
+        if isStaleAudioSequence(sequence) {
+            log("ADV ADPCM stale fragment dropped: expected=\(expectedAudioFrameSequence ?? 0) got=\(sequence)")
+            return nil
+        }
+        if pendingAdpcmSequence != sequence || pendingAdpcmFragmentCount != fragmentCount {
+            pendingAdpcmSequence = sequence
+            pendingAdpcmFragmentCount = fragmentCount
+            pendingAdpcmFragments = Array(repeating: nil, count: fragmentCount)
+        }
+        if pendingAdpcmFragments[fragmentIndex] != nil {
+            return nil
+        }
+        pendingAdpcmFragments[fragmentIndex] = data
+        guard pendingAdpcmFragments.allSatisfy({ $0 != nil }) else {
+            return nil
+        }
+        let frame = pendingAdpcmFragments.reduce(into: Data()) { result, fragment in
+            result.append(fragment!)
+        }
+        resetPendingAdpcmFrame()
+        return frame
     }
 
     private func sendKeyboardLedAudioControl(active: Bool) {
@@ -892,8 +954,8 @@ private final class ADVCtlBridge {
             let sequence = payload[1]
             let byteCount = min(Int(payload[2]), payload.count - 3)
             if byteCount > 0 {
-                guard let concealedFrames = acceptAudioPacketAndConcealGaps(before: sequence,
-                                                                            payloadBytes: byteCount) else {
+                guard let concealedFrames = acceptULawAudioPacketAndConcealGaps(before: sequence,
+                                                                                payloadBytes: byteCount) else {
                     return
                 }
                 audioFrameCount += 1
@@ -908,6 +970,36 @@ private final class ADVCtlBridge {
                 } else if concealedFrames > 0 {
                     updateMessage("Concealed ADV audio gap before seq \(sequence): wrote \(concealedFrames) silence samples")
                 }
+            }
+            return
+        }
+
+        if payload.count >= 5, payload[0] == advCtlAudioAdpcmFrameReport {
+            let sequence = payload[1]
+            let fragmentIndex = Int(payload[2])
+            let fragmentCount = Int(payload[3])
+            let byteCount = min(Int(payload[4]), payload.count - 5)
+            guard byteCount > 0,
+                  let frame = assembleAdpcmFrame(sequence: sequence,
+                                                 fragmentIndex: fragmentIndex,
+                                                 fragmentCount: fragmentCount,
+                                                 data: payload.subdata(in: 5..<(5 + byteCount))) else {
+                return
+            }
+            guard let concealedFrames = acceptAdpcmAudioFrameAndConcealGaps(before: sequence) else {
+                return
+            }
+            audioFrameCount += 1
+            let writtenFrames = audioSink.enqueueIMAADPCM(frame)
+            if let expectedFrames = config.expectedAudioFrames, expectedFrames > 0, audioFrameCount >= expectedFrames {
+                log("E2E audio complete; received \(audioFrameCount) ADPCM frames, wrote \(writtenFrames) samples, concealed \(concealedAudioPacketCount) packets")
+                fflush(stdout)
+                exit(0)
+            }
+            if audioFrameCount == 1 || audioFrameCount % 100 == 0 {
+                updateMessage("Received ADV ADPCM frames: \(audioFrameCount), wrote \(writtenFrames) samples, concealed \(concealedAudioPacketCount) packets")
+            } else if concealedFrames > 0 {
+                updateMessage("Concealed ADV ADPCM gap before seq \(sequence): wrote \(concealedFrames) silence samples")
             }
             return
         }

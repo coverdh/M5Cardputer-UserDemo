@@ -7,6 +7,8 @@ private let advCtlAudioRingVersion: UInt32 = 1
 private let advCtlAudioRingHeaderSize = 64
 private let advCtlAudioRingCapacityFrames = 48_000 * 5
 private let advCtlAudioUpsampleFactor = 6
+private let advCtlAudioAdpcmUpsampleFactor = 3
+private let advCtlAudioAdpcmDecodedSamples = 320
 
 final class ADVCtlAudioRingSink {
     private var mapped: UnsafeMutableRawPointer?
@@ -109,12 +111,52 @@ final class ADVCtlAudioRingSink {
         return samples.count
     }
 
+    @discardableResult func enqueueIMAADPCM(_ data: Data) -> Int {
+        guard refreshDevice(), data.count >= 4 else {
+            return 0
+        }
+        var samples = [Float32]()
+        samples.reserveCapacity((data.count - 4) * 2 * advCtlAudioAdpcmUpsampleFactor)
+        let predictorBits = UInt16(data[0]) | (UInt16(data[1]) << 8)
+        var predictor = Int(Int16(bitPattern: predictorBits))
+        var index = min(88, max(0, Int(data[2])))
+        appendUpsampledAdpcmSample(Float32(predictor) / 32768.0, to: &samples)
+        var decodedSamples = 1
+
+        for byte in data.dropFirst(4) {
+            let low = byte & 0x0F
+            decodeIMAADPCMNibble(low, predictor: &predictor, index: &index, into: &samples)
+            decodedSamples += 1
+            if decodedSamples >= advCtlAudioAdpcmDecodedSamples {
+                break
+            }
+            let high = (byte >> 4) & 0x0F
+            decodeIMAADPCMNibble(high, predictor: &predictor, index: &index, into: &samples)
+            decodedSamples += 1
+            if decodedSamples >= advCtlAudioAdpcmDecodedSamples {
+                break
+            }
+        }
+        write(samples)
+        return samples.count
+    }
+
     @discardableResult func enqueueSilence(uLawSampleCount: Int) -> Int {
         guard refreshDevice(), uLawSampleCount > 0 else {
             return 0
         }
         let samples = [Float32](repeating: 0.0, count: uLawSampleCount * advCtlAudioUpsampleFactor)
         previousUpsampleSample = 0
+        write(samples)
+        return samples.count
+    }
+
+    @discardableResult func enqueuePCMSilence(sampleCount: Int) -> Int {
+        guard refreshDevice(), sampleCount > 0 else {
+            return 0
+        }
+        let samples = [Float32](repeating: 0.0, count: sampleCount * advCtlAudioAdpcmUpsampleFactor)
+        resetUpsampler(to: 0)
         write(samples)
         return samples.count
     }
@@ -204,8 +246,36 @@ final class ADVCtlAudioRingSink {
         previousUpsampleSample = sample
     }
 
+    private func appendUpsampledAdpcmSample(_ sample: Float32, to samples: inout [Float32]) {
+        guard let previous = previousUpsampleSample else {
+            samples.append(contentsOf: repeatElement(sample, count: advCtlAudioAdpcmUpsampleFactor))
+            previousUpsampleSample = sample
+            return
+        }
+
+        let delta = sample - previous
+        for step in 1...advCtlAudioAdpcmUpsampleFactor {
+            let fraction = Float32(step) / Float32(advCtlAudioAdpcmUpsampleFactor)
+            samples.append(previous + delta * fraction)
+        }
+        previousUpsampleSample = sample
+    }
+
     private func resetUpsampler(to sample: Float32) {
         previousUpsampleSample = sample
+    }
+
+    private func decodeIMAADPCMNibble(_ nibble: UInt8, predictor: inout Int, index: inout Int, into samples: inout [Float32]) {
+        let step = Self.imaStepTable[index]
+        var delta = step >> 3
+        if (nibble & 0x04) != 0 { delta += step }
+        if (nibble & 0x02) != 0 { delta += step >> 1 }
+        if (nibble & 0x01) != 0 { delta += step >> 2 }
+        predictor += (nibble & 0x08) != 0 ? -delta : delta
+        predictor = min(32767, max(-32768, predictor))
+        index += Self.imaIndexTable[Int(nibble & 0x0F)]
+        index = min(88, max(0, index))
+        appendUpsampledAdpcmSample(Float32(predictor) / 32768.0, to: &samples)
     }
 
     private static func decodeULaw(_ byte: UInt8) -> Int16 {
@@ -214,4 +284,21 @@ final class ADVCtlAudioRingSink {
         sample -= 0x84
         return (value & 0x80) != 0 ? -sample : sample
     }
+
+    private static let imaIndexTable = [
+        -1, -1, -1, -1, 2, 4, 6, 8,
+        -1, -1, -1, -1, 2, 4, 6, 8,
+    ]
+
+    private static let imaStepTable = [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+        19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+        50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+        130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+        337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+        876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+        2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+        5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+        15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+    ]
 }

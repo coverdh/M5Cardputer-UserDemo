@@ -148,6 +148,8 @@ public:
     const MacCtlNowPlayingState& bleMacCtlNowPlaying() const;
     bool bleMacCtlAudioState(bool active);
     bool bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len);
+    bool bleMacCtlAudioAdpcmFrame(uint8_t sequence, uint8_t fragmentIndex, uint8_t fragmentCount,
+                                  const uint8_t* data, uint8_t len);
     bool bleConsumeAudioTestRequest(bool& active);
 
     /* ----------------------------------- USB ---------------------------------- */

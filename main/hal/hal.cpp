@@ -1115,6 +1115,15 @@ bool Hal::bleMacCtlAudioFrame(uint8_t sequence, const uint8_t* data, uint8_t len
     return ble_hid_device_helper_send_macctl_audio(sequence, data, len);
 }
 
+bool Hal::bleMacCtlAudioAdpcmFrame(uint8_t sequence, uint8_t fragmentIndex, uint8_t fragmentCount,
+                                   const uint8_t* data, uint8_t len)
+{
+    if (!ble_hid_device_helper_is_ready() || !s_advctl_control_ready) {
+        return false;
+    }
+    return ble_hid_device_helper_send_macctl_audio_adpcm(sequence, fragmentIndex, fragmentCount, data, len);
+}
+
 bool Hal::bleConsumeAudioTestRequest(bool& active)
 {
     ble_hid_device_helper_poll_output_reports();

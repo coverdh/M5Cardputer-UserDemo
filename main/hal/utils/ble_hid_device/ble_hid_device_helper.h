@@ -33,6 +33,8 @@ bool ble_hid_device_helper_send_macctl_config(uint8_t flags, uint8_t sensitivity
 bool ble_hid_device_helper_send_macctl_power_config(uint8_t screen_timeout_s, uint8_t power_save_timeout_min);
 bool ble_hid_device_helper_send_macctl_audio_state(bool active);
 bool ble_hid_device_helper_send_macctl_audio(uint8_t sequence, const uint8_t* data, uint8_t len);
+bool ble_hid_device_helper_send_macctl_audio_adpcm(uint8_t sequence, uint8_t fragment_index, uint8_t fragment_count,
+                                                   const uint8_t* data, uint8_t len);
 void ble_hid_device_helper_set_output_callback(ble_hid_device_helper_output_callback_t callback);
 void ble_hid_device_helper_poll_output_reports(void);
 BleHidDeviceState_t ble_hid_device_helper_get_state(void);
