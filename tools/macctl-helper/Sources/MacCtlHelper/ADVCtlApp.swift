@@ -37,6 +37,8 @@ private let advCtlAudioFrameReport: UInt8 = 0xA0
 private let advCtlAudioStateReport: UInt8 = 0xA1
 private let advCtlAudioAckRetryInterval: TimeInterval = 2.0
 private let advCtlAudioMaxConcealedPackets = 16
+private let appleTVCommandSessionMaxIdle: TimeInterval = 5 * 60
+private let appleTVCommandSessionMaxAge: TimeInterval = 30 * 60
 private let advCtlConfigReport: UInt8 = 0x90
 private let advCtlPowerReport: UInt8 = 0x91
 private let advCtlKeyboardReportID: UInt32 = 1
@@ -273,6 +275,9 @@ private final class ADVCtlBridge {
     private let appleTVNative = AppleTVNativeClient()
     private var appleTVCommandSession: AppleTVNativeCommandSession?
     private var appleTVCommandSessionIdentifier = ""
+    private var appleTVCommandSessionToken = UUID()
+    private var appleTVCommandSessionStartedAt: TimeInterval = 0
+    private var appleTVCommandSessionLastUsedAt: TimeInterval = 0
     private let audioSink = ADVCtlAudioRingSink()
     private var handledCommands = 0
     private var hidManager: IOHIDManager?
@@ -312,23 +317,47 @@ private final class ADVCtlBridge {
     }
 
     private func commandSession(for identifier: String) throws -> AppleTVNativeCommandSession {
+        let now = Date().timeIntervalSince1970
         if let session = appleTVCommandSession,
            session.isRunning,
-           appleTVCommandSessionIdentifier == identifier {
+           appleTVCommandSessionIdentifier == identifier,
+           now - appleTVCommandSessionLastUsedAt <= appleTVCommandSessionMaxIdle,
+           now - appleTVCommandSessionStartedAt <= appleTVCommandSessionMaxAge {
             return session
         }
         appleTVCommandSession?.stop()
+        let token = UUID()
         let session = try appleTVNative.startCommandSession(identifier: identifier) { [weak self] message in
             guard !message.isEmpty else { return }
             log("Apple TV worker: \(message)")
-            self?.handleAppleTVWorkerMessage(message)
+            self?.handleAppleTVWorkerMessage(message, token: token)
             if message.contains("\"event\": \"ready\"") || message.contains("\"event\":\"ready\"") {
                 self?.updateMessage("Apple TV control connected")
             }
         }
         appleTVCommandSession = session
         appleTVCommandSessionIdentifier = identifier
+        appleTVCommandSessionToken = token
+        appleTVCommandSessionStartedAt = now
+        appleTVCommandSessionLastUsedAt = now
         return session
+    }
+
+    private func markAppleTVCommandSessionUsed() {
+        appleTVCommandSessionLastUsedAt = Date().timeIntervalSince1970
+    }
+
+    private func invalidateAppleTVCommandSession(token: UUID, reason: String) {
+        guard token == appleTVCommandSessionToken else {
+            return
+        }
+        updateMessage("Apple TV control reconnecting: \(reason)")
+        let session = appleTVCommandSession
+        appleTVCommandSession = nil
+        appleTVCommandSessionIdentifier = ""
+        appleTVCommandSessionStartedAt = 0
+        appleTVCommandSessionLastUsedAt = 0
+        session?.stop()
     }
 
     deinit {
@@ -936,6 +965,7 @@ private final class ADVCtlBridge {
                 let appleTVIdentifier = self.configuredAppleTVIdentifier
                 if !appleTVIdentifier.isEmpty {
                     try commandSession(for: appleTVIdentifier).sendVolumeDelta(delta)
+                    markAppleTVCommandSessionUsed()
                     self.updateMessage("Handled \(keyCode == hidKeyF13 ? "F13" : "F14") as \(delta) via Apple TV")
                 } else if let homeAssistant {
                     try await homeAssistant.handle(command)
@@ -970,8 +1000,10 @@ private final class ADVCtlBridge {
                     switch command {
                     case .volumeDelta(let delta):
                         session.sendVolumeDelta(delta * self.knobVolumeStep)
+                        self.markAppleTVCommandSessionUsed()
                     case .playPause:
                         session.sendPlayPause()
+                        self.markAppleTVCommandSessionUsed()
                     case .systemKey:
                         break
                     }
@@ -1039,19 +1071,23 @@ private final class ADVCtlBridge {
         }
     }
 
-    private func handleAppleTVWorkerMessage(_ message: String) {
+    private func handleAppleTVWorkerMessage(_ message: String, token: UUID) {
         for line in message.split(whereSeparator: \.isNewline) {
             guard let data = String(line).data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let event = object["event"] as? String,
-                  event == "ok",
-                  let command = object["command"] as? String,
-                  command == "volume",
-                  let volume = object["volume"] as? Double else {
+                  let event = object["event"] as? String else {
                 continue
             }
-            let percent = min(100, max(0, Int(volume.rounded())))
-            publishAppleTVVolumeIfChanged(UInt8(percent))
+            if event == "ok",
+               let command = object["command"] as? String,
+               command == "volume",
+               let volume = object["volume"] as? Double {
+                let percent = min(100, max(0, Int(volume.rounded())))
+                publishAppleTVVolumeIfChanged(UInt8(percent))
+            } else if event == "error" || event == "exited" {
+                let reason = object["message"] as? String ?? event
+                invalidateAppleTVCommandSession(token: token, reason: reason)
+            }
         }
     }
 }

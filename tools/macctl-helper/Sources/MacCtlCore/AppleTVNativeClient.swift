@@ -328,7 +328,7 @@ public final class AppleTVNativeCommandSession {
         process.terminationHandler = { [weak self] process in
             self?.output.fileHandleForReading.readabilityHandler = nil
             self?.error.fileHandleForReading.readabilityHandler = nil
-            self?.eventHandler("Apple TV worker exited with \(process.terminationStatus)")
+            self?.eventHandler("{\"event\":\"exited\",\"message\":\"Apple TV worker exited with \(process.terminationStatus)\"}")
         }
         try process.run()
     }
