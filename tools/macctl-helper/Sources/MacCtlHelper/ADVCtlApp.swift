@@ -655,23 +655,24 @@ private final class ADVCtlBridge {
         concealedAudioPacketCount = 0
     }
 
-    private func concealMissingAudioPackets(before sequence: UInt8, payloadBytes: Int) -> Int {
+    private func acceptAudioPacketAndConcealGaps(before sequence: UInt8, payloadBytes: Int) -> Int? {
         guard let expected = expectedAudioFrameSequence, payloadBytes > 0 else {
             expectedAudioFrameSequence = sequence &+ 1
             return 0
         }
 
         let distance = (Int(sequence) - Int(expected) + 256) % 256
-        expectedAudioFrameSequence = sequence &+ 1
         guard distance > 0 else {
+            expectedAudioFrameSequence = sequence &+ 1
             return 0
         }
 
         guard distance <= 127 else {
             log("ADV audio sequence reset or stale packet: expected=\(expected) got=\(sequence)")
-            return 0
+            return nil
         }
 
+        expectedAudioFrameSequence = sequence &+ 1
         let missingPackets = min(distance, advCtlAudioMaxConcealedPackets)
         concealedAudioPacketCount += missingPackets
         let written = audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)
@@ -874,6 +875,9 @@ private final class ADVCtlBridge {
         }
         if payload.count >= 2, payload[0] == advCtlAudioStateReport {
             let active = payload[1] != 0
+            if active == advAudioBridgeActive && advAudioStateAcknowledged {
+                return
+            }
             advAudioStateAcknowledged = active == advAudioBridgeActive
             resetAudioPacketTracking()
             updateMessage(active ? "ADV microphone started" : "ADV microphone stopped")
@@ -888,7 +892,10 @@ private final class ADVCtlBridge {
             let sequence = payload[1]
             let byteCount = min(Int(payload[2]), payload.count - 3)
             if byteCount > 0 {
-                let concealedFrames = concealMissingAudioPackets(before: sequence, payloadBytes: byteCount)
+                guard let concealedFrames = acceptAudioPacketAndConcealGaps(before: sequence,
+                                                                            payloadBytes: byteCount) else {
+                    return
+                }
                 audioFrameCount += 1
                 let writtenFrames = audioSink.enqueueULaw(payload.subdata(in: 3..<(3 + byteCount)))
                 if let expectedFrames = config.expectedAudioFrames, expectedFrames > 0, audioFrameCount >= expectedFrames {

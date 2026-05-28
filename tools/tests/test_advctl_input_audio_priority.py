@@ -245,17 +245,16 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
         self.assertIn("readIndex += UInt64(overflow)", source)
         self.assertNotIn("UInt64(samples.count - capacity)", source)
 
-    def test_mac_audio_bridge_enhances_speech_pcm_before_ring_write(self):
+    def test_mac_audio_bridge_uses_linear_upsampling_without_gain_shape(self):
         source = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlAudioRingSink.swift").read_text()
 
-        self.assertIn("private let advCtlAudioSpeechGain: Float32", source)
-        self.assertIn("private let advCtlAudioHighPassAlpha: Float32", source)
-        self.assertIn("private let advCtlAudioSoftClipKnee: Float32", source)
-        self.assertIn("appendUpsampledSpeechSample(enhanceSpeech(decoded), to: &samples)", source)
+        self.assertIn("appendUpsampledSample(decoded, to: &samples)", source)
         self.assertIn("let fraction = Float32(step) / Float32(advCtlAudioUpsampleFactor)", source)
-        self.assertIn("let highPassed = sample - highPassPreviousInput", source)
-        self.assertIn("let boosted = highPassed * advCtlAudioSpeechGain", source)
-        self.assertIn("resetSpeechEnhancer(to: 0)", source)
+        self.assertIn("previous + delta * fraction", source)
+        self.assertIn("resetUpsampler(to: 0)", source)
+        self.assertNotIn("SpeechGain", source)
+        self.assertNotIn("SoftClip", source)
+        self.assertNotIn("enhanceSpeech", source)
 
     def test_mac_audio_bridge_conceals_best_effort_hid_packet_loss(self):
         app = (ROOT / "tools/macctl-helper/Sources/MacCtlHelper/ADVCtlApp.swift").read_text()
@@ -263,9 +262,11 @@ class AdvCtlInputAudioPriorityTests(unittest.TestCase):
 
         self.assertIn("private let advCtlAudioMaxConcealedPackets = 16", app)
         self.assertIn("private var expectedAudioFrameSequence: UInt8?", app)
-        self.assertIn("private func concealMissingAudioPackets(before sequence: UInt8, payloadBytes: Int) -> Int", app)
+        self.assertIn("private func acceptAudioPacketAndConcealGaps(before sequence: UInt8, payloadBytes: Int) -> Int?", app)
         self.assertIn("let distance = (Int(sequence) - Int(expected) + 256) % 256", app)
         self.assertIn("guard distance <= 127 else", app)
+        self.assertIn("return nil", app)
+        self.assertIn("guard let concealedFrames = acceptAudioPacketAndConcealGaps", app)
         self.assertIn("audioSink.enqueueSilence(uLawSampleCount: missingPackets * payloadBytes)", app)
         self.assertIn("resetAudioPacketTracking()", app[app.index("if payload.count >= 2, payload[0] == advCtlAudioStateReport"):])
         self.assertIn("private let advCtlAudioUpsampleFactor = 6", sink)
